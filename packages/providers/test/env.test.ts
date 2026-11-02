@@ -29,3 +29,30 @@ describe("providers from environment variables", () => {
     expect(() => configuredFromEnv({ ACTUATE_PAYMENT: "billplz" })).toThrow(/apiKey/);
   });
 });
+
+describe("several messaging channels", () => {
+  it("routes send() by channel, defaulting to the first listed", async () => {
+    const { providersFromEnv } = await import("../src/env.js");
+    const calls: string[] = [];
+    const fetch = (async (url: string) => {
+      calls.push(new URL(url).host);
+      return url.includes("telegram") ? Response.json({ ok: true, result: { message_id: 1 } }) : new Response("ok");
+    }) as unknown as typeof globalThis.fetch;
+    const env = {
+      ACTUATE_MESSAGING: "telegram, slack",
+      TELEGRAM_BOT_TOKEN: "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
+      SLACK_WEBHOOK_URL: "https://hooks.slack.com/services/T/B/x",
+    };
+    const p = providersFromEnv(env, "http://localhost:8787", fetch);
+    expect(await p.messaging!.send("1", "hi")).toMatchObject({ channel: "telegram" });
+    expect(await p.messaging!.send("", "team", { channel: "slack" })).toMatchObject({ channel: "slack" });
+    await expect(p.messaging!.send("a@b.co", "x", { channel: "email" })).rejects.toThrow(/No "email" messaging channel.*telegram, slack/);
+    expect(calls).toEqual(["api.telegram.org", "hooks.slack.com"]);
+  });
+
+  it("allows a list only for messaging", async () => {
+    const { configuredFromEnv } = await import("../src/env.js");
+    expect(() => configuredFromEnv({ ACTUATE_LLM: "openai,anthropic" })).toThrow(/only messaging/);
+    expect(() => configuredFromEnv({ ACTUATE_MESSAGING: "slack,slack", SLACK_WEBHOOK_URL: "https://hooks.slack.com/x" })).toThrow(/twice/);
+  });
+});

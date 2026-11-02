@@ -88,6 +88,7 @@ async function main(): Promise<void> {
       for (const cap of ["messaging", "payment", "llm"] as const) {
         console.log(`ACTUATE_${cap.toUpperCase()}=<${Object.values(PROVIDERS).filter((p) => p.capability === cap).map((p) => p.kind).join(" | ")}>`);
       }
+      console.log("Messaging can list several, e.g. ACTUATE_MESSAGING=whatsapp,slack: the first is the default, others are picked with send(..., { channel }).");
       for (const p of Object.values(PROVIDERS)) {
         console.log(`\n${p.label} (ACTUATE_${p.capability.toUpperCase()}=${p.kind})`);
         for (const v of envVarsFor(p.kind)) console.log(`  ${v.name}${v.optional ? "  (optional)" : ""}  ${v.label}`);

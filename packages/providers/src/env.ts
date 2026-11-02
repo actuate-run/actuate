@@ -1,4 +1,5 @@
-import type { Providers } from "@actuate/sdk";
+import type { MessagingProvider, Providers } from "@actuate/sdk";
+import { combineMessaging } from "./multi.js";
 import type { ProviderCapability, ProviderContext, ProviderEvent, ProviderWebhookResult } from "./contract.js";
 import { WebhookVerificationError } from "./contract.js";
 import { PROVIDERS, getProvider, type AnyProviderDefinition } from "./registry.js";
@@ -27,8 +28,9 @@ const CAPABILITIES: ProviderCapability[] = ["messaging", "payment", "llm"];
  * Read provider choices and credentials from environment variables:
  *
  * ```
- * ACTUATE_MESSAGING=telegram
+ * ACTUATE_MESSAGING=telegram,slack     (several: the first is the default channel)
  * TELEGRAM_BOT_TOKEN=123:abc
+ * SLACK_WEBHOOK_URL=https://hooks.slack.com/...
  * ACTUATE_PAYMENT=billplz
  * BILLPLZ_API_KEY=...  BILLPLZ_COLLECTION_ID=...  BILLPLZ_X_SIGNATURE_KEY=...
  * ```
@@ -38,34 +40,52 @@ const CAPABILITIES: ProviderCapability[] = ["messaging", "payment", "llm"];
 export function configuredFromEnv(env: Record<string, unknown>): ConfiguredProvider[] {
   const out: ConfiguredProvider[] = [];
   for (const capability of CAPABILITIES) {
-    const kind = env[`ACTUATE_${capability.toUpperCase()}`];
-    if (typeof kind !== "string" || !kind) continue;
-    const definition = getProvider(kind);
-    if (!definition || definition.capability !== capability) {
-      const options = Object.values(PROVIDERS).filter((p) => p.capability === capability).map((p) => p.kind);
-      throw new Error(`ACTUATE_${capability.toUpperCase()}="${kind}" is not a ${capability} provider. Use one of: ${options.join(", ")}.`);
+    const value = env[`ACTUATE_${capability.toUpperCase()}`];
+    if (typeof value !== "string" || !value.trim()) continue;
+    // Messaging takes a list (the first is the default channel); payment and llm take one.
+    const kinds = value.split(",").map((k) => k.trim()).filter(Boolean);
+    if (kinds.length > 1 && capability !== "messaging") {
+      throw new Error(`ACTUATE_${capability.toUpperCase()} takes one provider; only messaging can list several.`);
     }
-    const input: Record<string, unknown> = {};
-    for (const field of definition.credentialFields) {
-      const value = env[envName(kind, field.key)];
-      if (value !== undefined && value !== "") input[field.key] = value;
-    }
-    out.push({ capability, definition, credentials: definition.parseCredentials(input) });
+    if (new Set(kinds).size !== kinds.length) throw new Error(`ACTUATE_${capability.toUpperCase()} lists a provider twice.`);
+    for (const kind of kinds) out.push(configureFromEnv(env, capability, kind));
   }
   return out;
+}
+
+function configureFromEnv(env: Record<string, unknown>, capability: ProviderCapability, kind: string): ConfiguredProvider {
+  const definition = getProvider(kind);
+  if (!definition || definition.capability !== capability) {
+    const options = Object.values(PROVIDERS).filter((p) => p.capability === capability).map((p) => p.kind);
+    throw new Error(`ACTUATE_${capability.toUpperCase()}="${kind}" is not a ${capability} provider. Use one of: ${options.join(", ")}.`);
+  }
+  const input: Record<string, unknown> = {};
+  for (const field of definition.credentialFields) {
+    const value = env[envName(kind, field.key)];
+    if (value !== undefined && value !== "") input[field.key] = value;
+  }
+  return { capability, definition, credentials: definition.parseCredentials(input) };
 }
 
 /** Build provider clients from {@link configuredFromEnv}. `baseUrl` is the actuator's public origin. */
 export function providersFromEnv(env: Record<string, unknown>, baseUrl: string, fetchImpl: typeof fetch = fetch): Partial<Providers> {
   const providers: Partial<Providers> = {};
+  const messaging: Array<{ kind: string; provider: MessagingProvider }> = [];
   for (const p of configuredFromEnv(env)) {
     const ctx: ProviderContext = {
       fetch: fetchImpl,
       webhookUrl: `${baseUrl}/providers/${p.definition.kind}/webhook`,
       defaultReturnUrl: `${baseUrl}/health`,
     };
-    (providers as Record<string, unknown>)[p.capability] = p.definition.create(p.credentials, ctx);
+    const client = p.definition.create(p.credentials, ctx);
+    if (p.capability === "messaging")
+      messaging.push({
+        kind: p.definition.kind,
+        provider: client as MessagingProvider,
+      });
+    else (providers as Record<string, unknown>)[p.capability] = client;
   }
+  if (messaging.length) providers.messaging = combineMessaging(messaging);
   return providers;
 }
 
@@ -84,5 +104,7 @@ export async function parseProviderWebhookFromEnv(
   if (!configured?.definition.parseWebhook) throw new WebhookVerificationError(`No ${kind} provider is configured.`);
   const reply = configured.definition.handshake?.(request, configured.credentials);
   if (reply != null) return { reply };
-  return configured.definition.parseWebhook(request, configured.credentials, { fetch: fetchImpl });
+  return configured.definition.parseWebhook(request, configured.credentials, {
+    fetch: fetchImpl,
+  });
 }

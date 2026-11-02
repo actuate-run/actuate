@@ -15,7 +15,7 @@ export interface MessagingSendOptions {
    * Default "text".
    */
   format?: "text" | "html";
-  /** Provider-specific channel override, e.g. "telegram" | "whatsapp" | "email". */
+  /** Which configured channel sends, when several are: "telegram", "whatsapp", "slack", "discord" or "email". Default: the first configured. */
   channel?: string;
   /** Email subject, when the channel is email. */
   subject?: string;
