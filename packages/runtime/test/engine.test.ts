@@ -362,6 +362,27 @@ describe("ctx.db and capabilities", () => {
     expect(h.manager.readTable("people").rows).toHaveLength(2);
   });
 
+  it("warns when an already-applied migration is edited", async () => {
+    let first = "CREATE TABLE notes (body TEXT)";
+    const act = defineActuator({
+      name: "mig",
+      description: "test",
+      input: z.object({}),
+      async run(ctx) {
+        await ctx.db.migrate([first]);
+        return {};
+      },
+    });
+    const h = harness(act);
+    const a = await h.start({});
+    expect(h.manager.getLogs(a.run.runId)).toEqual([]);
+    first = "CREATE   TABLE notes (body TEXT)"; // whitespace only: not a change
+    expect(h.manager.getLogs((await h.start({})).run.runId)).toEqual([]);
+    first = "CREATE TABLE notes (body TEXT, at INTEGER)";
+    const c = await h.start({});
+    expect(h.manager.getLogs(c.run.runId)).toMatchObject([{ level: "warn", message: expect.stringMatching(/Migration 0 changed after it was applied/) }]);
+  });
+
   it("requires provider calls inside steps and configured providers", async () => {
     const send = vi.fn(async () => ({ id: "m1", channel: "test" }));
     const act = defineActuator({

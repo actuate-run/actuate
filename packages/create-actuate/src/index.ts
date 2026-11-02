@@ -36,6 +36,8 @@ export default defineActuator({
   description: "Greets someone, waits, then follows up. A starting point for your own actuator.",
   config: ConfigSchema,
   input: InputSchema,
+  // For MCP clients: this tool adds a row and sends nothing outside, so it isn't destructive.
+  hints: { destructive: false, openWorld: false },
   async run(ctx, input, config) {
     await ctx.db.migrate([
       "CREATE TABLE greetings (run_id TEXT PRIMARY KEY, name TEXT NOT NULL, greeted_at TEXT NOT NULL)",

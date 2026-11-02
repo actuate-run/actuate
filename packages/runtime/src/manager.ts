@@ -484,14 +484,25 @@ export class RunManager {
       requestApproval: (step, opts) => this.requestApproval(runId, step, opts),
       query: async (sql, params) => this.sql.exec(sql, params as SqlValue[]),
       migrate: async (statements) => {
+        const changed: number[] = [];
         this.sql.transaction(() => {
-          const applied = Number(this.sql.exec(`SELECT COALESCE(MAX(idx), -1) AS idx FROM _actuate_migrations`)[0]?.idx ?? -1);
+          const done = this.sql.exec(`SELECT idx, statement FROM _actuate_migrations ORDER BY idx`);
+          const applied = done.length ? Number(done[done.length - 1]!.idx) : -1;
+          const norm = (q: unknown) => String(q).replace(/\s+/g, " ").trim();
           statements.forEach((statement, idx) => {
-            if (idx <= applied) return;
+            if (idx <= applied) {
+              const before = done.find((d) => Number(d.idx) === idx);
+              if (before && norm(before.statement) !== norm(statement)) changed.push(idx);
+              return;
+            }
             this.sql.exec(statement);
             this.sql.exec(`INSERT INTO _actuate_migrations (idx, statement, applied_at) VALUES (?, ?, ?)`, [idx, statement, this.now()]);
           });
         });
+        // Migrations are tracked by position: an edited entry is never re-run, which is easy to miss.
+        if (changed.length) {
+          this.writeLog(runId, "warn", `Migration ${changed.join(", ")} changed after it was applied and was not re-run. Append a new migration instead of editing one.`);
+        }
       },
       log: (level, message, data) => this.writeLog(runId, level, message, data),
     };
