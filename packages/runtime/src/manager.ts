@@ -417,6 +417,29 @@ export class RunManager {
     return ids.length;
   }
 
+  /**
+   * Bring forward runs whose passes were deferred (actuator paused, budget
+   * spent): their wake time is the deferral, not anything the run waits for.
+   * Sets them due now and reschedules, so the next alarm picks them up. Runs
+   * genuinely sleeping or waiting keep their wake time. Returns how many moved.
+   */
+  wakeDeferred(limit = 500): number {
+    const now = this.now();
+    const ids = this.sql
+      .exec(
+        `SELECT r.run_id FROM _actuate_runs r
+          WHERE r.status = 'WAITING' AND r.wake_at IS NOT NULL AND r.wake_at > ?
+            AND r.wake_at IS NOT (SELECT MIN(s.wake_at) FROM _actuate_steps s
+                                   WHERE s.run_id = r.run_id AND s.status IN ${WAITING_STEP} AND s.wake_at IS NOT NULL)
+          LIMIT ?`,
+        [now, limit],
+      )
+      .map((r) => String(r.run_id));
+    for (const id of ids) this.sql.exec(`UPDATE _actuate_runs SET wake_at = ? WHERE run_id = ?`, [now, id]);
+    if (ids.length) void this.reschedule();
+    return ids.length;
+  }
+
   nextWakeAt(): number | null {
     const row = this.sql.exec(`SELECT MIN(wake_at) AS wake_at FROM _actuate_runs WHERE status = 'WAITING' AND wake_at IS NOT NULL`)[0];
     return (row?.wake_at as number | null) ?? null;
@@ -579,8 +602,11 @@ export class RunManager {
   }
 
   /**
-   * Newest first. Page with `before`: a run ID (exact, no ties) or a createdAt
-   * timestamp. Run IDs are time-sortable, so the primary key orders the list.
+   * Newest first. Page with `before`: the last run ID of the previous page
+   * (exact keyset on the primary key, so runs created in the same millisecond
+   * are never skipped or repeated), or, for older clients, a createdAt
+   * timestamp (strictly older; ties with the timestamp are skipped).
+   * Run IDs are time-sortable, so the primary key orders the list for free.
    */
   listRuns(opts: { limit?: number; before?: number | string; status?: RunStatus } = {}): RunRecord[] {
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
@@ -655,18 +681,70 @@ export class RunManager {
       .map((r) => String(r.name));
   }
 
-  /** Read rows from a user table for the table browser and exports. */
-  readTable(table: string, opts: { limit?: number; offset?: number } = {}): { columns: string[]; rows: Row[] } {
+  /**
+   * Row counts for the table list. Counting reads (and bills) every row it
+   * counts, so each count stops at `cap`: `capped` means "at least `rows`".
+   */
+  tableCounts(cap = TABLE_COUNT_CAP): Array<{ name: string; rows: number; capped: boolean }> {
+    return this.listTables().map((name) => ({ name, ...this.countRows(name, cap) }));
+  }
+
+  /** Rows in one user table, counting at most `cap` (and reading at most `cap + 1` rows). */
+  countRows(table: string, cap = TABLE_COUNT_CAP): { rows: number; capped: boolean } {
     if (!this.listTables().includes(table)) throw new UnknownTableError(table);
-    const quoted = `"${table.replace(/"/g, '""')}"`;
+    const max = Math.max(1, Math.floor(cap));
+    const n = Number(this.sql.exec(`SELECT count(*) AS n FROM (SELECT 1 FROM ${quoteIdent(table)} LIMIT ?)`, [max + 1])[0]?.n ?? 0);
+    return { rows: Math.min(n, max), capped: n > max };
+  }
+
+  /**
+   * Read rows from a user table for the table browser and exports.
+   * Page with `offset`, or with `cursor` (pass `""` for the first page, then
+   * the returned `next`): keyset paging on the rowid, so each page reads only
+   * its own rows. Tables without a rowid fall back to offsets inside the cursor.
+   */
+  readTable(
+    table: string,
+    opts: { limit?: number; offset?: number; cursor?: string } = {},
+  ): { columns: string[]; rows: Row[]; next?: string | null } {
+    if (!this.listTables().includes(table)) throw new UnknownTableError(table);
+    const quoted = quoteIdent(table);
+    const limit = Math.min(Math.max(opts.limit ?? 100, 1), 10_000);
     const columns = this.sql.exec(`SELECT name FROM pragma_table_info(?)`, [table]).map((r) => String(r.name));
-    const rows = this.sql.exec(`SELECT * FROM ${quoted} LIMIT ? OFFSET ?`, [
-      Math.min(Math.max(opts.limit ?? 100, 1), 10_000),
-      Math.max(opts.offset ?? 0, 0),
-    ]);
-    return { columns, rows };
+    if (opts.cursor === undefined) {
+      const rows = this.sql.exec(`SELECT * FROM ${quoted} LIMIT ? OFFSET ?`, [limit, Math.max(opts.offset ?? 0, 0)]);
+      return { columns, rows };
+    }
+    const offsetPage = (offset: number) => {
+      const rows = this.sql.exec(`SELECT * FROM ${quoted} LIMIT ? OFFSET ?`, [limit, offset]);
+      return { columns, rows, next: rows.length === limit ? `o${offset + limit}` : null };
+    };
+    if (opts.cursor.startsWith("o")) return offsetPage(Math.max(Number(opts.cursor.slice(1)) || 0, 0));
+    // A rowid alias the table doesn't shadow with a real column.
+    const lower = new Set(columns.map((c) => c.toLowerCase()));
+    const alias = ["rowid", "_rowid_", "oid"].find((a) => !lower.has(a));
+    if (!alias || lower.has(CURSOR_COLUMN)) return offsetPage(0);
+    const after = opts.cursor.startsWith("r") ? opts.cursor.slice(1) : "";
+    if (after && !/^-?\d+$/.test(after)) throw new Error("Invalid table cursor");
+    let rows: Row[];
+    try {
+      rows = this.sql.exec(
+        `SELECT CAST(${alias} AS TEXT) AS ${CURSOR_COLUMN}, * FROM ${quoted}${after ? ` WHERE ${alias} > CAST(? AS INTEGER)` : ""} ORDER BY ${alias} LIMIT ?`,
+        after ? [after, limit] : [limit],
+      );
+    } catch {
+      return offsetPage(0); // WITHOUT ROWID table
+    }
+    const last = rows.at(-1)?.[CURSOR_COLUMN];
+    for (const r of rows) delete r[CURSOR_COLUMN];
+    return { columns, rows, next: rows.length === limit && last != null ? `r${String(last)}` : null };
   }
 }
+
+/** Where a table count stops (rows read per table, per listing). */
+export const TABLE_COUNT_CAP = 10_000;
+const CURSOR_COLUMN = "__actuate_cursor";
+const quoteIdent = (name: string) => `"${name.replace(/"/g, '""')}"`;
 
 export class UnknownTableError extends Error {
   constructor(readonly table: string) {

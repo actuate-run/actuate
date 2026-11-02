@@ -711,3 +711,113 @@ describe("waitForInput, approval notes, waitForEvent until", () => {
     expect((await harness(act, { manager: { passLimits: { maxWaitMs: 7 * 86_400_000 } } }).start()).run.error?.message).toMatch(/longer than this plan allows/);
   });
 });
+
+describe("dashboard reads", () => {
+  const noop = defineActuator({ name: "noop", description: "test", input: z.object({}), async run() {} });
+
+  it("pages runs by run ID without skipping or repeating runs created in the same millisecond", async () => {
+    const h = harness(noop); // the clock is frozen: every run shares one createdAt
+    const started: string[] = [];
+    for (let i = 0; i < 23; i++) started.push((await h.start()).run.runId);
+    expect(new Set(h.manager.listRuns({ limit: 500 }).map((r) => r.createdAt)).size).toBe(1);
+
+    const seen: string[] = [];
+    let before: string | undefined;
+    for (;;) {
+      const page = h.manager.listRuns({ limit: 5, ...(before ? { before } : {}) });
+      seen.push(...page.map((r) => r.runId));
+      if (page.length < 5) break;
+      before = page.at(-1)!.runId;
+    }
+    expect(seen).toHaveLength(23);
+    expect(new Set(seen)).toEqual(new Set(started));
+    expect(seen).toEqual([...seen].sort().reverse());
+    // A createdAt cursor (older clients) can't break the tie: it skips the rest.
+    expect(h.manager.listRuns({ limit: 5, before: h.manager.listRuns({ limit: 5 }).at(-1)!.createdAt })).toHaveLength(0);
+  });
+
+  it("counts table rows up to a cap", () => {
+    const sql = nodeSqlite(new DatabaseSync(":memory:"));
+    const h = harness(noop, { manager: { sql } });
+    sql.exec("CREATE TABLE small (x)");
+    sql.exec("CREATE TABLE big (x)");
+    sql.exec("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 30) INSERT INTO big SELECT i FROM n");
+    sql.exec("INSERT INTO small VALUES (1), (2)");
+    expect(h.manager.tableCounts(25)).toEqual([
+      { name: "big", rows: 25, capped: true },
+      { name: "small", rows: 2, capped: false },
+    ]);
+    expect(h.manager.tableCounts(30)[0]).toEqual({ name: "big", rows: 30, capped: false });
+    expect(h.manager.countRows("big", 29)).toEqual({ rows: 29, capped: true });
+    expect(() => h.manager.countRows("nope")).toThrow(/Unknown table/);
+  });
+
+  it("pages a table with a cursor: rowid keyset, or offsets for tables without a rowid", () => {
+    const sql = nodeSqlite(new DatabaseSync(":memory:"));
+    const h = harness(noop, { manager: { sql } });
+    sql.exec("CREATE TABLE plain (name TEXT)");
+    sql.exec("CREATE TABLE shadow (rowid TEXT, _rowid_ TEXT, v INTEGER)");
+    sql.exec("CREATE TABLE keyed (k TEXT PRIMARY KEY, v INTEGER) WITHOUT ROWID");
+    for (let i = 0; i < 12; i++) {
+      sql.exec("INSERT INTO plain VALUES (?)", [`n${i}`]);
+      sql.exec("INSERT INTO shadow VALUES ('x', 'y', ?)", [i]);
+      sql.exec("INSERT INTO keyed VALUES (?, ?)", [`k${String(i).padStart(2, "0")}`, i]);
+    }
+    sql.exec("DELETE FROM plain WHERE name = 'n3'"); // a gap in the rowids
+
+    const all = (table: string) => {
+      const rows: Array<Record<string, unknown>> = [];
+      const cursors: Array<string | null | undefined> = [];
+      let cursor = "";
+      for (;;) {
+        const page = h.manager.readTable(table, { limit: 5, cursor });
+        rows.push(...page.rows);
+        cursors.push(page.next);
+        if (!page.next) break;
+        cursor = page.next;
+      }
+      return { rows, cursors };
+    };
+    const plain = all("plain");
+    expect(plain.rows.map((r) => r.name)).toEqual(["n0", "n1", "n2", "n4", "n5", "n6", "n7", "n8", "n9", "n10", "n11"]);
+    expect(plain.rows[0]).toEqual({ name: "n0" }); // no cursor column leaks into rows
+    expect(plain.cursors[0]).toMatch(/^r\d+$/);
+    const shadow = all("shadow");
+    expect(shadow.rows.map((r) => r.v)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(shadow.rows[0]).toEqual({ rowid: "x", _rowid_: "y", v: 0 });
+    const keyed = all("keyed");
+    expect(keyed.rows.map((r) => r.v)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(keyed.cursors[0]).toBe("o5");
+    expect(() => h.manager.readTable("plain", { cursor: "r1; DROP TABLE plain" })).toThrow(/cursor/);
+    // Offset paging is unchanged.
+    expect(h.manager.readTable("plain", { limit: 2, offset: 1 })).toEqual({ columns: ["name"], rows: [{ name: "n1" }, { name: "n2" }] });
+  });
+
+  it("wakes passes deferred while paused, but not runs still sleeping", async () => {
+    const sleeper = defineActuator({
+      name: "sleeper",
+      description: "test",
+      input: z.object({ ms: z.number() }),
+      async run(ctx, input) {
+        await ctx.step.sleep("nap", input.ms);
+        return "woke";
+      },
+    });
+    let paused = false;
+    const h = harness(sleeper, { manager: { admitPass: () => (paused ? Date.parse("2026-11-02T00:00:00Z") + 3_600_000 : null) } });
+    const short = (await h.start({ ms: 60_000 })).run;
+    const long = (await h.start({ ms: 86_400_000 })).run;
+    paused = true;
+    await h.advance(60_000); // the short nap is due, but the pass is deferred an hour
+    expect(h.manager.getRun(short.runId)).toMatchObject({ status: "WAITING", wakeAt: Date.parse("2026-11-02T01:00:00Z") });
+
+    paused = false; // resumed
+    expect(h.manager.wakeDeferred()).toBe(1);
+    expect(h.manager.getRun(short.runId)!.wakeAt).toBe(Date.parse("2026-11-02T00:01:00Z"));
+    expect(h.wakes.at(-1)).toBe(Date.parse("2026-11-02T00:01:00Z"));
+    await h.advance(0);
+    expect(h.manager.getRun(short.runId)).toMatchObject({ status: "COMPLETED", output: "woke" });
+    expect(h.manager.getRun(long.runId)).toMatchObject({ status: "WAITING", wakeAt: long.wakeAt });
+    expect(h.manager.wakeDeferred()).toBe(0);
+  });
+});
