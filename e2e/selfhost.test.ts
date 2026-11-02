@@ -52,7 +52,7 @@ beforeAll(async () => {
     compatibilityDate: "2025-09-01",
     compatibilityFlags: ["nodejs_compat"],
     durableObjects: { ACTUATOR: { className: "ActuatorObject", useSQLite: true } },
-    bindings: { ACTUATE_CONFIG: JSON.stringify({ greeting: "Hello" }), ACTUATE_TOKEN: "admin" },
+    bindings: { ACTUATE_CONFIG: JSON.stringify({ greeting: "Hello" }), ACTUATE_TOKEN: "admin", ACTUATE_WEBHOOK_SECRET: "whs_test" },
   });
 }, 60_000);
 
@@ -146,5 +146,26 @@ describe("self-hosted runtime on workerd", () => {
     expect((await call(`/runs/${started.body.runId}/inputs/why`, { json: { text: "x" } })).status).toBe(401);
     expect((await call(`/runs/${started.body.runId}/inputs/why`, { headers: auth, json: { text: "Because" } })).body.ok).toBe(true);
     expect((await call(`/runs/${started.body.runId}`, { headers: auth })).body.output).toEqual({ status: "Because" });
+  });
+
+  it("accepts webhooks by secret or signature, and dedupes signed replays by signature", async () => {
+    const body = JSON.stringify({ name: "Hook", mode: "sleep" });
+    const post = (headers: Record<string, string>, b = body) =>
+      mf.dispatchFetch(`${base}/webhook`, { method: "POST", body: b, headers: { "content-type": "application/json", ...headers } });
+    expect((await post({})).status).toBe(401);
+    expect((await post({ "x-actuate-secret": "nope" })).status).toBe(401);
+    expect((await post({ "x-actuate-secret": "whs_test" })).status).toBe(201);
+
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("whs_test"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const mac = Buffer.from(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body))).toString("hex");
+    expect((await post({ "x-hub-signature-256": `sha256=${"0".repeat(64)}` })).status).toBe(401);
+    const first = await post({ "x-hub-signature-256": `sha256=${mac}`, "x-github-delivery": "d1" });
+    expect(first.status).toBe(201);
+    const runId = ((await first.json()) as { runId: string }).runId;
+    // Same signed body, new (unsigned) delivery ID and idempotency key: the same run, not a new one.
+    const replay = await post({ "x-hub-signature-256": `sha256=${mac}`, "x-github-delivery": "d2", "idempotency-key": "other" });
+    expect(replay.status).toBe(200);
+    expect(((await replay.json()) as { runId: string }).runId).toBe(runId);
+    expect((await post({ "x-hub-signature-256": `sha256=${mac}` }, body + " ")).status).toBe(401);
   });
 });

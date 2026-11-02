@@ -12,7 +12,7 @@ export interface RuntimeEnv {
   ACTUATE_CONFIG?: string;
   /** Bearer token required for the admin API (runs, events, tables). Unset means open (local dev only). */
   ACTUATE_TOKEN?: string;
-  /** Shared secret for POST /webhook, sent as `x-actuate-secret` or `?secret=`. */
+  /** Secret for POST /webhook: sent as `x-actuate-secret` or `?secret=`, or used to sign the body (`X-Hub-Signature-256`). */
   ACTUATE_WEBHOOK_SECRET?: string;
   /** HMAC secret for approval links. Generated and stored on first use if unset. */
   ACTUATE_APPROVAL_SECRET?: string;
@@ -36,6 +36,13 @@ export interface RuntimeOptions<E extends RuntimeEnv = RuntimeEnv> {
   providerWebhook?: (kind: string, request: Request, env: E) => Promise<{ event: string; payload: Json } | null>;
   /** Runtime guards passed to the RunManager (wait/retry limits, pass admission, event caps, max passes). */
   guards?: Pick<RunManagerOptions, "passLimits" | "admitPass" | "maxBufferedEvents" | "maxEventBytes" | "maxPasses" | "maxLogLinesPerPass">;
+}
+
+async function hmacSha256Hex(secret: string, body: string): Promise<string> {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(body)));
+  return Array.from(mac, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -210,9 +217,19 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
         if (path === "/webhook" && method === "POST") {
           const secret = this.env.ACTUATE_WEBHOOK_SECRET;
           if (!secret && !dev) return json({ error: "Set ACTUATE_WEBHOOK_SECRET to accept webhooks." }, 503);
-          const given = request.headers.get("x-actuate-secret") ?? url.searchParams.get("secret") ?? "";
-          if (secret && !safeEqual(given, secret)) return json({ error: "unauthorized" }, 401);
-          return this.startRun(request, "webhook");
+          if (!secret) return this.startRun(request, "webhook");
+          const given = request.headers.get("x-actuate-secret") ?? url.searchParams.get("secret");
+          if (given !== null) {
+            if (!safeEqual(given, secret)) return json({ error: "unauthorized" }, 401);
+            return this.startRun(request, "webhook");
+          }
+          // GitHub-style signature of the body. Headers aren't signed, so a captured request could be
+          // replayed with a new Idempotency-Key or X-GitHub-Delivery: the signature itself is the key.
+          const sig = request.headers.get("x-hub-signature-256") ?? "";
+          if (!sig.startsWith("sha256=")) return json({ error: "unauthorized" }, 401);
+          const raw = await request.text();
+          if (!safeEqual(sig.slice(7), await hmacSha256Hex(secret, raw))) return json({ error: "unauthorized" }, 401);
+          return this.startRun(new Request(request.url, { method: "POST", body: raw }), "webhook", `sig:${sig.slice(7, 39)}`);
         }
 
         // Admin routes.
@@ -307,12 +324,12 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
       }
     }
 
-    private async startRun(request: Request, kind: "api" | "webhook"): Promise<Response> {
+    private async startRun(request: Request, kind: "api" | "webhook", signedKey?: string): Promise<Response> {
       const body = await request.json().catch(() => undefined);
       if (body === undefined) return json({ error: "Request body must be JSON." }, 400);
       const parsed = actuator.input.safeParse(body);
       if (!parsed.success) return json({ error: "Invalid input", issues: parsed.error.issues }, 400);
-      const idempotencyKey = request.headers.get("idempotency-key") ?? undefined;
+      const idempotencyKey = signedKey ?? request.headers.get("idempotency-key") ?? request.headers.get("x-github-delivery") ?? undefined;
       const { run, created } = await this.manager.start({
         input: parsed.data as Json,
         trigger: { kind },
