@@ -228,6 +228,7 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
         if (path === "/tables" && method === "GET") return json(m.listTables());
         const tableMatch = /^\/tables\/([^/]+)$/.exec(path);
         if (tableMatch && method === "GET") {
+          if (!m.listTables().includes(decodeURIComponent(tableMatch[1]!))) return json({ error: "Unknown table" }, 404);
           const data = m.readTable(decodeURIComponent(tableMatch[1]!), {
             limit: Number(url.searchParams.get("limit") ?? 100),
             offset: Number(url.searchParams.get("offset") ?? 0),

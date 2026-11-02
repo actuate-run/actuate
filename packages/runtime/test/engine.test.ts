@@ -233,7 +233,7 @@ describe("waitForApproval", () => {
     expect(run.status).toBe("WAITING");
     expect(h.approvals).toHaveLength(1);
     expect(h.approvals[0]).toMatchObject({ runId: run.runId, step: "manager-ok", notify: "boss", message: "Refund RM80?" });
-    expect(h.manager.pendingApprovals()).toHaveLength(1);
+    expect(h.manager.pendingApprovals()).toMatchObject([{ step: "manager-ok", message: "Refund RM80?" }]);
 
     const result = await h.manager.decide(tokenOf(h.approvals[0]!.approveUrl));
     expect(result).toMatchObject({ ok: true, approved: true });

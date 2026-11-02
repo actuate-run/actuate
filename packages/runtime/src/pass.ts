@@ -231,7 +231,13 @@ class Pass {
 
       const expiresAt = this.now() + parseDuration(options.timeout ?? DEFAULT_APPROVAL_TIMEOUT);
       await this.write(
-        this.row(name, { status: "WAITING_APPROVAL", event: approvalEventKey(this.request.runId, name), wake_at: expiresAt }),
+        // While waiting, output_json holds the request so the approval queue can show what is being approved.
+        this.row(name, {
+          status: "WAITING_APPROVAL",
+          event: approvalEventKey(this.request.runId, name),
+          wake_at: expiresAt,
+          output_json: toJson({ message: options.message ?? null }),
+        }),
       );
       await this.journal.requestApproval(name, { ...options, expiresAt });
       this.suspend(`waiting for approval "${name}"`);

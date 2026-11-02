@@ -434,12 +434,13 @@ export class RunManager {
   }
 
   /** Steps waiting for a human decision, oldest first: the approval queue. */
-  pendingApprovals(): Array<{ runId: string; step: string; expiresAt: number | null; since: number }> {
+  pendingApprovals(): Array<{ runId: string; step: string; message: string | null; expiresAt: number | null; since: number }> {
     return this.sql
-      .exec(`SELECT run_id, step_name, wake_at, updated_at FROM _actuate_steps WHERE status = 'WAITING_APPROVAL' ORDER BY updated_at`)
+      .exec(`SELECT run_id, step_name, output_json, wake_at, updated_at FROM _actuate_steps WHERE status = 'WAITING_APPROVAL' ORDER BY updated_at`)
       .map((r) => ({
         runId: String(r.run_id),
         step: String(r.step_name),
+        message: (fromJson<{ message?: string | null } | null>((r.output_json as string | null) ?? null)?.message ?? null),
         expiresAt: (r.wake_at as number | null) ?? null,
         since: Number(r.updated_at),
       }));
@@ -456,7 +457,7 @@ export class RunManager {
 
   /** Read rows from a user table for the table browser and exports. */
   readTable(table: string, opts: { limit?: number; offset?: number } = {}): { columns: string[]; rows: Row[] } {
-    if (!this.listTables().includes(table)) throw new Error(`Unknown table "${table}"`);
+    if (!this.listTables().includes(table)) throw new UnknownTableError(table);
     const quoted = `"${table.replace(/"/g, '""')}"`;
     const columns = this.sql.exec(`SELECT name FROM pragma_table_info(?)`, [table]).map((r) => String(r.name));
     const rows = this.sql.exec(`SELECT * FROM ${quoted} LIMIT ? OFFSET ?`, [
@@ -464,6 +465,13 @@ export class RunManager {
       Math.max(opts.offset ?? 0, 0),
     ]);
     return { columns, rows };
+  }
+}
+
+export class UnknownTableError extends Error {
+  constructor(readonly table: string) {
+    super(`Unknown table "${table}"`);
+    this.name = "UnknownTableError";
   }
 }
 
