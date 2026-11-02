@@ -2,15 +2,18 @@ import type { ProviderCapability, ProviderDefinition } from "./contract.js";
 import { anthropic } from "./anthropic.js";
 import { billplz } from "./billplz.js";
 import { chip } from "./chip.js";
+import { discord } from "./discord.js";
 import { google } from "./google.js";
 import { openai } from "./openai.js";
+import { openaiCompatible } from "./openai-compatible.js";
 import { resend } from "./resend.js";
+import { slack } from "./slack.js";
 import { stripe } from "./stripe.js";
 import { telegram } from "./telegram.js";
 import { toyyibpay } from "./toyyibpay.js";
 import { whatsapp } from "./whatsapp.js";
 
-export { anthropic, billplz, chip, google, openai, resend, stripe, telegram, toyyibpay, whatsapp };
+export { anthropic, billplz, chip, discord, google, openai, openaiCompatible, resend, slack, stripe, telegram, toyyibpay, whatsapp };
 export { NotSupportedError, ProviderApiError } from "./util.js";
 export { verifyStripeSignature } from "./stripe.js";
 export { billplzSignature } from "./billplz.js";
@@ -22,6 +25,8 @@ export type AnyProviderDefinition = ProviderDefinition<any, ProviderCapability>;
 export const PROVIDERS = {
   telegram,
   whatsapp,
+  slack,
+  discord,
   resend,
   stripe,
   toyyibpay,
@@ -30,6 +35,7 @@ export const PROVIDERS = {
   anthropic,
   openai,
   google,
+  "openai-compatible": openaiCompatible,
 } as const satisfies Record<string, AnyProviderDefinition>;
 
 export type ProviderKind = keyof typeof PROVIDERS;

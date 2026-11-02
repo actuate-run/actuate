@@ -5,7 +5,7 @@ import { PROVIDERS, getProvider, type AnyProviderDefinition } from "./registry.j
 
 /** `botToken` → `BOT_TOKEN`, `xSignatureKey` → `X_SIGNATURE_KEY`. */
 export function envName(kind: string, field: string): string {
-  return `${kind}_${field.replace(/([a-z0-9])([A-Z])/g, "$1_$2")}`.toUpperCase();
+  return `${kind.replace(/-/g, "_")}_${field.replace(/([a-z0-9])([A-Z])/g, "$1_$2")}`.toUpperCase();
 }
 
 /** The environment variables a provider reads, e.g. telegram → ["TELEGRAM_BOT_TOKEN", ...]. */
