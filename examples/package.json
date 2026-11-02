@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json && actuate check refund-order.ts"
+    "typecheck": "tsc -p tsconfig.json && node ../packages/cli/dist/bin.js check refund-order.ts"
   },
   "devDependencies": {
     "@actuate/cli": "workspace:*",
