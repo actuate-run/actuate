@@ -42,10 +42,16 @@ export function wranglerConfig(meta: { name: string; cron: string[] }, vars: Rec
 export function devEntry(actuatorPath: string, port: number): string {
   return `import { createRuntime } from ${JSON.stringify(cliResolve("@actuate/runtime/worker"))};
 import { devProviders } from ${JSON.stringify(cliResolve("@actuate/runtime"))};
+import { providersFromEnv, parseProviderWebhookFromEnv } from ${JSON.stringify(cliResolve("@actuate/providers"))};
 import actuator from ${JSON.stringify(actuatorPath)};
 
+// Real providers where .dev.vars selects them (ACTUATE_MESSAGING=telegram, ...); console and fake payments otherwise.
 const runtime = createRuntime(actuator, {
-  providers: (_env, publicUrl) => devProviders(publicUrl || "http://localhost:${port}"),
+  providers: (env, publicUrl) => {
+    const base = publicUrl || "http://localhost:${port}";
+    return { ...devProviders(base), ...providersFromEnv(env, base) };
+  },
+  providerWebhook: (kind, request, env) => parseProviderWebhookFromEnv(env, kind, request),
 });
 export default runtime.worker;
 export const ActuatorObject = runtime.ActuatorObject;
@@ -98,7 +104,7 @@ export async function dev(options: DevOptions): Promise<void> {
   List runs:       curl localhost:${options.port}/runs
   Post an event:   curl -X POST localhost:${options.port}/events/<key> -d '{}'
   Tables:          curl localhost:${options.port}/tables
-  Messages and payment links are printed here instead of sent.
+  ${meta.capabilities.filter((c) => c !== "http").length ? "Providers not set in .dev.vars print to this console (see `actuate providers`)." : ""}
 `);
 
   const wrangler = join(packageDir("wrangler"), "bin", "wrangler.js");

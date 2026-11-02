@@ -22,6 +22,8 @@ npm create actuate my-bot
 cd my-bot && npm install && npx actuate dev
 ```
 
+Locally, messages print to the console and payments are faked unless you pick real providers in `.dev.vars` (`actuate providers` lists the variables), e.g. `ACTUATE_MESSAGING=telegram` and `TELEGRAM_BOT_TOKEN=...`.
+
 ## Packages
 
 | Package | What it is |
@@ -29,6 +31,7 @@ cd my-bot && npm install && npx actuate dev
 | [`@actuate/sdk`](packages/sdk) | `defineActuator`, `ctx.step.*`, `ctx.db`, provider types |
 | [`@actuate/runtime`](packages/runtime) | The step engine: journal, replay, sleeps, events, approvals. Runs on `workerd` with SQLite, so you can self-host |
 | [`@actuate/cli`](packages/cli) | The `actuate` command: `init`, `dev`, `check`, `deploy`, `run`, `logs` |
+| [`@actuate/providers`](packages/providers) | Bring-your-own-credentials adapters: Telegram, WhatsApp Cloud, Resend, Stripe, Chip, ToyyibPay, Billplz, Anthropic, OpenAI, Google |
 | [`create-actuate`](packages/create-actuate) | `npm create actuate` |
 
 ## How the step engine works

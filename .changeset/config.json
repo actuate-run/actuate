@@ -3,7 +3,7 @@
   "changelog": "@changesets/cli/changelog",
   "commit": false,
   "fixed": [],
-  "linked": [["@actuate/sdk", "@actuate/runtime", "@actuate/cli"]],
+  "linked": [["@actuate/sdk", "@actuate/runtime", "@actuate/cli", "@actuate/providers"]],
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",

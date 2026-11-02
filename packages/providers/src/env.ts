@@ -1,0 +1,86 @@
+import type { Providers } from "@actuate/sdk";
+import type { ProviderCapability, ProviderContext, ProviderEvent } from "./contract.js";
+import { WebhookVerificationError } from "./contract.js";
+import { PROVIDERS, getProvider, type AnyProviderDefinition } from "./registry.js";
+
+/** `botToken` → `BOT_TOKEN`, `xSignatureKey` → `X_SIGNATURE_KEY`. */
+export function envName(kind: string, field: string): string {
+  return `${kind}_${field.replace(/([a-z0-9])([A-Z])/g, "$1_$2")}`.toUpperCase();
+}
+
+/** The environment variables a provider reads, e.g. telegram → ["TELEGRAM_BOT_TOKEN", ...]. */
+export function envVarsFor(kind: string): Array<{ name: string; optional: boolean; label: string }> {
+  const def = getProvider(kind);
+  if (!def) throw new Error(`Unknown provider "${kind}"`);
+  return def.credentialFields.map((f) => ({ name: envName(kind, f.key), optional: Boolean(f.optional), label: f.label }));
+}
+
+export interface ConfiguredProvider {
+  capability: ProviderCapability;
+  definition: AnyProviderDefinition;
+  credentials: unknown;
+}
+
+const CAPABILITIES: ProviderCapability[] = ["messaging", "payment", "llm"];
+
+/**
+ * Read provider choices and credentials from environment variables:
+ *
+ * ```
+ * ACTUATE_MESSAGING=telegram
+ * TELEGRAM_BOT_TOKEN=123:abc
+ * ACTUATE_PAYMENT=billplz
+ * BILLPLZ_API_KEY=...  BILLPLZ_COLLECTION_ID=...  BILLPLZ_X_SIGNATURE_KEY=...
+ * ```
+ *
+ * Capabilities without an `ACTUATE_<CAPABILITY>` variable are left out.
+ */
+export function configuredFromEnv(env: Record<string, unknown>): ConfiguredProvider[] {
+  const out: ConfiguredProvider[] = [];
+  for (const capability of CAPABILITIES) {
+    const kind = env[`ACTUATE_${capability.toUpperCase()}`];
+    if (typeof kind !== "string" || !kind) continue;
+    const definition = getProvider(kind);
+    if (!definition || definition.capability !== capability) {
+      const options = Object.values(PROVIDERS).filter((p) => p.capability === capability).map((p) => p.kind);
+      throw new Error(`ACTUATE_${capability.toUpperCase()}="${kind}" is not a ${capability} provider. Use one of: ${options.join(", ")}.`);
+    }
+    const input: Record<string, unknown> = {};
+    for (const field of definition.credentialFields) {
+      const value = env[envName(kind, field.key)];
+      if (value !== undefined && value !== "") input[field.key] = value;
+    }
+    out.push({ capability, definition, credentials: definition.parseCredentials(input) });
+  }
+  return out;
+}
+
+/** Build provider clients from {@link configuredFromEnv}. `baseUrl` is the actuator's public origin. */
+export function providersFromEnv(env: Record<string, unknown>, baseUrl: string, fetchImpl: typeof fetch = fetch): Partial<Providers> {
+  const providers: Partial<Providers> = {};
+  for (const p of configuredFromEnv(env)) {
+    const ctx: ProviderContext = {
+      fetch: fetchImpl,
+      webhookUrl: `${baseUrl}/providers/${p.definition.kind}/webhook`,
+      defaultReturnUrl: `${baseUrl}/health`,
+    };
+    (providers as Record<string, unknown>)[p.capability] = p.definition.create(p.credentials, ctx);
+  }
+  return providers;
+}
+
+/**
+ * Verify an inbound provider webhook (e.g. POST /providers/billplz/webhook) and
+ * translate it into an actuator event. Returns null for valid but irrelevant
+ * webhooks; throws WebhookVerificationError for bad signatures.
+ */
+export async function parseProviderWebhookFromEnv(
+  env: Record<string, unknown>,
+  kind: string,
+  request: Request,
+  fetchImpl: typeof fetch = fetch,
+): Promise<ProviderEvent | null> {
+  const configured = configuredFromEnv(env).find((p) => p.definition.kind === kind);
+  if (!configured?.definition.parseWebhook) throw new WebhookVerificationError(`No ${kind} provider is configured.`);
+  return configured.definition.parseWebhook(request, configured.credentials, { fetch: fetchImpl });
+}

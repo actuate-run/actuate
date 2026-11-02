@@ -6,6 +6,7 @@
     "@actuate/runtime": "workspace:*",
     "@actuate/sdk": "workspace:*",
     "esbuild": "^0.25.0",
-    "miniflare": "^4.20251101.0"
+    "miniflare": "^4.20251101.0",
+    "@actuate/providers": "workspace:*"
   }
 }

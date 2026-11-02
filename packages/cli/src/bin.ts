@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { scaffold } from "create-actuate";
+import { PROVIDERS, envVarsFor } from "@actuate/providers";
 import { DEFAULT_API_URL, api, readCredentials, writeCredentials, type Credentials } from "./api.js";
 import { checkSource, formatDiagnostic } from "./check.js";
 import { deploy } from "./deploy.js";
@@ -18,6 +19,7 @@ Usage
   actuate run '<json>' [--local]           Start a run with this input
   actuate logs [runId] [--local]           List recent runs, or show one run's steps and logs
   actuate login [--token <t>] [--api <url>]
+  actuate providers                        List providers and the .dev.vars entries each one reads
 
   [file] defaults to actuator.ts. --local targets \`actuate dev\` on localhost:8787.
 `;
@@ -76,6 +78,18 @@ async function main(): Promise<void> {
       const errors = diagnostics.filter((d) => d.severity === "error").length;
       console.log(diagnostics.length ? `\n${errors} error(s), ${diagnostics.length - errors} warning(s)` : "✓ No replay-safety problems found");
       if (errors) process.exitCode = 1;
+      return;
+    }
+    case "providers": {
+      console.log("Select a provider per capability in .dev.vars (local) and set its credentials:\n");
+      for (const cap of ["messaging", "payment", "llm"] as const) {
+        console.log(`ACTUATE_${cap.toUpperCase()}=<${Object.values(PROVIDERS).filter((p) => p.capability === cap).map((p) => p.kind).join(" | ")}>`);
+      }
+      for (const p of Object.values(PROVIDERS)) {
+        console.log(`\n${p.label} (ACTUATE_${p.capability.toUpperCase()}=${p.kind})`);
+        for (const v of envVarsFor(p.kind)) console.log(`  ${v.name}${v.optional ? "  (optional)" : ""}  ${v.label}`);
+      }
+      console.log("\nOn the hosted platform, set providers in the dashboard instead (Settings → Providers).");
       return;
     }
     case "deploy":

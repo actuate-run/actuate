@@ -26,6 +26,9 @@ importers:
 
   e2e:
     devDependencies:
+      '@actuate/providers':
+        specifier: workspace:*
+        version: link:../packages/providers
       '@actuate/runtime':
         specifier: workspace:*
         version: link:../packages/runtime
@@ -41,6 +44,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@actuate/providers':
+        specifier: workspace:*
+        version: link:../providers
       '@actuate/runtime':
         specifier: workspace:*
         version: link:../runtime
@@ -61,6 +67,15 @@ importers:
         version: 4.156.1(@types/node@22.20.5)
 
   packages/create-actuate: {}
+
+  packages/providers:
+    dependencies:
+      '@actuate/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+      zod:
+        specifier: ^4.6.0
+        version: 4.6.7
 
   packages/runtime:
     dependencies:
