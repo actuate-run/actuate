@@ -1,6 +1,10 @@
 # @actuate/sdk
 
-Define Actuate actuators: one TypeScript file with durable steps, its own SQLite database and a schema-checked MCP tool.
+Define an actuator: one TypeScript file that becomes a tool your AI agent can call over MCP. Steps run exactly once, waits cost nothing, and each actuator has its own SQLite database.
+
+```bash
+npm create actuate   # new project with the SDK and CLI
+```
 
 ```ts
 import { defineActuator, z } from "@actuate/sdk";
@@ -11,12 +15,23 @@ export default defineActuator({
   input: z.object({ name: z.string() }),
   async run(ctx, input) {
     await ctx.step.do("greet", () => ctx.log.info(`Hello, ${input.name}!`));
-    await ctx.step.sleep("1 day");
+    await ctx.step.sleep("1 day"); // hibernates: nothing runs, nothing is billed
     await ctx.step.do("follow-up", () => ctx.log.info(`Still there, ${input.name}?`));
   },
 });
 ```
 
-Docs: https://actuate.run/docs · Source: https://github.com/actuate-run/actuate
+| API | |
+| --- | --- |
+| `ctx.step.do(name, fn)` | Run `fn` once; replays and retries get the stored result |
+| `ctx.step.sleep` / `sleepUntil` | Hibernate until a time |
+| `ctx.step.waitForEvent` | Resume on a webhook, payment, inbound message or posted event |
+| `ctx.step.waitForApproval` / `waitForInput` | Resume when a person approves or answers through a signed link |
+| `ctx.db` | The actuator's own SQLite database |
+| `ctx.messaging`, `ctx.payment`, `ctx.llm`, `ctx.http` | Declared capabilities, backed by your own accounts |
 
-License: Apache-2.0
+Reference: [SDK API](https://actuate.run/docs/reference/sdk/).
+
+---
+
+[Docs](https://actuate.run/docs) · [Source](https://github.com/actuate-run/actuate) · [Templates](https://github.com/actuate-run/templates) · Apache-2.0

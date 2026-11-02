@@ -1,0 +1,12 @@
+{
+  "name": "@actuate/examples",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json && actuate check refund-order.ts"
+  },
+  "devDependencies": {
+    "@actuate/cli": "workspace:*",
+    "@actuate/sdk": "workspace:*"
+  }
+}
