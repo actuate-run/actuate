@@ -241,6 +241,11 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
           );
         }
         if (path === "/approvals" && method === "GET") return json(m.pendingApprovals());
+        const inputMatch = /^\/runs\/([^/]+)\/inputs\/([^/]+)$/.exec(path);
+        if (inputMatch && method === "POST") {
+          const body = (await request.json().catch(() => ({}))) as { text?: string };
+          return json(await m.answerDirect(decodeURIComponent(inputMatch[1]!), decodeURIComponent(inputMatch[2]!), String(body.text ?? "")));
+        }
         const linksMatch = /^\/runs\/([^/]+)\/approvals\/([^/]+)\/links$/.exec(path);
         if (linksMatch && method === "GET") {
           const links = await m.approvalLinks(decodeURIComponent(linksMatch[1]!), decodeURIComponent(linksMatch[2]!));

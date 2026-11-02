@@ -4,7 +4,7 @@ export default defineActuator({
   name: "e2e_booking",
   description: "End-to-end fixture: saves a booking, waits for payment or an approval, sleeps briefly.",
   config: z.object({ greeting: z.string().default("Hi") }),
-  input: z.object({ name: z.string(), mode: z.enum(["payment", "approval", "sleep"]) }),
+  input: z.object({ name: z.string(), mode: z.enum(["payment", "approval", "sleep", "ask"]) }),
   capabilities: ["messaging"],
   async run(ctx, input, config) {
     await ctx.db.migrate(["CREATE TABLE bookings (id TEXT PRIMARY KEY, name TEXT, status TEXT)"]);
@@ -13,6 +13,10 @@ export default defineActuator({
     if (input.mode === "sleep") {
       await ctx.step.sleep("1 second");
       return { status: "WOKE" };
+    }
+    if (input.mode === "ask") {
+      const answer = await ctx.step.waitForInput("why", { prompt: "Why?" });
+      return { status: answer?.text ?? "NO_ANSWER" };
     }
     if (input.mode === "approval") {
       const decision = await ctx.step.waitForApproval("ok", { message: "Approve?" });

@@ -140,4 +140,11 @@ describe("self-hosted runtime on workerd", () => {
     });
     expect(second.status).toBe(410);
   });
+
+  it("answers a waitForInput step through the owner route", async () => {
+    const started = await call("/run", { headers: auth, json: { name: "Mei", mode: "ask" } });
+    expect((await call(`/runs/${started.body.runId}/inputs/why`, { json: { text: "x" } })).status).toBe(401);
+    expect((await call(`/runs/${started.body.runId}/inputs/why`, { headers: auth, json: { text: "Because" } })).body.ok).toBe(true);
+    expect((await call(`/runs/${started.body.runId}`, { headers: auth })).body.output).toEqual({ status: "Because" });
+  });
 });
