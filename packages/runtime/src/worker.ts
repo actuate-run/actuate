@@ -26,6 +26,12 @@ export interface RuntimeOptions<E extends RuntimeEnv = RuntimeEnv> {
   providers?: (env: E, publicUrl: string) => Partial<Providers>;
   /** Resolve raw configuration; defaults to parsing `env.ACTUATE_CONFIG`. */
   config?: (env: E) => unknown;
+  /**
+   * Verify an inbound provider webhook (POST /providers/:kind/webhook) and map it to an event.
+   * Return null to ignore it; throw an error named WebhookVerificationError to answer 401.
+   * `@actuate/providers` provides `parseProviderWebhookFromEnv` for this.
+   */
+  providerWebhook?: (kind: string, request: Request, env: E) => Promise<{ event: string; payload: Json } | null>;
 }
 
 const json = (body: unknown, status = 200) =>
@@ -161,6 +167,17 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
             status: result.ok ? 200 : 410,
             headers: { "content-type": "text/html; charset=utf-8" },
           });
+        }
+        const providerHook = /^\/providers\/([a-z0-9-]+)\/webhook$/.exec(path);
+        if (providerHook && options.providerWebhook) {
+          try {
+            const event = await options.providerWebhook(providerHook[1]!, request, this.env);
+            if (!event) return json({ ignored: true });
+            return json({ event: event.event, ...(await m.deliverEvent(event.event, event.payload)) });
+          } catch (err) {
+            if ((err as Error)?.name === "WebhookVerificationError") return json({ error: (err as Error).message }, 401);
+            throw err;
+          }
         }
         if (path === "/webhook" && method === "POST") {
           const secret = this.env.ACTUATE_WEBHOOK_SECRET;
