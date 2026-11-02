@@ -1,67 +1,56 @@
 # Releasing
 
-Only this repository publishes to npm. Versions and changelogs come from [changesets](https://github.com/changesets/changesets): add one with `pnpm changeset` in any PR that changes a package.
+Only this repository publishes to npm. The five packages (`@actuate/sdk`, `@actuate/runtime`, `@actuate/providers`, `@actuate/cli`, `create-actuate`) always share one version. Versions and changelogs come from [changesets](https://github.com/changesets/changesets): add one with `pnpm changeset` in any PR that changes a package.
 
-## First release (0.1.0), by hand
+**Publishing happens only when a release tag is pushed.** Merging to `main` never publishes.
 
-npm only lets you set up trusted publishing on a package that already exists, so the first release is published from a laptop. Provenance needs CI, so it starts with the second release.
+## Releasing a version
 
-1. npm: the organisation `actuate` exists, and you own `create-actuate` (claimed with a 0.0.1 placeholder, moved to the org or shared with it).
-2. From a clean checkout of `main`:
+1. **Bump the version** in a PR:
 
    ```bash
-   pnpm install --frozen-lockfile
-   pnpm changeset version          # 0.0.0 -> 0.1.0 for all five, writes CHANGELOGs
-   pnpm check                      # build, typecheck, test
-   npm login                       # an account with publish rights on @actuate and create-actuate
-   pnpm -r publish --access public --no-git-checks
+   git checkout main && git pull
+   git checkout -b release-0.2.0
+   pnpm changeset version     # applies pending changesets: new versions and CHANGELOGs
+   pnpm check
+   git commit -am "Release 0.2.0" && git push -u origin release-0.2.0
    ```
 
-   `pnpm -r publish` replaces `workspace:*` with `0.1.0` and publishes in dependency order. It asks for a one-time password per package if your npm account uses 2FA for publishing.
-3. Commit the version bump and CHANGELOGs (`git checkout -b release-0.1.0`, commit, PR, merge) and tag it: `git tag v0.1.0 && git push origin v0.1.0`.
-4. Check it from a clean folder: `npm create actuate demo`, `cd demo && npm install && npx actuate dev`.
+   Open the PR, review the CHANGELOGs, merge it.
 
-## After the first release
+2. **Tag the merge commit** on `main`:
 
-1. For each package (`@actuate/sdk`, `@actuate/runtime`, `@actuate/providers`, `@actuate/cli`, `create-actuate`), set up **trusted publishing** on npmjs.com: GitHub Actions, repository `actuate-run/actuate`, workflow `release.yml`, environment `npm`. No npm token is ever created.
-2. Add the release workflow below. From then on, releases publish from GitHub with provenance.
+   ```bash
+   git checkout main && git pull
+   git tag -a v0.2.0 -m "Release 0.2.0" && git push origin v0.2.0
+   ```
 
-## Release workflow (add after the first release)
+3. **The `release` workflow publishes** (`.github/workflows/release.yml`). It:
+   - refuses a tag that isn't on `main`;
+   - runs `pnpm check`;
+   - checks the tag matches every package's version;
+   - publishes each version not yet on npm, in dependency order, with provenance, through trusted publishing (no npm token).
 
-`.github/workflows/release.yml`:
+   A pre-release tag such as `v0.3.0-beta.1` is published under the `beta` npm tag, not `latest`.
 
-```yaml
-name: release
-on:
-  push:
-    branches: [main]
-permissions:
-  contents: write
-  pull-requests: write
-  id-token: write # npm trusted publishing + provenance
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    environment: npm
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: pnpm, registry-url: "https://registry.npmjs.org" }
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm check
-      - uses: changesets/action@v1
-        env:
-          NPM_CONFIG_PROVENANCE: "true" # provenance is CI-only, so it is set here rather than in publishConfig
-        with:
-          version: pnpm changeset version
-          publish: pnpm -r publish --access public
-```
+4. **Check** from an empty folder: `npm create actuate demo`, then `cd demo && npm install && npx actuate dev`.
 
-The action opens a "Version packages" PR; merging it publishes.
+If the workflow fails partway, fix the cause and re-run it from the Actions tab: versions already on npm are skipped. To see what a release would do without publishing: `pnpm build && node scripts/publish.mjs v0.2.0 --dry-run`.
 
-## Before the first release
+## One-time setup
 
-- `pnpm check` green.
-- `cd packages/<name> && npm pack --dry-run` lists only `dist/`, `README.md`, `LICENSE`, `package.json`.
-- Switch `link:` dependencies in `actuate-run/templates` and `actuate-run/platform` to `^0.1.0` once published, and drop `infra/scripts/link-actuate.sh` from the platform's Workers Builds commands.
+- **npm:** the `actuate` organisation owns all five packages. On each package's npmjs.com page, under **Settings → Trusted publishing → GitHub Actions**:
+
+  | Field | Value |
+  | --- | --- |
+  | Organization or user | `actuate-run` |
+  | Repository | `actuate` |
+  | Workflow filename | `release.yml` |
+  | Environment name | `npm` |
+
+  Allow `npm publish` only. Once a release has gone out this way, set each package's publishing access to "Require two-factor authentication and disallow tokens".
+- **GitHub:** create the environment `npm` (Settings → Environments), optionally limited to tags matching `v*`.
+
+## History
+
+- **0.1.0** was published by hand from a laptop, because npm only allows trusted publishing for packages that already exist. Provenance starts with the first release from the workflow.
