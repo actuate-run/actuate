@@ -164,7 +164,11 @@ class Pass {
       }
 
       const attempt = (existing?.attempts ?? 0) + 1;
-      await this.write(this.row(name, { status: "RUNNING", attempts: attempt, wake_at: null }));
+      // Steps that can retry record the attempt before running, so a crash mid-step still counts it.
+      // Others are written once, on completion: half the billed writes.
+      if ((options.retries ?? 0) > 0) {
+        await this.write(this.row(name, { status: "RUNNING", attempts: attempt, wake_at: null }));
+      }
 
       let result: T;
       this.inStep = name;
@@ -176,11 +180,11 @@ class Pass {
         const retries = options.retries ?? 0;
         const message = err instanceof Error ? err.message : String(err);
         if (err instanceof NonRetryableError || attempt > retries) {
-          await this.write(this.row(name, { status: "FAILED", error: message }));
+          await this.write(this.row(name, { status: "FAILED", error: message, attempts: attempt }));
           throw err;
         }
         const backoff = parseDuration(options.backoff ?? "1 second") * 2 ** (attempt - 1);
-        await this.write(this.row(name, { status: "RETRYING", error: message, wake_at: this.now() + backoff }));
+        await this.write(this.row(name, { status: "RETRYING", error: message, attempts: attempt, wake_at: this.now() + backoff }));
         await this.journal.log("warn", `Step "${name}" failed on attempt ${attempt}; retrying in ${backoff} ms`, { error: message });
         this.suspend(`step "${name}" retrying`);
       } finally {
@@ -188,7 +192,7 @@ class Pass {
       }
 
       const output = toJson(result);
-      await this.write(this.row(name, { status: "COMPLETED", output_json: output, error: null }));
+      await this.write(this.row(name, { status: "COMPLETED", output_json: output, error: null, attempts: attempt }));
       // Return the JSON round-trip so the first pass and every replay see the same value.
       return fromJson(output) as T;
     }) as Step["do"],

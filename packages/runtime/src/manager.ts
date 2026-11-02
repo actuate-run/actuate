@@ -78,6 +78,8 @@ export interface RunManagerOptions {
   eventBufferTtlMs?: number;
   /** Mirror run logs to console. Default true. */
   consoleLogs?: boolean;
+  /** Log lines kept per pass; the rest are dropped with one warning. Default 100. */
+  maxLogLinesPerPass?: number;
 }
 
 export interface StartRunOptions {
@@ -164,14 +166,9 @@ export class RunManager {
       const passes = Number(run.passes) + 1;
       const maxPasses = this.options.maxPasses ?? 10_000;
       if (passes > maxPasses) {
-        this.settle(runId, { status: "failed", error: { name: "ActuatorError", message: `Run exceeded ${maxPasses} passes` } });
+        this.settle(runId, passes, { status: "failed", error: { name: "ActuatorError", message: `Run exceeded ${maxPasses} passes` } });
         return;
       }
-      this.sql.exec(`UPDATE _actuate_runs SET status = 'RUNNING', passes = ?, updated_at = ? WHERE run_id = ?`, [
-        passes,
-        this.now(),
-        runId,
-      ]);
 
       let outcome: PassOutcome;
       try {
@@ -185,38 +182,44 @@ export class RunManager {
 
       // Cancelled while the pass was running: leave it cancelled.
       const current = this.sql.exec(`SELECT status FROM _actuate_runs WHERE run_id = ?`, [runId])[0];
-      if (current?.status === "CANCELLED") return;
+      if (current?.status === "CANCELLED") {
+        this.flushLogs(runId, passes);
+        return;
+      }
 
-      this.settle(runId, outcome);
+      this.settle(runId, passes, outcome);
       if (outcome.status !== "waiting" || !this.matchBufferedEvents(runId)) break;
     }
     await this.reschedule();
   }
 
-  private settle(runId: string, outcome: PassOutcome): void {
+  /** One write for the run row per pass, plus one for that pass's logs. */
+  private settle(runId: string, passes: number, outcome: PassOutcome): void {
     const now = this.now();
     if (outcome.status === "completed") {
       this.sql.exec(
-        `UPDATE _actuate_runs SET status = 'COMPLETED', output_json = ?, wake_at = NULL, updated_at = ? WHERE run_id = ?`,
-        [toJson(outcome.output), now, runId],
+        `UPDATE _actuate_runs SET status = 'COMPLETED', output_json = ?, wake_at = NULL, passes = ?, updated_at = ? WHERE run_id = ?`,
+        [toJson(outcome.output), passes, now, runId],
       );
     } else if (outcome.status === "failed") {
       this.sql.exec(
-        `UPDATE _actuate_runs SET status = 'FAILED', error_json = ?, wake_at = NULL, updated_at = ? WHERE run_id = ?`,
-        [toJson(outcome.error), now, runId],
+        `UPDATE _actuate_runs SET status = 'FAILED', error_json = ?, wake_at = NULL, passes = ?, updated_at = ? WHERE run_id = ?`,
+        [toJson(outcome.error), passes, now, runId],
       );
-      void this.writeLog(runId, "error", outcome.error.message);
+      this.bufferLog(runId, "error", outcome.error.message);
     } else {
       const wake = this.sql.exec(
         `SELECT MIN(wake_at) AS wake_at FROM _actuate_steps WHERE run_id = ? AND status IN ${WAITING_STEP} AND wake_at IS NOT NULL`,
         [runId],
       )[0];
-      this.sql.exec(`UPDATE _actuate_runs SET status = 'WAITING', wake_at = ?, updated_at = ? WHERE run_id = ?`, [
+      this.sql.exec(`UPDATE _actuate_runs SET status = 'WAITING', wake_at = ?, passes = ?, updated_at = ? WHERE run_id = ?`, [
         (wake?.wake_at as number | null) ?? null,
+        passes,
         now,
         runId,
       ]);
     }
+    this.flushLogs(runId, passes);
   }
 
   /** Close the race where an event arrives between a pass checking the buffer and writing its wait row. */
@@ -355,15 +358,36 @@ export class RunManager {
     };
   }
 
-  private async writeLog(runId: string, level: LogLevel, message: string, data?: Json): Promise<void> {
-    this.sql.exec(`INSERT INTO _actuate_logs (run_id, ts, level, message, data_json) VALUES (?, ?, ?, ?, ?)`, [
-      runId,
-      this.now(),
-      level,
-      String(message).slice(0, 4000),
-      data === undefined ? null : toJson(data),
-    ]);
+  private readonly logBuffers = new Map<string, LogRecord[]>();
+
+  /** Lines are held per run and written as one row when the pass settles. */
+  private bufferLog(runId: string, level: LogLevel, message: string, data?: Json): void {
+    let lines = this.logBuffers.get(runId);
+    if (!lines) this.logBuffers.set(runId, (lines = []));
+    const max = this.options.maxLogLinesPerPass ?? 100;
+    if (lines.length < max) {
+      let encoded = data === undefined ? null : toJson(data);
+      if (encoded && encoded.length > 4096) encoded = toJson({ truncated: encoded.slice(0, 4000) });
+      lines.push({ ts: this.now(), level, message: String(message).slice(0, 2000), data: encoded === null ? null : fromJson(encoded) });
+    } else if (lines.length === max) {
+      lines.push({ ts: this.now(), level: "warn", message: `Log limit reached: ${max} lines per pass; further lines dropped.`, data: null });
+    }
     if (this.options.consoleLogs !== false) console[level === "info" ? "log" : level](`[${runId}] ${message}`, data ?? "");
+  }
+
+  private async writeLog(runId: string, level: LogLevel, message: string, data?: Json): Promise<void> {
+    this.bufferLog(runId, level, message, data);
+  }
+
+  private flushLogs(runId: string, pass: number): void {
+    const lines = this.logBuffers.get(runId);
+    this.logBuffers.delete(runId);
+    if (!lines?.length) return;
+    this.sql.exec(
+      `INSERT INTO _actuate_logs (run_id, pass, lines_json) VALUES (?, ?, ?)
+       ON CONFLICT (run_id, pass) DO UPDATE SET lines_json = json_insert(lines_json, '$[#]', json(excluded.lines_json))`,
+      [runId, pass, toJson(lines)],
+    );
   }
 
   private async requestApproval(runId: string, step: string, opts: WaitForApprovalOptions & { expiresAt: number }): Promise<void> {
@@ -400,11 +424,18 @@ export class RunManager {
     return row ? toRunRecord(row) : null;
   }
 
-  listRuns(opts: { limit?: number; before?: number; status?: RunStatus } = {}): RunRecord[] {
+  /**
+   * Newest first. Page with `before`: a run ID (exact, no ties) or a createdAt
+   * timestamp. Run IDs are time-sortable, so the primary key orders the list.
+   */
+  listRuns(opts: { limit?: number; before?: number | string; status?: RunStatus } = {}): RunRecord[] {
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
+    const byId = typeof opts.before === "string" && !/^\d+$/.test(opts.before);
     const rows = this.sql.exec(
-      `SELECT * FROM _actuate_runs WHERE created_at < ? AND (? IS NULL OR status = ?) ORDER BY created_at DESC LIMIT ?`,
-      [opts.before ?? Number.MAX_SAFE_INTEGER, opts.status ?? null, opts.status ?? null, limit],
+      `SELECT * FROM _actuate_runs
+        WHERE ${byId ? "run_id < ?" : "created_at < ?"} AND (? IS NULL OR status = ?)
+        ORDER BY run_id DESC LIMIT ?`,
+      [byId ? (opts.before as string) : Number(opts.before ?? Number.MAX_SAFE_INTEGER), opts.status ?? null, opts.status ?? null, limit],
     );
     return rows.map(toRunRecord);
   }
@@ -423,14 +454,9 @@ export class RunManager {
   }
 
   getLogs(runId: string, limit = 500): LogRecord[] {
-    return this.sql
-      .exec(`SELECT ts, level, message, data_json FROM _actuate_logs WHERE run_id = ? ORDER BY id LIMIT ?`, [runId, limit])
-      .map((r) => ({
-        ts: Number(r.ts),
-        level: r.level as LogLevel,
-        message: String(r.message),
-        data: fromJson((r.data_json as string | null) ?? null),
-      }));
+    const rows = this.sql.exec(`SELECT lines_json FROM _actuate_logs WHERE run_id = ? ORDER BY pass`, [runId]);
+    const persisted = rows.flatMap((r) => fromJson<LogRecord[]>(r.lines_json as string));
+    return [...persisted, ...(this.logBuffers.get(runId) ?? [])].slice(0, limit);
   }
 
   /** Steps waiting for a human decision, oldest first: the approval queue. */

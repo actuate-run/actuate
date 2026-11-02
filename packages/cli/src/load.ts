@@ -2,13 +2,29 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { build, type BuildOptions } from "esbuild";
+import { build, type BuildOptions, type Plugin } from "esbuild";
 import { isActuator, z, type Actuator } from "@actuate/sdk";
 
 const require = createRequire(import.meta.url);
 
+/**
+ * zod's `z` namespace pulls in ~60 locale packs (about half of a bundle).
+ * Actuators only need English messages, so every other locale is dropped.
+ * `z.locales.en` keeps working; other locales are undefined.
+ */
+export const zodEnglishOnly: Plugin = {
+  name: "actuate-zod-english-only",
+  setup(b) {
+    b.onLoad({ filter: /[\\/]zod[\\/]v4[\\/]locales[\\/]index\.js$/ }, () => ({
+      contents: `export { default as en } from "./en.js";`,
+      loader: "js",
+    }));
+  },
+};
+
 /** esbuild options shared by every bundle that targets workerd. */
 export const workerBuildOptions: BuildOptions = {
+  plugins: [zodEnglishOnly],
   bundle: true,
   format: "esm",
   platform: "neutral",
@@ -26,7 +42,15 @@ export function cliResolve(specifier: string): string {
 
 /** Bundle the actuator file into one ESM module (SDK and zod included). This is what `deploy` uploads. */
 export async function bundleActuator(file: string): Promise<string> {
-  const out = await build({ ...workerBuildOptions, entryPoints: [resolve(file)], write: false, sourcemap: false, minify: false });
+  // Whitespace and syntax are minified; identifiers are kept so stack traces stay readable.
+  const out = await build({
+    ...workerBuildOptions,
+    entryPoints: [resolve(file)],
+    write: false,
+    sourcemap: false,
+    minifyWhitespace: true,
+    minifySyntax: true,
+  });
   return out.outputFiles[0]!.text;
 }
 
