@@ -2,7 +2,7 @@
 import { z } from "zod";
 import { WebhookVerificationError, type ProviderDefinition } from "./contract.js";
 import type { Bill, PaymentProvider } from "@actuate/sdk";
-import { base64ToBytes, fromMinor, normaliseCurrency, parseWith, requestJson, requiredString, toMinor } from "./util.js";
+import { type ProviderDefinitionWithWebhookLookup, base64ToBytes, fromMinor, normaliseCurrency, parseWith, requestJson, requiredString, toMinor } from "./util.js";
 
 const API = "https://gate.chip-in.asia/api/v1";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -85,7 +85,7 @@ export function importChipPublicKey(pem: string): Promise<CryptoKey> {
   return cached;
 }
 
-export const chip: ProviderDefinition<ChipCredentials, "payment"> = {
+export const chip: ProviderDefinitionWithWebhookLookup<ChipCredentials, "payment"> = {
   kind: "chip",
   capability: "payment",
   label: "CHIP Collect",

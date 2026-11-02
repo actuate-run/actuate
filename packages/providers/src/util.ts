@@ -186,6 +186,11 @@ export type ProviderDefinitionWithWebhookLookup<C, K extends ProviderCapability>
   parseWebhook(request: Request, credentials: C, ctx?: Pick<ProviderContext, "fetch">): Promise<ProviderEvent | null>;
 };
 
+/** Event name for an inbound message: `message.<channel>.<from>`. */
+export function messageEvent(channel: string, from: string): string {
+  return `message.${channel}.${from}`;
+}
+
 /** Plain text from the small HTML subset `messaging.send` accepts (for channels without HTML, and email text parts). */
 export function htmlToText(html: string): string {
   return html

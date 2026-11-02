@@ -33,7 +33,7 @@ export interface RuntimeOptions<E extends RuntimeEnv = RuntimeEnv> {
    * Return null to ignore it; throw an error named WebhookVerificationError to answer 401.
    * `@actuate/providers` provides `parseProviderWebhookFromEnv` for this.
    */
-  providerWebhook?: (kind: string, request: Request, env: E) => Promise<{ event: string; payload: Json } | null>;
+  providerWebhook?: (kind: string, request: Request, env: E) => Promise<ProviderWebhookOutcome>;
   /** Runtime guards passed to the RunManager (wait/retry limits, pass admission, event caps, max passes). */
   guards?: Pick<RunManagerOptions, "passLimits" | "admitPass" | "maxBufferedEvents" | "maxEventBytes" | "maxPasses" | "maxLogLinesPerPass">;
 }
@@ -76,6 +76,10 @@ export interface Runtime<E extends RuntimeEnv> {
   worker: ExportedHandler<E>;
   ActuatorObject: new (state: DurableObjectState, env: E) => ActuatorObjectInstance;
 }
+
+type ProviderWebhookEvent = { event: string; payload: Json };
+/** What a provider webhook handler returns: events to deliver, none, or a plain-text handshake reply. */
+export type ProviderWebhookOutcome = ProviderWebhookEvent | ProviderWebhookEvent[] | { reply: string } | null;
 
 export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actuator, options: RuntimeOptions<E> = {}): Runtime<E> {
   const configSchema = actuator.config ?? z.object({});
@@ -204,9 +208,13 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
         const providerHook = /^\/providers\/([a-z0-9-]+)\/webhook$/.exec(path);
         if (providerHook && options.providerWebhook) {
           try {
-            const event = await options.providerWebhook(providerHook[1]!, request, this.env);
-            if (!event) return json({ ignored: true });
-            return json({ event: event.event, ...(await m.deliverEvent(event.event, event.payload)) });
+            const out = await options.providerWebhook(providerHook[1]!, request, this.env);
+            if (out && "reply" in out) return new Response(out.reply, { headers: { "content-type": "text/plain; charset=utf-8" } });
+            const events = out ? (Array.isArray(out) ? out : [out]) : [];
+            if (events.length === 0) return json({ ignored: true });
+            const delivered = [];
+            for (const e of events) delivered.push({ event: e.event, ...(await m.deliverEvent(e.event, e.payload)) });
+            return json(delivered.length === 1 ? delivered[0] : { events: delivered });
           } catch (err) {
             if ((err as Error)?.name === "WebhookVerificationError") return json({ error: (err as Error).message }, 401);
             throw err;

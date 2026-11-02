@@ -50,6 +50,20 @@ describe("telegram", () => {
       WebhookVerificationError,
     );
   });
+
+  it("turns inbound messages into message.telegram.<chat> events", async () => {
+    const withSecret = telegram.parseCredentials({ botToken: BOT_TOKEN, webhookSecretToken: "s3cret" });
+    const update = JSON.stringify({
+      update_id: 1,
+      message: { message_id: 7, date: 1793664000, chat: { id: 5551234, type: "private" }, from: { first_name: "Wei", last_name: "Tan" }, text: "Done" },
+    });
+    await expect(telegram.parseWebhook!(jsonRequest(update, { "x-telegram-bot-api-secret-token": "s3cret" }), withSecret)).resolves.toEqual({
+      event: "message.telegram.5551234",
+      payload: { channel: "telegram", from: "5551234", text: "Done", type: "text", id: "7", at: 1793664000000, name: "Wei Tan" },
+    });
+    // No secret token configured: updates are ignored, not trusted.
+    await expect(telegram.parseWebhook!(jsonRequest(update), creds)).resolves.toBeNull();
+  });
 });
 
 describe("whatsapp", () => {
@@ -110,6 +124,52 @@ describe("whatsapp", () => {
       WebhookVerificationError,
     );
     await expect(whatsapp.parseWebhook!(jsonRequest(body), creds)).rejects.toBeInstanceOf(WebhookVerificationError);
+  });
+
+  it("answers Meta's verify handshake only with the right token", () => {
+    const withToken = whatsapp.parseCredentials({ phoneNumberId: "1055551234", accessToken: "t", verifyToken: "vt-123" });
+    const get = (q: string) => new Request(`https://run.actuate.run/a/x/providers/whatsapp/webhook?${q}`);
+    expect(whatsapp.handshake!(get("hub.mode=subscribe&hub.verify_token=vt-123&hub.challenge=987654"), withToken)).toBe("987654");
+    expect(() => whatsapp.handshake!(get("hub.mode=subscribe&hub.verify_token=nope&hub.challenge=1"), withToken)).toThrow(WebhookVerificationError);
+    expect(() => whatsapp.handshake!(get("hub.mode=subscribe&hub.verify_token=&hub.challenge=1"), creds)).toThrow(/verify token/);
+    expect(whatsapp.handshake!(get(""), withToken)).toBeNull();
+  });
+
+  it("turns signed inbound messages into message.whatsapp.<from> events", async () => {
+    const value = (phoneNumberId: string, messages: object[]) => ({
+      field: "messages",
+      value: { metadata: { phone_number_id: phoneNumberId }, contacts: [{ wa_id: "60123456789", profile: { name: "Aina" } }], messages },
+    });
+    const body = JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [
+        {
+          changes: [
+            value("1055551234", [
+              { from: "60123456789", id: "wamid.1", timestamp: "1793664000", type: "text", text: { body: "Yes, confirm" } },
+              { from: "60123456789", id: "wamid.2", timestamp: "1793664001", type: "interactive", interactive: { button_reply: { id: "b1", title: "Reschedule" } } },
+            ]),
+            value("999", [{ from: "60111111111", id: "wamid.other", timestamp: "1", type: "text", text: { body: "other number" } }]),
+            { field: "messages", value: { metadata: { phone_number_id: "1055551234" }, statuses: [{ id: "wamid.x", status: "read" }] } },
+          ],
+        },
+      ],
+    });
+    const sig = `sha256=${await hmacHex("appsecret", body)}`;
+    const events = await whatsapp.parseWebhook!(jsonRequest(body, { "x-hub-signature-256": sig }), creds);
+    expect(events).toEqual([
+      {
+        event: "message.whatsapp.60123456789",
+        payload: { channel: "whatsapp", from: "60123456789", text: "Yes, confirm", type: "text", id: "wamid.1", at: 1793664000000, name: "Aina" },
+      },
+      {
+        event: "message.whatsapp.60123456789",
+        payload: { channel: "whatsapp", from: "60123456789", text: "Reschedule", type: "interactive", id: "wamid.2", at: 1793664001000, name: "Aina" },
+      },
+    ]);
+    // No app secret: inbound is ignored rather than trusted unsigned.
+    const noSecret = whatsapp.parseCredentials({ phoneNumberId: "1055551234", accessToken: "t" });
+    await expect(whatsapp.parseWebhook!(jsonRequest(body), noSecret)).resolves.toBeNull();
   });
 });
 

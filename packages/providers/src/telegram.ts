@@ -1,8 +1,8 @@
 // Docs: https://core.telegram.org/bots/api#sendmessage
 import { z } from "zod";
 import { WebhookVerificationError, timingSafeEqual, type ProviderDefinition } from "./contract.js";
-import type { MessagingProvider } from "@actuate/sdk";
-import { optionalString, parseWith, ProviderApiError, requestJson } from "./util.js";
+import type { InboundMessage, MessagingProvider } from "@actuate/sdk";
+import { messageEvent, optionalString, parseWith, ProviderApiError, requestJson } from "./util.js";
 
 const schema = z.object({
   botToken: z
@@ -32,7 +32,7 @@ export const telegram: ProviderDefinition<TelegramCredentials, "messaging"> = {
       label: "Webhook secret token",
       secret: true,
       optional: true,
-      help: "Only needed for inbound messages: the secret_token you pass to setWebhook.",
+      help: "Needed to receive messages: any string, passed as secret_token when you call setWebhook.",
     },
   ],
   parseCredentials: (input) => parseWith("Telegram", schema, input),
@@ -52,11 +52,36 @@ export const telegram: ProviderDefinition<TelegramCredentials, "messaging"> = {
     };
   },
   async parseWebhook(request, credentials) {
-    // Inbound messages are a later feature. Still reject updates that fail the secret-token check.
-    if (credentials.webhookSecretToken) {
-      const got = request.headers.get("x-telegram-bot-api-secret-token") ?? "";
-      if (!timingSafeEqual(got, credentials.webhookSecretToken)) throw new WebhookVerificationError("Telegram secret token mismatch");
-    }
-    return null;
+    // Without the secret token anyone could post fake updates, so inbound needs it.
+    if (!credentials.webhookSecretToken) return null;
+    const got = request.headers.get("x-telegram-bot-api-secret-token") ?? "";
+    if (!timingSafeEqual(got, credentials.webhookSecretToken)) throw new WebhookVerificationError("Telegram secret token mismatch");
+    const update = (await request.json().catch(() => null)) as TelegramUpdate | null;
+    const m = update?.message;
+    if (!m?.chat?.id) return null;
+    const from = String(m.chat.id);
+    const type = m.text !== undefined ? "text" : (["photo", "video", "document", "voice", "audio", "location", "contact", "sticker"].find((k) => k in m) ?? "unknown");
+    const name = [m.from?.first_name, m.from?.last_name].filter(Boolean).join(" ");
+    const message: InboundMessage = {
+      channel: "telegram",
+      from,
+      text: m.text ?? m.caption ?? "",
+      type,
+      id: String(m.message_id),
+      at: (m.date ?? 0) * 1000,
+      ...(name ? { name } : {}),
+    };
+    return { event: messageEvent("telegram", from), payload: { ...message } };
   },
 };
+
+interface TelegramUpdate {
+  message?: {
+    message_id: number;
+    date?: number;
+    chat?: { id: number | string };
+    from?: { first_name?: string; last_name?: string };
+    text?: string;
+    caption?: string;
+  } & Record<string, unknown>;
+}

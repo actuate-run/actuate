@@ -12,6 +12,9 @@ export interface ProviderEvent {
   payload: Json;
 }
 
+/** One webhook can carry several events (WhatsApp batches messages), or none. */
+export type ProviderWebhookResult = ProviderEvent | ProviderEvent[] | null;
+
 export interface ProviderContext {
   fetch: typeof fetch;
   /**
@@ -38,7 +41,13 @@ export interface ProviderDefinition<C = unknown, K extends ProviderCapability = 
    * valid but irrelevant; throw `WebhookVerificationError` when the signature is wrong.
    * Payment providers emit `payment.<referenceId>` with a `PaymentEvent` payload.
    */
-  parseWebhook?(request: Request, credentials: C, ctx?: Pick<ProviderContext, "fetch">): Promise<ProviderEvent | null>;
+  parseWebhook?(request: Request, credentials: C, ctx?: Pick<ProviderContext, "fetch">): Promise<ProviderWebhookResult>;
+  /**
+   * Answer a subscription handshake, such as Meta's `GET ?hub.mode=subscribe&hub.challenge=...`.
+   * Returns the plain-text reply, or null when the request is not a handshake. Throws
+   * `WebhookVerificationError` when the verify token is wrong.
+   */
+  handshake?(request: Request, credentials: C): string | null;
 }
 
 export class WebhookVerificationError extends Error {

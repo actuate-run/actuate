@@ -75,6 +75,27 @@ export interface PaymentEvent {
   currency?: string;
 }
 
+/**
+ * An inbound chat message, delivered as the event `message.<channel>.<from>` when the
+ * messaging provider is set up to receive (WhatsApp app secret, Telegram webhook secret token).
+ * Wait for a reply with `ctx.step.waitForEvent("reply", { event: \`message.whatsapp.${phone}\` })`.
+ */
+export interface InboundMessage {
+  channel: string;
+  /** Who sent it, in the form `send(to)` accepts: a WhatsApp phone number (digits) or a Telegram chat ID. */
+  from: string;
+  /** The text, a button's title, or a media caption. Empty for media without a caption. */
+  text: string;
+  /** "text", "button", "image", "audio", "location", ... as the provider reports it. */
+  type: string;
+  /** The provider's message ID. */
+  id: string;
+  /** When the provider says it was sent, in ms since the epoch. */
+  at: number;
+  /** The sender's display name, when the provider includes it. */
+  name?: string;
+}
+
 export interface RefundRequest {
   billId: string;
   /** Major units. Omit for a full refund. */

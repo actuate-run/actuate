@@ -26,6 +26,7 @@ beforeAll(async () => {
       ACTUATE_DEV: "1",
       ACTUATE_MESSAGING: "telegram",
       TELEGRAM_BOT_TOKEN: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+      TELEGRAM_WEBHOOK_SECRET_TOKEN: "tg-secret",
       ACTUATE_PAYMENT: "billplz",
       BILLPLZ_API_KEY: "key",
       BILLPLZ_COLLECTION_ID: "col1",
@@ -59,4 +60,18 @@ it("sends through Telegram, bills through Billplz, and resumes on the signed cal
   expect((await post({ ...fields, x_signature: await billplzSignature(fields, "xsig") })).status).toBe(200);
   const run = await (await mf.dispatchFetch(`${base}/runs/${started.runId}`)).json<any>();
   expect(run).toMatchObject({ status: "COMPLETED", output: { status: "paid" } });
+});
+
+it("delivers inbound Telegram messages as message.telegram.<chat> events", async () => {
+  const update = JSON.stringify({ update_id: 5, message: { message_id: 3, date: 1793664000, chat: { id: 9 }, text: "hi" } });
+  const send = (secret: string) =>
+    mf.dispatchFetch(`${base}/providers/telegram/webhook`, {
+      method: "POST",
+      body: update,
+      headers: { "content-type": "application/json", "x-telegram-bot-api-secret-token": secret },
+    });
+  expect((await send("wrong")).status).toBe(401);
+  const res = await send("tg-secret");
+  expect(res.status).toBe(200);
+  expect(await res.json()).toMatchObject({ event: "message.telegram.9", buffered: true });
 });

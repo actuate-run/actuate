@@ -7,7 +7,7 @@ import {
   type ProviderDefinition,
 } from "./contract.js";
 import type { Bill, PaymentProvider } from "@actuate/sdk";
-import { formEncode, fromMinor, normaliseCurrency, optionalString, parseWith, requestJson, toMinor } from "./util.js";
+import { type ProviderDefinitionWithWebhookLookup, formEncode, fromMinor, normaliseCurrency, optionalString, parseWith, requestJson, toMinor } from "./util.js";
 
 const API = "https://api.stripe.com/v1";
 /** Same default as Stripe's own libraries. */
@@ -86,7 +86,7 @@ const EVENT_STATUS: Record<string, "paid" | "failed" | "expired" | undefined> = 
   "checkout.session.expired": "expired",
 };
 
-export const stripe: ProviderDefinition<StripeCredentials, "payment"> = {
+export const stripe: ProviderDefinitionWithWebhookLookup<StripeCredentials, "payment"> = {
   kind: "stripe",
   capability: "payment",
   label: "Stripe",

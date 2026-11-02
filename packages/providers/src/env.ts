@@ -1,5 +1,5 @@
 import type { Providers } from "@actuate/sdk";
-import type { ProviderCapability, ProviderContext, ProviderEvent } from "./contract.js";
+import type { ProviderCapability, ProviderContext, ProviderEvent, ProviderWebhookResult } from "./contract.js";
 import { WebhookVerificationError } from "./contract.js";
 import { PROVIDERS, getProvider, type AnyProviderDefinition } from "./registry.js";
 
@@ -79,8 +79,10 @@ export async function parseProviderWebhookFromEnv(
   kind: string,
   request: Request,
   fetchImpl: typeof fetch = fetch,
-): Promise<ProviderEvent | null> {
+): Promise<ProviderWebhookResult | { reply: string }> {
   const configured = configuredFromEnv(env).find((p) => p.definition.kind === kind);
   if (!configured?.definition.parseWebhook) throw new WebhookVerificationError(`No ${kind} provider is configured.`);
+  const reply = configured.definition.handshake?.(request, configured.credentials);
+  if (reply != null) return { reply };
   return configured.definition.parseWebhook(request, configured.credentials, { fetch: fetchImpl });
 }
