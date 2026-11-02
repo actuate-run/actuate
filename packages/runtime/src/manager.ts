@@ -544,7 +544,10 @@ export class RunManager {
       ...(opts.notify ? { notify: opts.notify } : {}),
     };
     // Never log the links: run logs are readable by anything holding a run token (e.g. the agent being gated).
-    await this.writeLog(runId, "info", `Approval requested for "${step}"`, { step, expiresAt: opts.expiresAt });
+    await this.writeLog(runId, "info", kind === "input" ? `Input requested for "${step}"` : `Approval requested for "${step}"`, {
+      step,
+      expiresAt: opts.expiresAt,
+    });
     try {
       await this.options.notifyApproval?.(request);
     } catch (err) {
@@ -597,7 +600,17 @@ export class RunManager {
   }
 
   /** Steps waiting for a human decision, oldest first: the approval queue. */
-  pendingApprovals(): Array<{ runId: string; step: string; kind: "approval" | "input"; message: string | null; expiresAt: number | null; since: number }> {
+  pendingApprovals(): Array<{
+    runId: string;
+    step: string;
+    kind: "approval" | "input";
+    message: string | null;
+    /** Input only: the pre-filled draft and the longest answer accepted. */
+    initial?: string | null;
+    maxLength?: number;
+    expiresAt: number | null;
+    since: number;
+  }> {
     return this.sql
       .exec(
         `SELECT run_id, step_name, status, output_json, wake_at, updated_at FROM _actuate_steps WHERE status IN ('WAITING_APPROVAL', 'WAITING_INPUT') ORDER BY updated_at`,
@@ -606,9 +619,13 @@ export class RunManager {
         runId: String(r.run_id),
         step: String(r.step_name),
         kind: r.status === "WAITING_INPUT" ? ("input" as const) : ("approval" as const),
-        message: (() => {
-          const d = fromJson<{ message?: string | null; prompt?: string | null } | null>((r.output_json as string | null) ?? null);
-          return d?.message ?? d?.prompt ?? null;
+        ...(() => {
+          const d = fromJson<{ message?: string | null; prompt?: string | null; initial?: string | null; maxLength?: number } | null>(
+            (r.output_json as string | null) ?? null,
+          );
+          return r.status === "WAITING_INPUT"
+            ? { message: d?.prompt ?? null, initial: d?.initial ?? null, maxLength: d?.maxLength ?? 4_000 }
+            : { message: d?.message ?? null };
         })(),
         expiresAt: (r.wake_at as number | null) ?? null,
         since: Number(r.updated_at),

@@ -647,7 +647,8 @@ describe("waitForInput, approval notes, waitForEvent until", () => {
     const h = harness(ask);
     const { run } = await h.start();
     expect(h.approvals[0]).toMatchObject({ kind: "input", message: "What should we tell the customer?" });
-    expect(h.manager.pendingApprovals()).toMatchObject([{ kind: "input", message: "What should we tell the customer?" }]);
+    expect(h.manager.pendingApprovals()).toMatchObject([{ kind: "input", message: "What should we tell the customer?", initial: "Hi,", maxLength: 50 }]);
+    expect(h.manager.getLogs(run.runId)[0]!.message).toBe('Input requested for "reply"');
     const token = tokenOf(h.approvals[0]!.answerUrl!);
     expect(await h.manager.describeLink(token)).toMatchObject({ kind: "input", prompt: "What should we tell the customer?", initial: "Hi,", maxLength: 50 });
     expect(await h.manager.decide(token, { text: "x".repeat(51) })).toMatchObject({ ok: false });
