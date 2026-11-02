@@ -46,6 +46,8 @@ export async function prepareDeploy(file: string, cwd: string, withConfig: boole
 }
 
 export async function deploy(file: string, cwd: string, opts: { config: boolean; dryRun: boolean }): Promise<void> {
+  const creds = opts.dryRun ? null : readCredentials();
+  if (!opts.dryRun && !creds) throw new Error("Not logged in. Run `actuate login` (or set ACTUATE_API_TOKEN) first, or use --dry-run.");
   const request = await prepareDeploy(file, cwd, opts.config);
   const kb = (Buffer.byteLength(request.code) / 1024).toFixed(1);
   console.log(`Bundled ${request.metadata.name}: ${kb} KiB, sha256 ${request.codeHash.slice(0, 12)}`);
@@ -53,9 +55,7 @@ export async function deploy(file: string, cwd: string, opts: { config: boolean;
     console.log(JSON.stringify(request.metadata, null, 2));
     return;
   }
-  const creds = readCredentials();
-  if (!creds) throw new Error("Not logged in. Run `actuate login` first.");
-  const res = await api<DeployResponse>(creds, "/v1/actuators/deploy", { method: "POST", body: JSON.stringify(request) });
+  const res = await api<DeployResponse>(creds!, "/v1/actuators/deploy", { method: "POST", body: JSON.stringify(request) });
   for (const w of res.warnings ?? []) console.warn(`warn  ${w}`);
   console.log(`
 ✓ Deployed ${res.name} v${res.version}

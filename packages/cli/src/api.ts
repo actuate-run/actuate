@@ -41,6 +41,21 @@ export class ApiError extends Error {
   }
 }
 
+/** The error line for a failed call: `error`, plus one line per validation issue (`path: message`). */
+export function errorMessage(body: unknown, text: string): string {
+  if (typeof body !== "object" || !body || !("error" in body)) return text;
+  const { error, issues } = body as { error: unknown; issues?: unknown };
+  const lines = Array.isArray(issues)
+    ? issues.map((i: { path?: unknown; message?: unknown }) => {
+        // Zod issues carry a path array; the platform's gateway sends a JSON pointer ("/name").
+        const parts = Array.isArray(i?.path) ? i.path : typeof i?.path === "string" ? i.path.split("/").filter(Boolean) : [];
+        const path = parts.length ? parts.join(".") : "(input)";
+        return `\n  ${path}: ${String(i?.message ?? JSON.stringify(i))}`;
+      })
+    : [];
+  return String(error) + lines.join("");
+}
+
 /** Call the Actuate control plane (or a self-hosted runtime) with the stored token. */
 export async function api<T>(creds: Credentials, path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${creds.apiUrl.replace(/\/$/, "")}${path}`, {
@@ -54,9 +69,6 @@ export async function api<T>(creds: Credentials, path: string, init: RequestInit
   } catch {
     /* non-JSON error */
   }
-  if (!res.ok) {
-    const message = typeof body === "object" && body && "error" in body ? String((body as { error: unknown }).error) : text;
-    throw new ApiError(res.status, `${res.status}: ${message}`);
-  }
+  if (!res.ok) throw new ApiError(res.status, `${res.status}: ${errorMessage(body, text)}`);
   return body as T;
 }

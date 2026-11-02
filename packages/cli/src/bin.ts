@@ -12,10 +12,12 @@ import { dev } from "./dev.js";
 const HELP = `actuate: durable TypeScript actuators with SQLite and MCP
 
 Usage
-  actuate init [dir] [--template <name>]   Create a new actuator project
+  actuate init [dir] [--template <name>] [--ref <git-ref>]
+                                           Create a new actuator project
   actuate dev [file] [--port 8787]         Run locally on workerd (messages print to the console)
   actuate check [file]                     Lint for replay-safety (side effects outside ctx.step.do)
-  actuate deploy [file] [--no-config]      Deploy to Actuate (sends actuate.config.json unless --no-config)
+  actuate deploy [file] [--no-config] [--dry-run]
+                                           Deploy to Actuate (sends actuate.config.json unless --no-config)
   actuate run '<json>' [--local]           Start a run with this input
   actuate logs [runId] [--local]           List recent runs, or show one run's steps and logs
   actuate login [--token <t>] [--api <url>]
@@ -28,6 +30,7 @@ const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     template: { type: "string", short: "t" },
+    ref: { type: "string" },
     port: { type: "string", default: "8787" },
     token: { type: "string" },
     api: { type: "string" },
@@ -65,7 +68,7 @@ async function main(): Promise<void> {
   }
   switch (command) {
     case "init": {
-      await scaffold({ dir: args[0] ?? ".", ...(values.template ? { template: values.template } : {}) });
+      await scaffold({ dir: args[0] ?? ".", ...(values.template ? { template: values.template } : {}), ...(values.ref ? { ref: values.ref } : {}) });
       console.log("\nNext: npm install && npx actuate dev");
       return;
     }
@@ -98,7 +101,7 @@ async function main(): Promise<void> {
       let token = values.token;
       if (!token) {
         const rl = createInterface({ input: process.stdin, output: process.stdout });
-        token = (await rl.question("Paste an API token from https://actuate.run/dashboard/settings: ")).trim();
+        token = (await rl.question("Paste an API token from https://actuate.run/dashboard/settings/tokens (a full token): ")).trim();
         rl.close();
       }
       if (!token) throw new Error("No token given.");
@@ -108,7 +111,12 @@ async function main(): Promise<void> {
     }
     case "run": {
       const t = target();
-      const input = args[0] ? JSON.parse(args[0]) : {};
+      let input: unknown = {};
+      try {
+        if (args[0]) input = JSON.parse(args[0]);
+      } catch {
+        throw new Error(`The input must be JSON, in single quotes: actuate run '{"name":"Aina"}'`);
+      }
       console.log(JSON.stringify(await api(t, `${t.base}/run`, { method: "POST", body: JSON.stringify(input) }), null, 2));
       return;
     }

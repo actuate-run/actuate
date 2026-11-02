@@ -57,10 +57,21 @@ export function consoleMessaging(log: (line: string) => void = console.log): Mes
 /**
  * A fake payment provider for local development. Bills are "paid" by posting
  * the event `payment.<referenceId>` to the actuator's /events endpoint.
+ * Refunds always succeed and are printed; the same idempotency key returns the same refund.
  */
-export function fakePayment(baseUrl = "http://localhost:8787"): PaymentProvider {
+export function fakePayment(baseUrl = "http://localhost:8787", log: (line: string) => void = console.log): PaymentProvider {
   const bills = new Map<string, Bill>();
+  const refunds = new Map<string, string>();
   return {
+    async refund(request) {
+      const key = request.idempotencyKey;
+      const existing = key ? refunds.get(key) : undefined;
+      if (existing) return { id: existing, status: "succeeded" as const };
+      const id = `dev-refund-${refunds.size + 1}`;
+      refunds.set(key ?? id, id);
+      log(`\n💸  [dev payment] refund ${request.amount ?? "full amount"} on ${request.billId}${request.reason ? ` (${request.reason})` : ""}: ${id}\n`);
+      return { id, status: "succeeded" as const };
+    },
     async createBill(request: CreateBillRequest): Promise<Bill> {
       const id = `dev-bill-${bills.size + 1}`;
       const bill: Bill = {
