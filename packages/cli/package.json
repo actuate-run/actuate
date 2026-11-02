@@ -23,7 +23,7 @@
     "dist"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "tsup src/bin.ts src/index.ts --format esm --dts --clean",

@@ -34,5 +34,23 @@ describe("scaffold", () => {
     await scaffold({ dir: join(dir, "a"), log: quiet });
     await expect(scaffold({ dir: join(dir, "a"), log: quiet })).rejects.toThrow(/not empty/);
     await expect(scaffold({ dir: join(dir, "b"), template: "../etc", log: quiet })).rejects.toThrow(/Invalid template/);
+    const notFound = (async () => new Response("", { status: 404 })) as unknown as typeof fetch;
+    await expect(scaffold({ dir: join(dir, "c"), template: "nope", fetch: notFound, log: quiet })).rejects.toThrow(
+      /not found in actuate-run\/templates@main \(HTTP 404\)\. Templates: https:\/\/github\.com\/actuate-run\/templates/,
+    );
+  });
+});
+
+describe("versions", () => {
+  it("scaffolds projects on this release's SDK and CLI, not a hard-coded range", async () => {
+    const own = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+    const fixed = JSON.parse(readFileSync(new URL("../../../.changeset/config.json", import.meta.url), "utf8")).fixed as string[][];
+    // create-actuate's version only tracks the SDK's if changesets releases them together.
+    expect(fixed.find((g) => g.includes("create-actuate"))).toEqual(expect.arrayContaining(["@actuate/sdk", "@actuate/cli"]));
+    const dir = join(mkdtempSync(join(tmpdir(), "ca-")), "v");
+    await scaffold({ dir, log: quiet });
+    const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+    expect(pkg.dependencies["@actuate/sdk"]).toBe(`^${own}`);
+    expect(pkg.devDependencies["@actuate/cli"]).toBe(`^${own}`);
   });
 });

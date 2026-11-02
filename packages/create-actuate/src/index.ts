@@ -1,8 +1,14 @@
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const TEMPLATES_REPO = "actuate-run/templates";
-export const SDK_VERSION = "^0.0.0";
+
+/**
+ * The range scaffolded projects use for @actuate/sdk and @actuate/cli: this package's own
+ * version, which changesets keeps equal to theirs (one "fixed" group in .changeset/config.json).
+ */
+export const SDK_VERSION = `^${(JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")) as { version: string }).version}`;
 
 export interface ScaffoldOptions {
   dir: string;
@@ -90,7 +96,9 @@ async function fetchTemplate(template: string, ref: string, doFetch: typeof fetc
   if (!/^[a-z0-9][a-z0-9-]*$/.test(template)) throw new Error(`Invalid template name "${template}"`);
   const raw = (file: string) => `https://raw.githubusercontent.com/${TEMPLATES_REPO}/${ref}/${template}/${file}`;
   const res = await doFetch(raw("actuator.ts"));
-  if (!res.ok) throw new Error(`Template "${template}" not found in ${TEMPLATES_REPO}@${ref} (HTTP ${res.status}).`);
+  if (!res.ok) {
+    throw new Error(`Template "${template}" not found in ${TEMPLATES_REPO}@${ref} (HTTP ${res.status}). Templates: https://github.com/${TEMPLATES_REPO}`);
+  }
   const files: Record<string, string> = { "actuator.ts": await res.text() };
   for (const optional of ["README.md", ".env.example", "actuate.config.json"]) {
     const r = await doFetch(raw(optional));

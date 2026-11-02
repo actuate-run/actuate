@@ -9,7 +9,7 @@ const { values, positionals } = parseArgs({
 });
 
 if (values.help) {
-  console.log("Usage: npm create actuate [dir] -- [--template <name>]\n\nTemplates: https://github.com/actuate-run/templates");
+  console.log("Usage: npm create actuate [dir] -- [--template <name>] [--ref <git-ref>]\n\nTemplates: https://github.com/actuate-run/templates");
   process.exit(0);
 }
 
