@@ -1,0 +1,25 @@
+name: Bug report
+description: Something doesn't work as documented.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what happened instead. Include error output.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The smallest actuator file or command that shows it.
+      render: ts
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "Package versions and where it ran, e.g. @actuate/cli 0.1.0, actuate dev, Node 22, macOS"
+  - type: markdown
+    attributes:
+      value: "Security problems: please don't file an issue. See SECURITY.md."

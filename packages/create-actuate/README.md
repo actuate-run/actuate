@@ -1,12 +1,20 @@
 # create-actuate
 
-Scaffold an Actuate actuator.
+Start an Actuate project.
 
 ```bash
-npm create actuate my-bot
-npm create actuate my-bot -- --template deposit-reminder
+npm create actuate                                  # the hello starter in ./my-actuator
+npm create actuate my-tool -- --template refund-order
 ```
 
-Docs: https://actuate.run/docs · Source: https://github.com/actuate-run/actuate
+Templates come from [actuate-run/templates](https://github.com/actuate-run/templates): agent tools such as `refund-order`, `lead-intake` and `escalate-to-human`, and automations such as `deposit-reminder` and `daily-report`. Then:
 
-License: Apache-2.0
+```bash
+cd my-tool && npm install && npx actuate dev
+```
+
+[Quickstart](https://actuate.run/docs/getting-started/quickstart/)
+
+---
+
+[Docs](https://actuate.run/docs) · [Source](https://github.com/actuate-run/actuate) · [Templates](https://github.com/actuate-run/templates) · Apache-2.0

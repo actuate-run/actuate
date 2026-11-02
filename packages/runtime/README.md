@@ -1,8 +1,9 @@
 # @actuate/runtime
 
-The Actuate step engine: journaled steps, replay, sleeps on Durable Object alarms, events and signed approvals. Runs on workerd with SQLite, so you can self-host.
+The Actuate step engine: journaled steps, replay, sleeps on Durable Object alarms, events, and signed approval and input links. It runs an actuator as a Worker plus a SQLite-backed Durable Object, on Cloudflare or plain `workerd`, with no Actuate account. `actuate dev` runs the same engine.
 
 ```ts
+// worker.ts
 import { createRuntime } from "@actuate/runtime/worker";
 import actuator from "./actuator";
 
@@ -11,6 +12,8 @@ export default runtime.worker;
 export const ActuatorObject = runtime.ActuatorObject;
 ```
 
-Docs: https://actuate.run/docs · Source: https://github.com/actuate-run/actuate
+Bind `ActuatorObject` as a SQLite-backed Durable Object named `ACTUATOR`, set `ACTUATE_TOKEN` and `ACTUATE_WEBHOOK_SECRET`, and deploy with `wrangler deploy`. The runtime serves an HTTP API for runs, events, approvals and tables. Guide: [Self-hosting](https://actuate.run/docs/guides/self-hosting/) · [Runtime HTTP API](https://actuate.run/docs/reference/runtime-http/).
 
-License: Apache-2.0
+---
+
+[Docs](https://actuate.run/docs) · [Source](https://github.com/actuate-run/actuate) · [Templates](https://github.com/actuate-run/templates) · Apache-2.0

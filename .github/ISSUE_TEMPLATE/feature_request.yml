@@ -1,0 +1,16 @@
+name: Feature request
+description: Something Actuate should do.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you're trying to do
+      description: The task or tool you're building, and where Actuate gets in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: An API sketch, provider, or behaviour you'd like. Optional.
