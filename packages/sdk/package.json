@@ -4,13 +4,23 @@
   "description": "Define Actuate actuators: durable steps, per-actuator SQLite and schema-validated inputs.",
   "license": "Apache-2.0",
   "type": "module",
-  "repository": { "type": "git", "url": "https://github.com/actuate-run/actuate", "directory": "packages/sdk" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/actuate-run/actuate",
+    "directory": "packages/sdk"
+  },
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "sideEffects": false,
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",

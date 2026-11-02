@@ -1,0 +1,40 @@
+{
+  "name": "@actuate/cli",
+  "version": "0.0.0",
+  "description": "The actuate command: init, dev, check, deploy and logs for Actuate actuators.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/actuate-run/actuate",
+    "directory": "packages/cli"
+  },
+  "bin": {
+    "actuate": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup src/bin.ts src/index.ts --format esm --dts --clean",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@actuate/runtime": "workspace:*",
+    "@actuate/sdk": "workspace:*",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.40.0",
+    "create-actuate": "workspace:*"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "@actuate/e2e",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@actuate/runtime": "workspace:*",
+    "@actuate/sdk": "workspace:*",
+    "esbuild": "^0.25.0",
+    "miniflare": "^4.20251101.0"
+  }
+}
