@@ -1,5 +1,11 @@
 # @actuate/sdk
 
+## 0.1.1
+
+### Patch Changes
+
+- First release published from GitHub Actions, with npm provenance. No code changes since 0.1.0.
+
 ## 0.1.0
 
 ### Minor Changes
