@@ -16,6 +16,8 @@ export interface HttpProviderOptions {
   allow: readonly string[];
   /** Origins that belong to this actuator; requests to them are refused to stop webhook loops. */
   selfOrigins?: readonly string[];
+  /** Hostnames (and their subdomains) that are always refused, e.g. the platform's own domains. */
+  blockedHosts?: readonly string[];
   fetch?: typeof fetch;
 }
 
@@ -26,7 +28,12 @@ export function createHttpProvider(options: HttpProviderOptions): HttpProvider {
     async fetch(input, init) {
       const url = new URL(typeof input === "string" ? input : input.toString());
       if (url.protocol !== "https:") throw new Error(`ctx.http: only https:// URLs are allowed (got ${url.protocol}).`);
-      if (options.selfOrigins?.includes(url.origin)) throw new Error("ctx.http: an actuator cannot call its own URL.");
+      // Canonical host: lowercase, punycode (URL does this), no trailing dot.
+      const host = url.hostname.toLowerCase().replace(/\.+$/, "");
+      const selfHosts = (options.selfOrigins ?? []).map((o) => new URL(o).hostname.toLowerCase().replace(/\.+$/, ""));
+      const blocked = [...selfHosts, ...(options.blockedHosts ?? []).map((h) => h.toLowerCase().replace(/^\*\./, ""))];
+      if (blocked.some((b) => host === b || host.endsWith(`.${b}`))) throw new Error("ctx.http: an actuator cannot call its own URL.");
+      if (/^\[|^\d+\.\d+\.\d+\.\d+$/.test(url.hostname)) throw new Error("ctx.http: IP addresses are not allowed; use a hostname.");
       if (!hostAllowed(url.hostname, options.allow)) {
         throw new Error(`ctx.http: ${url.hostname} is not in this actuator's http.allow list.`);
       }

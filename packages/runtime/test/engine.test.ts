@@ -594,3 +594,40 @@ describe("optional capabilities and the step clock", () => {
     ).toThrow(/cannot be optional/);
   });
 });
+
+describe("security", () => {
+  it("never writes approval links to run logs, but the owner can fetch them", async () => {
+    const act = defineActuator({
+      name: "gate",
+      description: "test",
+      input: z.object({}),
+      async run(ctx) {
+        return ctx.step.waitForApproval("ok", { timeout: "1 hour" });
+      },
+    });
+    const h = harness(act);
+    const { run } = await h.start();
+    expect(JSON.stringify(h.manager.getLogs(run.runId))).not.toContain("token=");
+    const links = await h.manager.approvalLinks(run.runId, "ok");
+    expect(links?.approveUrl).toBe(h.approvals[0]!.approveUrl);
+    expect(await h.manager.approvalLinks(run.runId, "nope")).toBeNull();
+  });
+
+  it("neutralises spreadsheet formulas in CSV exports", async () => {
+    const { toCsv } = await import("../src/index.js");
+    expect(toCsv(["a"], [{ a: "=HYPERLINK(\"x\")" }, { a: "-1" }, { a: 5 }])).toBe(`a\r\n"'=HYPERLINK(""x"")"\r\n'-1\r\n5\r\n`);
+  });
+
+  it("http refuses its own hosts (any case or trailing dot), blocked platforms and IP literals", async () => {
+    const { createHttpProvider } = await import("../src/index.js");
+    const http = createHttpProvider({
+      allow: ["*.example.com", "run.actuate.test"],
+      selfOrigins: ["https://run.actuate.test"],
+      blockedHosts: ["actuate.test"],
+      fetch: (async () => new Response("ok")) as typeof fetch,
+    });
+    await expect(http.fetch("https://RUN.actuate.test./a/x/webhook")).rejects.toThrow(/own URL/);
+    await expect(http.fetch("https://1.2.3.4/")).rejects.toThrow(/IP addresses/);
+    expect((await http.fetch("https://api.example.com/")).status).toBe(200);
+  });
+});

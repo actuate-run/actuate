@@ -114,7 +114,9 @@ describe("self-hosted runtime on workerd", () => {
     const started = await call("/run", { headers: auth, json: { name: "Raj", mode: "approval" } });
     const runId = started.body.runId;
     const run = await call(`/runs/${runId}`, { headers: auth });
-    const approveUrl: string = run.body.logs.find((l: any) => l.data?.approveUrl).data.approveUrl;
+    expect(JSON.stringify(run.body.logs)).not.toContain("token="); // links never appear in run logs
+    expect((await call(`/runs/${runId}/approvals/ok/links`)).status).toBe(401); // owner only
+    const approveUrl: string = (await call(`/runs/${runId}/approvals/ok/links`, { headers: auth })).body.approveUrl;
     const token = new URL(approveUrl).searchParams.get("token")!;
     expect(new URL(approveUrl).origin).toBe(base);
 

@@ -74,6 +74,7 @@ export async function dev(options: DevOptions): Promise<void> {
   }
   const configFile = join(options.cwd, "actuate.config.json");
   if (existsSync(configFile)) vars.ACTUATE_CONFIG = readFileSync(configFile, "utf8");
+  vars.ACTUATE_DEV = "1"; // local only: admin routes and webhooks work without secrets
 
   writeFileSync(join(outDir, "entry.ts"), devEntry(file, options.port));
   writeFileSync(join(outDir, "wrangler.json"), JSON.stringify(wranglerConfig(meta, vars), null, 2));

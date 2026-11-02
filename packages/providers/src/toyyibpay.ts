@@ -143,7 +143,8 @@ export const toyyibpay: ProviderDefinitionWithWebhookLookup<ToyyibPayCredentials
     if (txs.length === 0) throw new WebhookVerificationError("ToyyibPay callback does not match any transaction on this account");
     const { status, tx } = summarise(txs);
     if (status !== "paid" && status !== "failed") return null;
-    const referenceId = tx?.billExternalReferenceNo || fields.order_id;
+    // ToyyibPay callbacks are unsigned: trust only what the authenticated re-query returns, never the callback's order_id.
+    const referenceId = tx?.billExternalReferenceNo;
     if (!referenceId) return null;
     return {
       event: `payment.${referenceId}`,
@@ -151,7 +152,7 @@ export const toyyibpay: ProviderDefinitionWithWebhookLookup<ToyyibPayCredentials
         provider: "toyyibpay",
         status,
         billId: billCode,
-        amount: Number(tx?.billpaymentAmount ?? fields.amount ?? 0),
+        amount: Number(tx?.billpaymentAmount ?? 0),
         currency: "MYR",
         referenceId,
         transactionRef: tx?.billpaymentInvoiceNo ?? fields.refno ?? null,

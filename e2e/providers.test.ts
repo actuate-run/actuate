@@ -23,6 +23,7 @@ beforeAll(async () => {
     compatibilityFlags: ["nodejs_compat"],
     durableObjects: { ACTUATOR: { className: "ActuatorObject", useSQLite: true } },
     bindings: {
+      ACTUATE_DEV: "1",
       ACTUATE_MESSAGING: "telegram",
       TELEGRAM_BOT_TOKEN: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
       ACTUATE_PAYMENT: "billplz",

@@ -16,8 +16,10 @@ export interface RuntimeEnv {
   ACTUATE_WEBHOOK_SECRET?: string;
   /** HMAC secret for approval links. Generated and stored on first use if unset. */
   ACTUATE_APPROVAL_SECRET?: string;
-  /** Public origin, e.g. https://bot.example.com. Defaults to the origin of the first request. */
+  /** Public origin, e.g. https://bot.example.com. Defaults to the origin of the first request; set it in production. */
   ACTUATE_PUBLIC_URL?: string;
+  /** "1" only under `actuate dev`: serves admin routes and webhooks without secrets. */
+  ACTUATE_DEV?: string;
   [key: string]: unknown;
 }
 
@@ -34,6 +36,13 @@ export interface RuntimeOptions<E extends RuntimeEnv = RuntimeEnv> {
   providerWebhook?: (kind: string, request: Request, env: E) => Promise<{ event: string; payload: Json } | null>;
   /** Runtime guards passed to the RunManager (wait/retry limits, pass admission, event caps, max passes). */
   guards?: Pick<RunManagerOptions, "passLimits" | "admitPass" | "maxBufferedEvents" | "maxEventBytes" | "maxPasses" | "maxLogLinesPerPass">;
+}
+
+function safeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }
 
 const json = (body: unknown, status = 200) =>
@@ -182,17 +191,20 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
             throw err;
           }
         }
+        // Fail closed: without secrets, only `actuate dev` (ACTUATE_DEV=1) serves the open routes.
+        const dev = this.env.ACTUATE_DEV === "1";
         if (path === "/webhook" && method === "POST") {
           const secret = this.env.ACTUATE_WEBHOOK_SECRET;
-          if (secret && request.headers.get("x-actuate-secret") !== secret && url.searchParams.get("secret") !== secret) {
-            return json({ error: "unauthorized" }, 401);
-          }
+          if (!secret && !dev) return json({ error: "Set ACTUATE_WEBHOOK_SECRET to accept webhooks." }, 503);
+          const given = request.headers.get("x-actuate-secret") ?? url.searchParams.get("secret") ?? "";
+          if (secret && !safeEqual(given, secret)) return json({ error: "unauthorized" }, 401);
           return this.startRun(request, "webhook");
         }
 
         // Admin routes.
         const token = this.env.ACTUATE_TOKEN;
-        if (token && request.headers.get("authorization") !== `Bearer ${token}`) return json({ error: "unauthorized" }, 401);
+        if (!token && !dev) return json({ error: "Set ACTUATE_TOKEN to use the admin API." }, 503);
+        if (token && !safeEqual(request.headers.get("authorization") ?? "", `Bearer ${token}`)) return json({ error: "unauthorized" }, 401);
 
         if (path === "/" && method === "GET") {
           return json({
@@ -216,6 +228,11 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
           );
         }
         if (path === "/approvals" && method === "GET") return json(m.pendingApprovals());
+        const linksMatch = /^\/runs\/([^/]+)\/approvals\/([^/]+)\/links$/.exec(path);
+        if (linksMatch && method === "GET") {
+          const links = await m.approvalLinks(decodeURIComponent(linksMatch[1]!), decodeURIComponent(linksMatch[2]!));
+          return links ? json(links) : json({ error: "No approval is waiting for that step." }, 404);
+        }
         const runMatch = /^\/runs\/([^/]+)(\/cancel|\/resume|\/approvals\/([^/]+)\/(approve|reject))?$/.exec(path);
         if (runMatch) {
           const runId = decodeURIComponent(runMatch[1]!);

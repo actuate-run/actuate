@@ -32,7 +32,9 @@ button{font:inherit;padding:.6rem 1.4rem;border-radius:.5rem;border:0;background
 export function toCsv(columns: string[], rows: Row[]): string {
   const cell = (v: unknown) => {
     if (v === null || v === undefined) return "";
-    const s = v instanceof ArrayBuffer || v instanceof Uint8Array ? "[binary]" : String(v);
+    let s = v instanceof ArrayBuffer || v instanceof Uint8Array ? "[binary]" : String(v);
+    // Spreadsheet formula injection: a leading = + - @ (or tab/CR) would execute in Excel or Sheets.
+    if (typeof v === "string" && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
     return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   return [columns.map(cell).join(","), ...rows.map((r) => columns.map((c) => cell(r[c])).join(","))].join("\r\n") + "\r\n";

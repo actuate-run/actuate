@@ -437,24 +437,44 @@ export class RunManager {
     );
   }
 
-  private async requestApproval(runId: string, step: string, opts: WaitForApprovalOptions & { expiresAt: number }): Promise<void> {
+  private async signedLinks(runId: string, step: string, expiresAt: number): Promise<{ approveUrl: string; rejectUrl: string }> {
     const secret = this.options.approvalSecret;
     const [approve, reject] = await Promise.all([
-      signApproval(secret, { r: runId, s: step, d: 1, e: opts.expiresAt }),
-      signApproval(secret, { r: runId, s: step, d: 0, e: opts.expiresAt }),
+      signApproval(secret, { r: runId, s: step, d: 1, e: expiresAt }),
+      signApproval(secret, { r: runId, s: step, d: 0, e: expiresAt }),
     ]);
     const base = typeof this.options.approvalUrl === "function" ? this.options.approvalUrl() : this.options.approvalUrl;
     const url = (token: string) => `${base}${base.includes("?") ? "&" : "?"}token=${token}`;
+    return { approveUrl: url(approve), rejectUrl: url(reject) };
+  }
+
+  /**
+   * The signed links for a step that is waiting for approval, for an owner who
+   * has no messaging channel. Only expose this behind owner authentication.
+   */
+  async approvalLinks(runId: string, step: string): Promise<{ approveUrl: string; rejectUrl: string; expiresAt: number } | null> {
+    const row = this.sql.exec(
+      `SELECT wake_at FROM _actuate_steps WHERE run_id = ? AND step_name = ? AND status = 'WAITING_APPROVAL'`,
+      [runId, step],
+    )[0];
+    if (!row || row.wake_at === null) return null;
+    const expiresAt = Number(row.wake_at);
+    return { ...(await this.signedLinks(runId, step, expiresAt)), expiresAt };
+  }
+
+  private async requestApproval(runId: string, step: string, opts: WaitForApprovalOptions & { expiresAt: number }): Promise<void> {
+    const { approveUrl, rejectUrl } = await this.signedLinks(runId, step, opts.expiresAt);
     const request: ApprovalRequest = {
       runId,
       step,
-      approveUrl: url(approve),
-      rejectUrl: url(reject),
+      approveUrl,
+      rejectUrl,
       expiresAt: opts.expiresAt,
       ...(opts.message ? { message: opts.message } : {}),
       ...(opts.notify ? { notify: opts.notify } : {}),
     };
-    await this.writeLog(runId, "info", `Approval requested for "${step}"`, { approveUrl: request.approveUrl, rejectUrl: request.rejectUrl });
+    // Never log the links: run logs are readable by anything holding a run token (e.g. the agent being gated).
+    await this.writeLog(runId, "info", `Approval requested for "${step}"`, { step, expiresAt: opts.expiresAt });
     try {
       await this.options.notifyApproval?.(request);
     } catch (err) {
