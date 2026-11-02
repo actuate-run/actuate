@@ -98,6 +98,17 @@ export interface RunManagerOptions {
   maxEventBytes?: number;
 }
 
+/** Who made a human decision, and through what. */
+export interface Who {
+  by?: string;
+  via: "link" | "dashboard" | "api";
+}
+
+function whoFields(who: Who): { by?: string; via: Who["via"] } {
+  const by = who.by?.replace(/[\u0000-\u001f]/g, " ").trim().slice(0, 120);
+  return { ...(by ? { by } : {}), via: who.via };
+}
+
 export interface StartRunOptions {
   input: Json;
   trigger: Trigger;
@@ -302,12 +313,13 @@ export class RunManager {
    */
   async decide(
     token: string,
-    extra: { note?: string; text?: string } = {},
+    extra: { note?: string; text?: string; by?: string } = {},
   ): Promise<{ ok: true; runId: string; step: string; approved: boolean } | { ok: false; reason: string }> {
     const claims = await verifyApproval(this.options.approvalSecret, token, this.now());
     if (!claims) return { ok: false, reason: "This link is invalid or has expired." };
-    if (claims.d === 2) return this.answerDirect(claims.r, claims.s, extra.text ?? "");
-    return this.decideDirect(claims.r, claims.s, claims.d === 1, extra.note);
+    const who = { ...(extra.by ? { by: extra.by } : {}), via: "link" as const };
+    if (claims.d === 2) return this.answerDirect(claims.r, claims.s, extra.text ?? "", who);
+    return this.decideDirect(claims.r, claims.s, claims.d === 1, extra.note, who);
   }
 
   /** Approve or reject a waiting step directly (e.g. from an authenticated dashboard). */
@@ -316,6 +328,7 @@ export class RunManager {
     step: string,
     approved: boolean,
     note?: string,
+    who: Who = { via: "api" },
   ): Promise<{ ok: true; runId: string; step: string; approved: boolean } | { ok: false; reason: string }> {
     const row = this.sql.exec(
       `SELECT status FROM _actuate_steps WHERE run_id = ? AND step_name = ? AND status = 'WAITING_APPROVAL'`,
@@ -323,7 +336,7 @@ export class RunManager {
     )[0];
     if (!row) return { ok: false, reason: "This approval has already been decided or has expired." };
     const trimmed = note?.trim().slice(0, 2_000);
-    const result: Json = { approved, at: new Date(this.now()).toISOString(), ...(trimmed ? { note: trimmed } : {}) };
+    const result: Json = { approved, at: new Date(this.now()).toISOString(), ...(trimmed ? { note: trimmed } : {}), ...whoFields(who) };
     this.completeWait(runId, step, result);
     await this.execute(runId);
     return { ok: true, runId, step, approved };
@@ -334,6 +347,7 @@ export class RunManager {
     runId: string,
     step: string,
     text: string,
+    who: Who = { via: "api" },
   ): Promise<{ ok: true; runId: string; step: string; approved: boolean } | { ok: false; reason: string }> {
     const row = this.sql.exec(
       `SELECT output_json FROM _actuate_steps WHERE run_id = ? AND step_name = ? AND status = 'WAITING_INPUT'`,
@@ -344,7 +358,7 @@ export class RunManager {
     const answer = String(text ?? "").trim();
     if (!answer) return { ok: false, reason: "The answer is empty." };
     if (answer.length > maxLength) return { ok: false, reason: `The answer is longer than ${maxLength} characters.` };
-    this.completeWait(runId, step, { text: answer, at: new Date(this.now()).toISOString() });
+    this.completeWait(runId, step, { text: answer, at: new Date(this.now()).toISOString(), ...whoFields(who) });
     await this.execute(runId);
     return { ok: true, runId, step, approved: true };
   }

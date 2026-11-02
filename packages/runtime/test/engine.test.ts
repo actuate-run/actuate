@@ -653,8 +653,8 @@ describe("waitForInput, approval notes, waitForEvent until", () => {
     expect(await h.manager.describeLink(token)).toMatchObject({ kind: "input", prompt: "What should we tell the customer?", initial: "Hi,", maxLength: 50 });
     expect(await h.manager.decide(token, { text: "x".repeat(51) })).toMatchObject({ ok: false });
     expect(await h.manager.decide(token, { text: "   " })).toMatchObject({ ok: false });
-    expect(await h.manager.decide(token, { text: " Refund approved, sorry! " })).toMatchObject({ ok: true });
-    expect(h.manager.getRun(run.runId)!.output).toMatchObject({ answer: { text: "Refund approved, sorry!" } });
+    expect(await h.manager.decide(token, { text: " Refund approved, sorry! ", by: " Aina\n" })).toMatchObject({ ok: true });
+    expect(h.manager.getRun(run.runId)!.output).toMatchObject({ answer: { text: "Refund approved, sorry!", by: "Aina", via: "link" } });
     expect(await h.manager.decide(token, { text: "again" })).toMatchObject({ ok: false });
     expect(await h.manager.describeLink(token)).toBeNull();
   });
@@ -673,7 +673,11 @@ describe("waitForInput, approval notes, waitForEvent until", () => {
     const token = tokenOf(h.approvals[0]!.approveUrl!);
     expect(await h.manager.describeLink(token)).toMatchObject({ kind: "approval", approve: true, message: "Send this?" });
     await h.manager.decide(token, { note: "Fix the typo first" });
-    expect(h.manager.getRun(run.runId)!.output).toMatchObject({ approved: true, note: "Fix the typo first" });
+    expect(h.manager.getRun(run.runId)!.output).toMatchObject({ approved: true, note: "Fix the typo first", via: "link" });
+    expect(h.manager.getRun(run.runId)!.output).not.toHaveProperty("by");
+    const second = (await h.start()).run;
+    await h.manager.decideDirect(second.runId, "ok", false, undefined, { by: "ops@kedai.example", via: "dashboard" });
+    expect(h.manager.getRun(second.runId)!.output).toMatchObject({ approved: false, by: "ops@kedai.example", via: "dashboard" });
   });
 
   it("waitForEvent until: an absolute deadline an event can beat", async () => {

@@ -73,6 +73,9 @@ export interface InputResult {
   text: string;
   /** ISO timestamp of the answer. */
   at: string;
+  /** Who answered; see ApprovalResult.by (link answers are self-reported). */
+  by?: string;
+  via?: "link" | "dashboard" | "api";
 }
 
 export interface WaitForApprovalOptions {
@@ -90,6 +93,13 @@ export interface ApprovalResult {
   at: string;
   /** Optional note typed by the approver (on the approval page or in the dashboard). */
   note?: string;
+  /**
+   * Who decided. From the dashboard or API it is the signed-in account (email or
+   * token name); from a signed link it is the name the person typed, if any (self-reported).
+   */
+  by?: string;
+  /** Where the decision came from. */
+  via?: "link" | "dashboard" | "api";
 }
 
 /**

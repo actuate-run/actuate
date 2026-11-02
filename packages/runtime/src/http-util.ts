@@ -23,6 +23,8 @@ export function approvalPage(actuator: string, token: string, info: LinkInfo | n
 <form method="post"><input type="hidden" name="token" value="${escapeHtml(token)}">
 <label for="text">Your answer</label>
 <textarea id="text" name="text" rows="6" maxlength="${info.maxLength}" required>${escapeHtml(info.initial ?? "")}</textarea>
+<label for="by">Your name (optional)</label>
+<input id="by" name="by" maxlength="120" autocomplete="name">
 <button type="submit">Send answer</button></form>`;
   } else {
     const verb = info.approve ? "Approve" : "Reject";
@@ -31,6 +33,8 @@ ${info.message ? `<p class="q">${escapeHtml(info.message)}</p>` : ""}<p>For <str
 <form method="post"><input type="hidden" name="token" value="${escapeHtml(token)}">
 <label for="note">Note (optional)</label>
 <textarea id="note" name="note" rows="3" maxlength="2000"></textarea>
+<label for="by">Your name (optional)</label>
+<input id="by" name="by" maxlength="120" autocomplete="name">
 <button type="submit" class="${info.approve ? "" : "reject"}">${verb}</button></form>`;
   }
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -38,10 +42,10 @@ ${info.message ? `<p class="q">${escapeHtml(info.message)}</p>` : ""}<p>For <str
 <style>body{font:16px/1.5 system-ui,sans-serif;max-width:34rem;margin:12vh auto;padding:0 1rem;color:#141413;background:#fafaf8}
 h1{font-size:1.4rem;margin:0 0 .75rem}.q{padding:.75rem 1rem;border-left:3px solid #c2410c;background:#f2f0ec;border-radius:.4rem;white-space:pre-wrap}
 label{display:block;margin:1rem 0 .35rem;font-size:.9rem;color:#5c5a55}
-textarea{width:100%;box-sizing:border-box;font:inherit;padding:.6rem;border:1px solid #d8d5cf;border-radius:.5rem;background:#fff;color:inherit}
+textarea,input#by{width:100%;box-sizing:border-box;font:inherit;padding:.6rem;border:1px solid #d8d5cf;border-radius:.5rem;background:#fff;color:inherit}
 button{margin-top:1rem;font:inherit;padding:.6rem 1.4rem;border-radius:.5rem;border:0;background:#141413;color:#fff;cursor:pointer}
 button.reject{background:#b42318}
-@media (prefers-color-scheme:dark){body{background:#121211;color:#eeece8}.q{background:#1d1c1a}textarea{background:#1a1918;border-color:#3a3835}button{background:#eeece8;color:#141413}button.reject{background:#f97066;color:#141413}label{color:#a8a59e}}</style></head>
+@media (prefers-color-scheme:dark){body{background:#121211;color:#eeece8}.q{background:#1d1c1a}textarea,input#by{background:#1a1918;border-color:#3a3835}button{background:#eeece8;color:#141413}button.reject{background:#f97066;color:#141413}label{color:#a8a59e}}</style></head>
 <body>${body}</body></html>`;
 }
 

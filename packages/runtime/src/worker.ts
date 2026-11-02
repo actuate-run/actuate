@@ -180,6 +180,7 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
           const result = await m.decide(String(form.get("token") ?? ""), {
             note: form.get("note") ?? undefined,
             text: form.get("text") ?? undefined,
+            by: form.get("by") ?? undefined,
           });
           const message = result.ok
             ? form.has("text")
@@ -243,8 +244,13 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
         if (path === "/approvals" && method === "GET") return json(m.pendingApprovals());
         const inputMatch = /^\/runs\/([^/]+)\/inputs\/([^/]+)$/.exec(path);
         if (inputMatch && method === "POST") {
-          const body = (await request.json().catch(() => ({}))) as { text?: string };
-          return json(await m.answerDirect(decodeURIComponent(inputMatch[1]!), decodeURIComponent(inputMatch[2]!), String(body.text ?? "")));
+          const body = (await request.json().catch(() => ({}))) as { text?: string; by?: string };
+          return json(
+            await m.answerDirect(decodeURIComponent(inputMatch[1]!), decodeURIComponent(inputMatch[2]!), String(body.text ?? ""), {
+              by: body.by ?? "owner",
+              via: "api",
+            }),
+          );
         }
         const linksMatch = /^\/runs\/([^/]+)\/approvals\/([^/]+)\/links$/.exec(path);
         if (linksMatch && method === "GET") {
@@ -264,8 +270,8 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
             return json(m.getRun(runId));
           }
           if (runMatch[3] && method === "POST") {
-            const body = (await request.json().catch(() => ({}))) as { note?: string };
-            return json(await m.decideDirect(runId, decodeURIComponent(runMatch[3]), runMatch[4] === "approve", body.note));
+            const body = (await request.json().catch(() => ({}))) as { note?: string; by?: string };
+            return json(await m.decideDirect(runId, decodeURIComponent(runMatch[3]), runMatch[4] === "approve", body.note, { by: body.by ?? "owner", via: "api" }));
           }
         }
         const eventMatch = /^\/events\/(.+)$/.exec(path);
