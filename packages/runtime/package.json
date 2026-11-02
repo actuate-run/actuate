@@ -1,0 +1,55 @@
+{
+  "name": "@actuate/runtime",
+  "version": "0.0.0",
+  "description": "Single-tenant Actuate step engine for workerd and SQLite: durable steps, sleeps, events and approvals.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/actuate-run/actuate",
+    "directory": "packages/runtime"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js",
+      "default": "./dist/worker.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts src/worker.ts --format esm --dts --clean --external cloudflare:workers",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@actuate/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251101.0"
+  },
+  "homepage": "https://actuate.run/docs",
+  "bugs": {
+    "url": "https://github.com/actuate-run/actuate/issues"
+  },
+  "keywords": [
+    "actuate",
+    "durable",
+    "workflow",
+    "workerd",
+    "durable-objects",
+    "sqlite"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

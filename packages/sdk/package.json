@@ -1,0 +1,49 @@
+{
+  "name": "@actuate/sdk",
+  "version": "0.0.0",
+  "description": "Define Actuate actuators: durable steps, per-actuator SQLite and schema-validated inputs.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/actuate-run/actuate",
+    "directory": "packages/sdk"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "zod": "^4.6.0"
+  },
+  "homepage": "https://actuate.run/docs",
+  "bugs": {
+    "url": "https://github.com/actuate-run/actuate/issues"
+  },
+  "keywords": [
+    "actuate",
+    "durable",
+    "workflow",
+    "mcp",
+    "agents",
+    "cloudflare",
+    "sqlite"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}
