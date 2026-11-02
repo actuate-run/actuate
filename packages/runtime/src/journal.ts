@@ -41,11 +41,19 @@ export interface Journal {
   log(level: LogLevel, message: string, data?: Json): Promise<void>;
 }
 
+export interface PassLimits {
+  /** Longest sleep or wait. Sleeps beyond it fail; waits time out at it (resolve to null). */
+  maxWaitMs?: number;
+  /** Retries a step may ask for; larger values are clamped. Default 10. */
+  maxRetries?: number;
+}
+
 export interface PassRequest {
   runId: string;
   input: Json;
   trigger: Trigger;
   now?: () => number;
+  limits?: PassLimits;
 }
 
 export type PassOutcome =

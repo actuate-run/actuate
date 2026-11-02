@@ -3,7 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import { NonRetryableError, defineActuator, z, type Actuator, type Providers } from "@actuate/sdk";
 import { RunManager, executePass, nodeSqlite, type ApprovalRequest } from "../src/index.js";
 
-function harness(actuator: Actuator, opts: { providers?: Partial<Providers>; config?: unknown } = {}) {
+function harness(
+  actuator: Actuator,
+  opts: { providers?: Partial<Providers>; config?: unknown; manager?: Partial<ConstructorParameters<typeof RunManager>[0]> } = {},
+) {
   let now = Date.parse("2026-11-02T00:00:00Z");
   const approvals: ApprovalRequest[] = [];
   const wakes: Array<number | null> = [];
@@ -17,6 +20,7 @@ function harness(actuator: Actuator, opts: { providers?: Partial<Providers>; con
     notifyApproval: async (r) => void approvals.push(r),
     scheduleWake: (w) => void wakes.push(w),
     invoke: (request, journal) => executePass(actuator, request, { journal, config, ...(opts.providers ? { providers: opts.providers } : {}) }),
+    ...opts.manager,
   });
   return {
     manager,
@@ -461,5 +465,99 @@ describe("blueprint example: deposit booking", () => {
     await h.advance(2 * 3_600_000);
     expect(h.manager.getRun(run.runId)!.output).toEqual({ status: "REMINDER_SENT", bookingId: run.runId });
     expect(p.sent).toHaveLength(2);
+  });
+});
+
+describe("runaway guards", () => {
+  const sleeper = defineActuator({
+    name: "sleeper",
+    description: "test",
+    input: z.object({ ms: z.number() }),
+    async run(ctx, input) {
+      await ctx.step.sleep("nap", input.ms);
+      return "woke";
+    },
+  });
+
+  it("fails sleeps longer than the plan allows and clamps open-ended waits", async () => {
+    const h = harness(sleeper, { manager: { passLimits: { maxWaitMs: 60_000 } } });
+    expect((await h.start({ ms: 120_000 })).run.error?.message).toMatch(/longer than this plan allows/);
+    expect((await h.start({ ms: 30_000 })).run.status).toBe("WAITING");
+
+    const waiter = defineActuator({
+      name: "forever",
+      description: "test",
+      input: z.object({}),
+      async run(ctx) {
+        return { got: await ctx.step.waitForEvent("e", { event: "never" }) };
+      },
+    });
+    const w = harness(waiter, { manager: { passLimits: { maxWaitMs: 60_000 } } });
+    const { run } = await w.start();
+    expect(run.wakeAt).toBe(Date.parse("2026-11-02T00:01:00Z"));
+    await w.advance(60_000);
+    expect(w.manager.getRun(run.runId)!.output).toEqual({ got: null });
+  });
+
+  it("clamps retries", async () => {
+    let calls = 0;
+    const act = defineActuator({
+      name: "manyretries",
+      description: "test",
+      input: z.object({}),
+      async run(ctx) {
+        return ctx.step.do("x", { retries: 1_000_000, backoff: "1s" }, () => {
+          calls++;
+          throw new Error("no");
+        });
+      },
+    });
+    const h = harness(act, { manager: { passLimits: { maxRetries: 2 } } });
+    const { run } = await h.start();
+    await h.advance(1_000);
+    await h.advance(2_000);
+    expect(h.manager.getRun(run.runId)!.status).toBe("FAILED");
+    expect(calls).toBe(3);
+  });
+
+  it("defers passes the budget refuses, without losing the run", async () => {
+    let open = false;
+    const h = harness(sleeper, { manager: { admitPass: () => (open ? null : Date.parse("2026-12-01T00:00:00Z")) } });
+    const { run } = await h.start({ ms: 1 });
+    expect(run).toMatchObject({ status: "WAITING", wakeAt: Date.parse("2026-12-01T00:00:00Z"), passes: 0 });
+    open = true;
+    await h.advance(30 * 86_400_000);
+    expect(h.manager.getRun(run.runId)).toMatchObject({ status: "WAITING" }); // now sleeping 1 ms
+    await h.advance(1);
+    expect(h.manager.getRun(run.runId)).toMatchObject({ status: "COMPLETED", output: "woke" });
+  });
+
+  it("caps buffered events and payload size", async () => {
+    const h = harness(sleeper, { manager: { maxBufferedEvents: 3, maxEventBytes: 100 } });
+    for (let i = 0; i < 10; i++) await h.manager.deliverEvent(`k${i}`, { i });
+    await expect(h.manager.deliverEvent("big", { s: "x".repeat(200) })).rejects.toThrow(/too large/);
+    const waiter = defineActuator({
+      name: "late",
+      description: "test",
+      input: z.object({ k: z.string() }),
+      async run(ctx, input) {
+        return ctx.step.waitForEvent("e", { event: input.k, timeout: "1s" });
+      },
+    });
+    const w = harness(waiter, { manager: { maxBufferedEvents: 3 } });
+    for (let i = 0; i < 10; i++) await w.manager.deliverEvent(`k${i}`, { i });
+    expect((await w.start({ k: "k9" })).run.output).toEqual({ i: 9 });
+    expect((await w.start({ k: "k0" })).run.status).toBe("WAITING"); // dropped
+  });
+
+  it("prunes settled runs but keeps waiting ones", async () => {
+    const h = harness(sleeper);
+    const done = (await h.start({ ms: 0 })).run;
+    const waiting = (await h.start({ ms: 3_600_000 })).run;
+    expect(done.status).toBe("COMPLETED");
+    expect(h.manager.pruneRuns(Date.parse("2026-11-03T00:00:00Z"))).toBe(1);
+    expect(h.manager.getRun(done.runId)).toBeNull();
+    expect(h.manager.getSteps(done.runId)).toEqual([]);
+    expect(h.manager.getRun(waiting.runId)).not.toBeNull();
   });
 });

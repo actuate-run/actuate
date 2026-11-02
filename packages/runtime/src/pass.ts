@@ -166,7 +166,7 @@ class Pass {
       const attempt = (existing?.attempts ?? 0) + 1;
       // Steps that can retry record the attempt before running, so a crash mid-step still counts it.
       // Others are written once, on completion: half the billed writes.
-      if ((options.retries ?? 0) > 0) {
+      if (Math.min(options.retries ?? 0, this.request.limits?.maxRetries ?? 10) > 0) {
         await this.write(this.row(name, { status: "RUNNING", attempts: attempt, wake_at: null }));
       }
 
@@ -177,7 +177,7 @@ class Pass {
       } catch (err) {
         this.inStep = null;
         if (isSuspendSignal(err)) throw err;
-        const retries = options.retries ?? 0;
+        const retries = Math.min(options.retries ?? 0, this.request.limits?.maxRetries ?? 10);
         const message = err instanceof Error ? err.message : String(err);
         if (err instanceof NonRetryableError || attempt > retries) {
           await this.write(this.row(name, { status: "FAILED", error: message, attempts: attempt }));
@@ -201,12 +201,14 @@ class Pass {
       const named = maybeDuration !== undefined;
       const name = named ? (nameOrDuration as string) : `sleep#${++this.sleepCounter}`;
       const ms = parseDuration((named ? maybeDuration : nameOrDuration) as Duration);
+      this.checkSleep(name, ms);
       await this.sleepStep("sleep", name, () => this.now() + ms);
     },
 
     sleepUntil: async (name: string, until: Date | number): Promise<void> => {
       const at = typeof until === "number" ? until : until.getTime();
       if (!Number.isFinite(at)) throw new ActuatorError(`ctx.step.sleepUntil("${name}"): invalid date.`);
+      if (!this.rows.has(name)) this.checkSleep(name, at - this.now());
       await this.sleepStep("sleepUntil", name, () => at);
     },
 
@@ -222,7 +224,7 @@ class Pass {
         await this.write(this.row(name, { status: "COMPLETED", event: options.event, output_json: toJson(buffered.payload) }));
         return buffered.payload as T;
       }
-      const wakeAt = options.timeout === undefined ? null : this.now() + parseDuration(options.timeout);
+      const wakeAt = this.waitDeadline(options.timeout === undefined ? null : parseDuration(options.timeout));
       await this.write(this.row(name, { status: "WAITING_EVENT", event: options.event, wake_at: wakeAt }));
       this.suspend(`waiting for event "${options.event}"`);
     },
@@ -233,7 +235,7 @@ class Pass {
       const resolved = await this.resolveWait(name, existing);
       if (resolved !== undefined) return resolved as ApprovalResult | null;
 
-      const expiresAt = this.now() + parseDuration(options.timeout ?? DEFAULT_APPROVAL_TIMEOUT);
+      const expiresAt = this.waitDeadline(parseDuration(options.timeout ?? DEFAULT_APPROVAL_TIMEOUT))!;
       await this.write(
         // While waiting, output_json holds the request so the approval queue can show what is being approved.
         this.row(name, {
@@ -247,6 +249,21 @@ class Pass {
       this.suspend(`waiting for approval "${name}"`);
     },
   };
+
+  /** Sleeps longer than the plan allows fail loudly rather than silently waking early. */
+  private checkSleep(name: string, ms: number): void {
+    const max = this.request.limits?.maxWaitMs;
+    if (max !== undefined && ms > max && !this.rows.has(name)) {
+      throw new ActuatorError(`Step "${name}" sleeps ${Math.round(ms / 1000)}s, longer than this plan allows (${Math.round(max / 1000)}s).`);
+    }
+  }
+
+  /** A wait's wake time: its timeout, clamped to the plan's longest wait (waits with no timeout get the maximum). */
+  private waitDeadline(timeoutMs: number | null): number | null {
+    const max = this.request.limits?.maxWaitMs;
+    if (max === undefined) return timeoutMs === null ? null : this.now() + timeoutMs;
+    return this.now() + Math.min(timeoutMs ?? max, max);
+  }
 
   /**
    * For an existing wait row: return its result if it completed or timed out,

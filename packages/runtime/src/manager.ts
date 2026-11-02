@@ -4,6 +4,7 @@ import {
   toJson,
   type Journal,
   type LogLevel,
+  type PassLimits,
   type PassOutcome,
   type PassRequest,
   type SerializedError,
@@ -80,6 +81,17 @@ export interface RunManagerOptions {
   consoleLogs?: boolean;
   /** Log lines kept per pass; the rest are dropped with one warning. Default 100. */
   maxLogLinesPerPass?: number;
+  /** Limits handed to every pass (longest wait, retry cap). */
+  passLimits?: PassLimits;
+  /**
+   * Asked before every pass. Return a time to defer the pass until (the run
+   * stays WAITING, nothing is lost) or null to run it now. Used for budgets.
+   */
+  admitPass?: (runId: string) => Promise<number | null> | number | null;
+  /** Events buffered while nobody waits for them; the oldest are dropped beyond this. Default 1000. */
+  maxBufferedEvents?: number;
+  /** Largest event payload accepted, bytes of JSON. Default 64 KiB. */
+  maxEventBytes?: number;
 }
 
 export interface StartRunOptions {
@@ -170,10 +182,26 @@ export class RunManager {
         return;
       }
 
+      const deferUntil = (await this.options.admitPass?.(runId)) ?? null;
+      if (deferUntil !== null) {
+        this.sql.exec(`UPDATE _actuate_runs SET status = 'WAITING', wake_at = ?, updated_at = ? WHERE run_id = ?`, [
+          deferUntil,
+          this.now(),
+          runId,
+        ]);
+        break;
+      }
+
       let outcome: PassOutcome;
       try {
         outcome = await this.options.invoke(
-          { runId, input: fromJson(run.input_json as string), trigger: fromJson<Trigger>(run.trigger_json as string), now: this.now },
+          {
+            runId,
+            input: fromJson(run.input_json as string),
+            trigger: fromJson<Trigger>(run.trigger_json as string),
+            now: this.now,
+            ...(this.options.passLimits ? { limits: this.options.passLimits } : {}),
+          },
           this.journal(runId),
         );
       } catch (err) {
@@ -246,16 +274,16 @@ export class RunManager {
     if (event.startsWith("approval:")) throw new Error("Approval events can only be posted through a signed link.");
     // A waiting step resolves to null only on timeout, so an event never delivers null.
     if (payload === null || payload === undefined) payload = {};
+    const encoded = toJson(payload);
+    if (encoded.length > (this.options.maxEventBytes ?? 64 * 1024)) throw new Error("Event payload is too large.");
     const waiting = this.sql.exec(
       `SELECT run_id, step_name FROM _actuate_steps WHERE event = ? AND status = 'WAITING_EVENT'`,
       [event],
     );
     if (waiting.length === 0) {
-      this.sql.exec(`INSERT INTO _actuate_events (event, payload_json, received_at) VALUES (?, ?, ?)`, [
-        event,
-        toJson(payload),
-        this.now(),
-      ]);
+      this.sql.exec(`INSERT INTO _actuate_events (event, payload_json, received_at) VALUES (?, ?, ?)`, [event, encoded, this.now()]);
+      // Bound the buffer: drop the oldest events beyond the cap.
+      this.sql.exec(`DELETE FROM _actuate_events WHERE id <= (SELECT MAX(id) FROM _actuate_events) - ?`, [this.options.maxBufferedEvents ?? 1000]);
       return { resumed: [], buffered: true };
     }
     const runIds = [...new Set(waiting.map((w) => String(w.run_id)))];
@@ -299,6 +327,25 @@ export class RunManager {
     this.sql.exec(`DELETE FROM _actuate_events WHERE received_at < ?`, [now - (this.options.eventBufferTtlMs ?? 7 * 86_400_000)]);
     await Promise.all(due.map((r) => this.execute(String(r.run_id))));
     await this.reschedule();
+  }
+
+  /**
+   * Delete settled runs (and their steps and logs) last updated before `before`.
+   * User tables are never touched. Returns how many runs were removed.
+   */
+  pruneRuns(before: number, limit = 500): number {
+    const ids = this.sql
+      .exec(`SELECT run_id FROM _actuate_runs WHERE status IN ('COMPLETED','FAILED','CANCELLED') AND updated_at < ? LIMIT ?`, [before, limit])
+      .map((r) => String(r.run_id));
+    if (!ids.length) return 0;
+    this.sql.transaction(() => {
+      for (const id of ids) {
+        this.sql.exec(`DELETE FROM _actuate_steps WHERE run_id = ?`, [id]);
+        this.sql.exec(`DELETE FROM _actuate_logs WHERE run_id = ?`, [id]);
+        this.sql.exec(`DELETE FROM _actuate_runs WHERE run_id = ?`, [id]);
+      }
+    });
+    return ids.length;
   }
 
   nextWakeAt(): number | null {
