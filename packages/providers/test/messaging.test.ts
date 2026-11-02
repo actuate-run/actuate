@@ -155,3 +155,22 @@ describe("resend", () => {
     );
   });
 });
+
+describe("html format", () => {
+  it("uses Telegram HTML mode, Resend html+text, and strips tags for WhatsApp", async () => {
+    const { telegram, resend, whatsapp } = await import("../src/index.js");
+    const bodies: any[] = [];
+    const f = (async (_u: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return Response.json({ ok: true, result: { message_id: 1, chat: { id: 1 } }, id: "e1", messages: [{ id: "w1" }] });
+    }) as typeof fetch;
+    const ctx = { fetch: f, webhookUrl: "", defaultReturnUrl: "" };
+    const html = 'Paid: <b>RM 50</b> <a href="https://x.co/r">receipt</a>';
+    await telegram.create(telegram.parseCredentials({ botToken: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" }), ctx).send("1", html, { format: "html" });
+    await resend.create(resend.parseCredentials({ apiKey: "re_x", from: "a@b.co" }), ctx).send("c@d.co", html, { format: "html", subject: "s" });
+    await whatsapp.create(whatsapp.parseCredentials({ phoneNumberId: "1", accessToken: "t" }), ctx).send("+60123456789", html, { format: "html" });
+    expect(bodies[0]).toMatchObject({ parse_mode: "HTML", text: html });
+    expect(bodies[1]).toMatchObject({ html, text: "Paid: RM 50 receipt (https://x.co/r)" });
+    expect(bodies[2].text.body).toBe("Paid: RM 50 receipt (https://x.co/r)");
+  });
+});

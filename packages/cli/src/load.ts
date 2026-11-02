@@ -79,6 +79,7 @@ export interface ActuatorMetadata {
   name: string;
   description: string;
   capabilities: string[];
+  optionalCapabilities: string[];
   httpAllow: string[];
   cron: string[];
   inputSchema: unknown;
@@ -92,6 +93,7 @@ export function describeActuator(actuator: Actuator): ActuatorMetadata {
     name: actuator.name,
     description: actuator.description,
     capabilities: [...(actuator.capabilities ?? [])],
+    optionalCapabilities: [...(actuator.optionalCapabilities ?? [])],
     httpAllow: [...(actuator.http?.allow ?? [])],
     cron: [...(actuator.cron ?? [])],
     inputSchema: z.toJSONSchema(actuator.input, opts),

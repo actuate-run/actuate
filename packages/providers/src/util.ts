@@ -185,3 +185,16 @@ export function base64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
 export type ProviderDefinitionWithWebhookLookup<C, K extends ProviderCapability> = Omit<ProviderDefinition<C, K>, "parseWebhook"> & {
   parseWebhook(request: Request, credentials: C, ctx?: Pick<ProviderContext, "fetch">): Promise<ProviderEvent | null>;
 };
+
+/** Plain text from the small HTML subset `messaging.send` accepts (for channels without HTML, and email text parts). */
+export function htmlToText(html: string): string {
+  return html
+    .replace(/<a\s[^>]*href="([^"]*)"[^>]*>(.*?)<\/a>/gi, "$2 ($1)")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
+}

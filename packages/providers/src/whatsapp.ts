@@ -2,7 +2,7 @@
 import { z } from "zod";
 import { WebhookVerificationError, hmacSha256Hex, timingSafeEqual, type ProviderDefinition } from "./contract.js";
 import type { MessagingProvider } from "@actuate/sdk";
-import { optionalString, parseWith, requestJson, requiredString } from "./util.js";
+import { htmlToText, optionalString, parseWith, requestJson, requiredString } from "./util.js";
 
 export const WHATSAPP_DEFAULT_API_VERSION = "v26.0";
 
@@ -55,7 +55,7 @@ export const whatsapp: ProviderDefinition<WhatsAppCredentials, "messaging"> = {
                   : {}),
               },
             }
-          : { ...base, type: "text", text: { preview_url: false, body: text } };
+          : { ...base, type: "text", text: { preview_url: false, body: options?.format === "html" ? htmlToText(text) : text } };
         const body = await requestJson<SendResponse>("WhatsApp", ctx.fetch, `https://graph.facebook.com/${version}/${credentials.phoneNumberId}/messages`, {
           method: "POST",
           headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },

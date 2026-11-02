@@ -66,6 +66,11 @@ export async function executePass(
   for (const cap of actuator.capabilities ?? []) {
     Object.defineProperty(ctx, cap, { value: pass.guardProvider(cap, deps.providers?.[cap]), enumerable: true });
   }
+  // Optional capabilities are undefined when no provider is configured, so `ctx.messaging?.send(...)` skips cleanly.
+  for (const cap of actuator.optionalCapabilities ?? []) {
+    const provider = deps.providers?.[cap];
+    Object.defineProperty(ctx, cap, { value: provider ? pass.guardProvider(cap, provider) : undefined, enumerable: true });
+  }
 
   try {
     const result = await actuator.run(ctx as never, request.input as never, deps.config as never);
@@ -173,7 +178,7 @@ class Pass {
       let result: T;
       this.inStep = name;
       try {
-        result = await fn({ idempotencyKey: `${this.request.runId}:${name}`, attempt });
+        result = await fn({ idempotencyKey: `${this.request.runId}:${name}`, attempt, now: this.now() });
       } catch (err) {
         this.inStep = null;
         if (isSuspendSignal(err)) throw err;

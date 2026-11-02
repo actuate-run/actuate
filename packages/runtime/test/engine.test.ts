@@ -561,3 +561,36 @@ describe("runaway guards", () => {
     expect(h.manager.getRun(waiting.runId)).not.toBeNull();
   });
 });
+
+describe("optional capabilities and the step clock", () => {
+  const act = defineActuator({
+    name: "optional_alert",
+    description: "test",
+    input: z.object({}),
+    optionalCapabilities: ["messaging"],
+    async run(ctx) {
+      const sent = await ctx.step.do("alert", async ({ now }) => {
+        const receipt = await ctx.messaging?.send("ops", `at ${now}`);
+        return { sent: Boolean(receipt), now };
+      });
+      return sent;
+    },
+  });
+
+  it("is undefined when unconfigured and works when configured", async () => {
+    expect((await harness(act).start()).run.output).toEqual({ sent: false, now: Date.parse("2026-11-02T00:00:00Z") });
+    const send = vi.fn(async () => ({ id: "1", channel: "t" }));
+    const out = (await harness(act, { providers: { messaging: { send } } }).start()).run.output;
+    expect(out).toMatchObject({ sent: true });
+    expect(send).toHaveBeenCalledWith("ops", `at ${Date.parse("2026-11-02T00:00:00Z")}`);
+  });
+
+  it("rejects bad declarations", () => {
+    expect(() =>
+      defineActuator({ name: "x", description: "x", input: z.object({}), capabilities: ["messaging"], optionalCapabilities: ["messaging"], run() {} }),
+    ).toThrow(/both required and optional/);
+    expect(() =>
+      defineActuator({ name: "x", description: "x", input: z.object({}), optionalCapabilities: ["http"], run() {} }),
+    ).toThrow(/cannot be optional/);
+  });
+});

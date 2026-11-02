@@ -2,7 +2,7 @@
 import { z } from "zod";
 import type { ProviderDefinition } from "./contract.js";
 import type { MessagingProvider } from "@actuate/sdk";
-import { optionalString, parseWith, requestJson } from "./util.js";
+import { htmlToText, optionalString, parseWith, requestJson } from "./util.js";
 
 const schema = z.object({
   apiKey: z.string({ error: "apiKey is required" }).trim().startsWith("re_", 'apiKey must start with "re_"'),
@@ -46,8 +46,8 @@ export const resend: ProviderDefinition<ResendCredentials, "messaging"> = {
           body: JSON.stringify({
             from: credentials.from,
             to: [recipient],
-            subject: options?.subject ?? credentials.defaultSubject ?? deriveSubject(text),
-            text,
+            subject: options?.subject ?? credentials.defaultSubject ?? deriveSubject(options?.format === "html" ? htmlToText(text) : text),
+            ...(options?.format === "html" ? { html: text, text: htmlToText(text) } : { text }),
             ...(credentials.replyTo ? { reply_to: credentials.replyTo } : {}),
           }),
         });

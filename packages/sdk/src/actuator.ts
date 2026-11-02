@@ -34,6 +34,8 @@ export interface Db {
 export interface StepInfo {
   /** Stable for this run and step: pass it to payment and messaging APIs that deduplicate. */
   idempotencyKey: string;
+  /** The host's clock when the step started, epoch ms. Prefer it to Date.now(): tests can control it. */
+  now: number;
   /** 1 on the first try, 2 on the first retry, and so on. */
   attempt: number;
 }
@@ -112,8 +114,10 @@ export interface BaseContext {
   log: Logger;
 }
 
-/** The context passed to `run`: base context plus one client per declared capability. */
-export type Context<K extends Capability = never> = BaseContext & Pick<Providers, K>;
+/** The context passed to `run`: base context, a client per declared capability, and optional ones that may be absent. */
+export type Context<K extends Capability = never, P extends Capability = never> = BaseContext &
+  Pick<Providers, K> &
+  Partial<Pick<Providers, P>>;
 
 export type AnySchema = z.ZodType;
 
@@ -122,6 +126,7 @@ export interface ActuatorDefinition<
   I extends AnySchema = AnySchema,
   O = unknown,
   K extends Capability = Capability,
+  P extends Capability = Capability,
 > {
   /** Tool name: lowercase letters, digits and underscores, starting with a letter, at most 64 characters. */
   name: string;
@@ -135,11 +140,16 @@ export interface ActuatorDefinition<
   output?: z.ZodType<O>;
   /** Capabilities this actuator uses. Undeclared capabilities are absent from `ctx`. */
   capabilities?: readonly K[];
+  /**
+   * Capabilities the actuator can do without, e.g. an alert channel. Present on
+   * `ctx` (possibly `undefined`) and never required to deploy: `ctx.messaging?.send(...)`.
+   */
+  optionalCapabilities?: readonly P[];
   /** Domains the `http` capability may reach, e.g. ["api.github.com", "*.example.com"]. */
   http?: { allow: readonly string[] };
   /** Cron schedules. Each firing starts a run with an empty input `{}`. */
   cron?: readonly string[];
-  run(ctx: Context<K>, input: z.output<I>, config: z.output<C>): Promise<O> | O;
+  run(ctx: Context<K, P>, input: z.output<I>, config: z.output<C>): Promise<O> | O;
 }
 
 export interface Actuator<
@@ -147,7 +157,8 @@ export interface Actuator<
   I extends AnySchema = AnySchema,
   O = unknown,
   K extends Capability = Capability,
-> extends ActuatorDefinition<C, I, O, K> {
+  P extends Capability = Capability,
+> extends ActuatorDefinition<C, I, O, K, P> {
   readonly __actuate: 1;
 }
 
@@ -159,15 +170,21 @@ export function defineActuator<
   I extends AnySchema,
   O,
   const K extends Capability = never,
->(definition: ActuatorDefinition<C, I, O, K>): Actuator<C, I, O, K> {
+  const P extends Capability = never,
+>(definition: ActuatorDefinition<C, I, O, K, P>): Actuator<C, I, O, K, P> {
   if (!NAME_RE.test(definition.name)) {
     throw new ActuatorError(
       `Actuator name "${definition.name}" must match ${NAME_RE} (lowercase, digits, underscores; it becomes an MCP tool name).`,
     );
   }
   if (!definition.description?.trim()) throw new ActuatorError(`Actuator "${definition.name}" needs a description.`);
-  for (const cap of definition.capabilities ?? []) {
+  for (const cap of [...(definition.capabilities ?? []), ...(definition.optionalCapabilities ?? [])]) {
     if (!CAPABILITIES.includes(cap)) throw new ActuatorError(`Unknown capability "${String(cap)}".`);
+  }
+  const both = (definition.optionalCapabilities ?? []).filter((c) => (definition.capabilities as readonly Capability[] | undefined)?.includes(c));
+  if (both.length) throw new ActuatorError(`"${both.join('", "')}" is listed as both required and optional.`);
+  if ((definition.optionalCapabilities as readonly Capability[] | undefined)?.includes("http")) {
+    throw new ActuatorError(`"http" cannot be optional; declare it in capabilities with http.allow.`);
   }
   if (definition.capabilities?.includes("http" as K) && !definition.http?.allow?.length) {
     throw new ActuatorError(`Actuator "${definition.name}" declares "http" but no http.allow domains.`);

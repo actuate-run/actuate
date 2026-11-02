@@ -38,13 +38,13 @@ export const telegram: ProviderDefinition<TelegramCredentials, "messaging"> = {
   parseCredentials: (input) => parseWith("Telegram", schema, input),
   create(credentials, ctx): MessagingProvider {
     return {
-      async send(to, text) {
+      async send(to, text, options) {
         if (!to?.trim()) throw new Error("Telegram send needs a chat ID in `to`");
         // The bot token is part of the URL, so errors below never include the URL.
         const body = await requestJson<TelegramResponse>("Telegram", ctx.fetch, `https://api.telegram.org/bot${credentials.botToken}/sendMessage`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ chat_id: to.trim(), text }),
+          body: JSON.stringify({ chat_id: to.trim(), text, ...(options?.format === "html" ? { parse_mode: "HTML" } : {}) }),
         });
         if (!body?.ok || !body.result) throw new ProviderApiError("Telegram", body?.error_code ?? 200, body?.description ?? "sendMessage failed");
         return { id: String(body.result.message_id), channel: "telegram" };

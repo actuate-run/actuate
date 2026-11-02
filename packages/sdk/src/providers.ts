@@ -9,6 +9,12 @@ export interface MessagingProvider {
 }
 
 export interface MessagingSendOptions {
+  /**
+   * "html" sends a small HTML subset (<b>, <i>, <a href>, <code>, <pre>) where the
+   * channel supports it (Telegram, email); other channels get the text with tags removed.
+   * Default "text".
+   */
+  format?: "text" | "html";
   /** Provider-specific channel override, e.g. "telegram" | "whatsapp" | "email". */
   channel?: string;
   /** Email subject, when the channel is email. */
