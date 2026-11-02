@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { z, type Actuator, type Json, type Providers } from "@actuate/sdk";
-import { RunManager, type ApprovalRequest, type RunStatus } from "./manager.js";
+import { RunManager, type ApprovalRequest, type RunManagerOptions, type RunStatus } from "./manager.js";
 import { executePass } from "./pass.js";
 import { createHttpProvider } from "./providers.js";
 import { durableObjectSql } from "./sql.js";
@@ -32,6 +32,8 @@ export interface RuntimeOptions<E extends RuntimeEnv = RuntimeEnv> {
    * `@actuate/providers` provides `parseProviderWebhookFromEnv` for this.
    */
   providerWebhook?: (kind: string, request: Request, env: E) => Promise<{ event: string; payload: Json } | null>;
+  /** Runtime guards passed to the RunManager (wait/retry limits, pass admission, event caps, max passes). */
+  guards?: Pick<RunManagerOptions, "passLimits" | "admitPass" | "maxBufferedEvents" | "maxEventBytes" | "maxPasses" | "maxLogLinesPerPass">;
 }
 
 const json = (body: unknown, status = 200) =>
@@ -80,6 +82,7 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
         this.publicUrl = env.ACTUATE_PUBLIC_URL ?? (await state.storage.get<string>("public_url")) ?? "";
         this.loadConfig();
         this.manager = new RunManager({
+          ...options.guards,
           sql: durableObjectSql(state.storage),
           approvalSecret: secret,
           approvalUrl: () => `${this.publicUrl}/approve`,
@@ -207,7 +210,7 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
           return json(
             m.listRuns({
               limit: Number(url.searchParams.get("limit") ?? 50),
-              ...(url.searchParams.has("before") ? { before: Number(url.searchParams.get("before")) } : {}),
+              ...(url.searchParams.has("before") ? { before: url.searchParams.get("before")! } : {}),
               ...(status ? { status } : {}),
             }),
           );

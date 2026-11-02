@@ -93,6 +93,9 @@ describe("self-hosted runtime on workerd", () => {
     expect(run.body).toMatchObject({ status: "COMPLETED", output: { status: "PAID" } });
     expect(run.body.steps.map((s: any) => s.name)).toEqual(["save", "greet", "payment", "mark"]);
 
+    const page = await call(`/runs?before=${encodeURIComponent(runId)}`, { headers: auth });
+    expect(page.body.every((r: any) => r.runId < runId)).toBe(true);
+
     const csv = await call("/tables/bookings?format=csv", { headers: auth });
     expect(csv.body).toContain(`${runId},Aina,PAID`);
   });
