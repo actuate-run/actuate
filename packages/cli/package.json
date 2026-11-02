@@ -37,5 +37,19 @@
     "wrangler": "^4.40.0",
     "create-actuate": "workspace:*",
     "@actuate/providers": "workspace:*"
+  },
+  "homepage": "https://actuate.run/docs",
+  "bugs": {
+    "url": "https://github.com/actuate-run/actuate/issues"
+  },
+  "keywords": [
+    "actuate",
+    "cli",
+    "workerd",
+    "mcp"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }

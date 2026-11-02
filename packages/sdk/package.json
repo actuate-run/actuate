@@ -28,5 +28,22 @@
   },
   "dependencies": {
     "zod": "^4.6.0"
+  },
+  "homepage": "https://actuate.run/docs",
+  "bugs": {
+    "url": "https://github.com/actuate-run/actuate/issues"
+  },
+  "keywords": [
+    "actuate",
+    "durable",
+    "workflow",
+    "mcp",
+    "agents",
+    "cloudflare",
+    "sqlite"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }
