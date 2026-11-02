@@ -56,6 +56,19 @@ export interface Bill {
   referenceId: string;
 }
 
+/**
+ * Payload of the `payment.<referenceId>` event a payment provider's webhook
+ * delivers. Wait for it with `ctx.step.waitForEvent("paid", { event: \`payment.${referenceId}\` })`.
+ */
+export interface PaymentEvent {
+  provider: string;
+  status: "paid" | "failed" | "expired" | "refunded" | "pending";
+  referenceId: string;
+  billId?: string;
+  amount?: number;
+  currency?: string;
+}
+
 export interface RefundRequest {
   billId: string;
   /** Major units. Omit for a full refund. */

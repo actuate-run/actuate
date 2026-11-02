@@ -216,8 +216,14 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
         const eventMatch = /^\/events\/(.+)$/.exec(path);
         if (eventMatch && (method === "POST" || method === "GET")) {
           // GET is accepted so the dev payment provider's "bill URL" can be clicked in a browser.
-          const payload = method === "POST" ? ((await request.json().catch(() => null)) as Json) : { via: "GET" };
-          return json(await m.deliverEvent(decodeURIComponent(eventMatch[1]!), payload));
+          const key = decodeURIComponent(eventMatch[1]!);
+          const payload =
+            method === "POST"
+              ? (((await request.json().catch(() => null)) as Json) ?? {})
+              : key.startsWith("payment.")
+                ? ({ provider: "dev", status: "paid", referenceId: key.slice("payment.".length), via: "GET" } as Json)
+                : ({ via: "GET" } as Json);
+          return json(await m.deliverEvent(key, payload));
         }
         if (path === "/tables" && method === "GET") return json(m.listTables());
         const tableMatch = /^\/tables\/([^/]+)$/.exec(path);

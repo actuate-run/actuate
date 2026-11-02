@@ -239,8 +239,10 @@ export class RunManager {
   // ---------------------------------------------------------------- events, approvals, alarms
 
   /** Post an event. Waiting steps with this key complete and their runs resume; otherwise it is buffered. */
-  async deliverEvent(event: string, payload: Json = null): Promise<{ resumed: string[]; buffered: boolean }> {
+  async deliverEvent(event: string, payload: Json = {}): Promise<{ resumed: string[]; buffered: boolean }> {
     if (event.startsWith("approval:")) throw new Error("Approval events can only be posted through a signed link.");
+    // A waiting step resolves to null only on timeout, so an event never delivers null.
+    if (payload === null || payload === undefined) payload = {};
     const waiting = this.sql.exec(
       `SELECT run_id, step_name FROM _actuate_steps WHERE event = ? AND status = 'WAITING_EVENT'`,
       [event],

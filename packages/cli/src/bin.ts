@@ -107,7 +107,10 @@ async function main(): Promise<void> {
         );
         console.log(`${run.runId}  ${run.status}`);
         for (const s of run.steps) console.log(`  step  ${String(s.status).padEnd(16)} ${s.name}${s.error ? `  (${s.error})` : ""}`);
-        for (const l of run.logs) console.log(`  ${new Date(Number(l.ts)).toISOString()}  ${String(l.level).padEnd(5)} ${l.message}`);
+        for (const l of run.logs) {
+          console.log(`  ${new Date(Number(l.ts)).toISOString()}  ${String(l.level).padEnd(5)} ${l.message}`);
+          if (l.data !== null && l.data !== undefined) console.log(`        ${JSON.stringify(l.data)}`);
+        }
         if (run.error) console.log(`  error ${JSON.stringify(run.error)}`);
         return;
       }

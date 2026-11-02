@@ -318,7 +318,8 @@ class Pass {
                 `ctx.${cap}.${prop}() must be called inside ctx.step.do(...); otherwise it repeats on every replay.`,
               );
             }
-            return (value as (...a: unknown[]) => unknown).apply(provider, args);
+            // Reflect.apply, not value.apply: on an RPC stub, ".apply" would be a remote property lookup.
+            return Reflect.apply(value as (...a: unknown[]) => unknown, provider, args);
           };
         },
       },
