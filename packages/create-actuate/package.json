@@ -1,6 +1,6 @@
 {
   "name": "create-actuate",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Scaffold an Actuate actuator: npm create actuate [dir] -- --template <name>",
   "license": "Apache-2.0",
   "type": "module",

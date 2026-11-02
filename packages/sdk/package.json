@@ -1,6 +1,6 @@
 {
   "name": "@actuate/sdk",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Define Actuate actuators: durable steps, per-actuator SQLite and schema-validated inputs.",
   "license": "Apache-2.0",
   "type": "module",
