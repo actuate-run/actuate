@@ -239,12 +239,12 @@ describe("waitForApproval", () => {
     expect(h.approvals[0]).toMatchObject({ runId: run.runId, step: "manager-ok", notify: "boss", message: "Refund RM80?" });
     expect(h.manager.pendingApprovals()).toMatchObject([{ step: "manager-ok", message: "Refund RM80?" }]);
 
-    const result = await h.manager.decide(tokenOf(h.approvals[0]!.approveUrl));
+    const result = await h.manager.decide(tokenOf(h.approvals[0]!.approveUrl!));
     expect(result).toMatchObject({ ok: true, approved: true });
     expect(h.manager.getRun(run.runId)).toMatchObject({ status: "COMPLETED", output: { refunded: true } });
 
     // Single use: the reject link no longer works, and nothing re-notifies.
-    expect(await h.manager.decide(tokenOf(h.approvals[0]!.rejectUrl))).toMatchObject({ ok: false });
+    expect(await h.manager.decide(tokenOf(h.approvals[0]!.rejectUrl!))).toMatchObject({ ok: false });
     expect(h.approvals).toHaveLength(1);
     expect(h.manager.pendingApprovals()).toHaveLength(0);
   });
@@ -252,7 +252,7 @@ describe("waitForApproval", () => {
   it("rejects tampered tokens and handles reject and timeout", async () => {
     const h = harness(refund);
     const { run } = await h.start({ amount: 10 });
-    const token = tokenOf(h.approvals[0]!.rejectUrl);
+    const token = tokenOf(h.approvals[0]!.rejectUrl!);
     expect(await h.manager.decide(token.slice(0, -2) + "xx")).toMatchObject({ ok: false });
     await h.manager.decide(token);
     expect(h.manager.getRun(run.runId)!.output).toEqual({ refunded: false, timedOut: false });
@@ -260,7 +260,7 @@ describe("waitForApproval", () => {
     const { run: run2 } = await h.start({ amount: 10 });
     await h.advance(86_400_000);
     expect(h.manager.getRun(run2.runId)!.output).toEqual({ refunded: false, timedOut: true });
-    expect(await h.manager.decide(tokenOf(h.approvals[1]!.approveUrl))).toMatchObject({ ok: false });
+    expect(await h.manager.decide(tokenOf(h.approvals[1]!.approveUrl!))).toMatchObject({ ok: false });
   });
 });
 
@@ -609,7 +609,7 @@ describe("security", () => {
     const { run } = await h.start();
     expect(JSON.stringify(h.manager.getLogs(run.runId))).not.toContain("token=");
     const links = await h.manager.approvalLinks(run.runId, "ok");
-    expect(links?.approveUrl).toBe(h.approvals[0]!.approveUrl);
+    expect(links && "approveUrl" in links ? links.approveUrl : null).toBe(h.approvals[0]!.approveUrl!);
     expect(await h.manager.approvalLinks(run.runId, "nope")).toBeNull();
   });
 
@@ -629,5 +629,80 @@ describe("security", () => {
     await expect(http.fetch("https://RUN.actuate.test./a/x/webhook")).rejects.toThrow(/own URL/);
     await expect(http.fetch("https://1.2.3.4/")).rejects.toThrow(/IP addresses/);
     expect((await http.fetch("https://api.example.com/")).status).toBe(200);
+  });
+});
+
+describe("waitForInput, approval notes, waitForEvent until", () => {
+  const ask = defineActuator({
+    name: "ask",
+    description: "test",
+    input: z.object({}),
+    async run(ctx) {
+      const answer = await ctx.step.waitForInput("reply", { prompt: "What should we tell the customer?", initial: "Hi,", maxLength: 50, timeout: "1 day" });
+      return { answer };
+    },
+  });
+
+  it("collects an answer through a signed link, once", async () => {
+    const h = harness(ask);
+    const { run } = await h.start();
+    expect(h.approvals[0]).toMatchObject({ kind: "input", message: "What should we tell the customer?" });
+    expect(h.manager.pendingApprovals()).toMatchObject([{ kind: "input", message: "What should we tell the customer?" }]);
+    const token = tokenOf(h.approvals[0]!.answerUrl!);
+    expect(await h.manager.describeLink(token)).toMatchObject({ kind: "input", prompt: "What should we tell the customer?", initial: "Hi,", maxLength: 50 });
+    expect(await h.manager.decide(token, { text: "x".repeat(51) })).toMatchObject({ ok: false });
+    expect(await h.manager.decide(token, { text: "   " })).toMatchObject({ ok: false });
+    expect(await h.manager.decide(token, { text: " Refund approved, sorry! " })).toMatchObject({ ok: true });
+    expect(h.manager.getRun(run.runId)!.output).toMatchObject({ answer: { text: "Refund approved, sorry!" } });
+    expect(await h.manager.decide(token, { text: "again" })).toMatchObject({ ok: false });
+    expect(await h.manager.describeLink(token)).toBeNull();
+  });
+
+  it("keeps an approver's note from the link page", async () => {
+    const gate = defineActuator({
+      name: "gate_note",
+      description: "test",
+      input: z.object({}),
+      async run(ctx) {
+        return ctx.step.waitForApproval("ok", { message: "Send this?" });
+      },
+    });
+    const h = harness(gate);
+    const { run } = await h.start();
+    const token = tokenOf(h.approvals[0]!.approveUrl!);
+    expect(await h.manager.describeLink(token)).toMatchObject({ kind: "approval", approve: true, message: "Send this?" });
+    await h.manager.decide(token, { note: "Fix the typo first" });
+    expect(h.manager.getRun(run.runId)!.output).toMatchObject({ approved: true, note: "Fix the typo first" });
+  });
+
+  it("waitForEvent until: an absolute deadline an event can beat", async () => {
+    const act = defineActuator({
+      name: "until",
+      description: "test",
+      input: z.object({}),
+      async run(ctx) {
+        return { got: await ctx.step.waitForEvent("e", { event: "cancel", until: Date.parse("2026-11-02T06:00:00Z") }) };
+      },
+    });
+    const h = harness(act);
+    const { run } = await h.start();
+    expect(run.wakeAt).toBe(Date.parse("2026-11-02T06:00:00Z"));
+    await h.advance(6 * 3_600_000);
+    expect(h.manager.getRun(run.runId)!.output).toEqual({ got: null });
+    const cancelled = (await h.start()).run;
+    await h.manager.deliverEvent("cancel", { why: "replied" });
+    expect(h.manager.getRun(cancelled.runId)!.output).toEqual({ got: { why: "replied" } });
+  });
+
+  it("fails loudly when an explicit timeout is longer than the plan allows", async () => {
+    const act = defineActuator({
+      name: "toolong",
+      description: "test",
+      input: z.object({}),
+      async run(ctx) {
+        return ctx.step.waitForEvent("e", { event: "x", timeout: "30 days" });
+      },
+    });
+    expect((await harness(act, { manager: { passLimits: { maxWaitMs: 7 * 86_400_000 } } }).start()).run.error?.message).toMatch(/longer than this plan allows/);
   });
 });

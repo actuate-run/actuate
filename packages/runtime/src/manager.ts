@@ -51,10 +51,14 @@ export interface LogRecord {
 export interface ApprovalRequest {
   runId: string;
   step: string;
+  /** "approval" carries approveUrl and rejectUrl; "input" carries answerUrl. */
+  kind: "approval" | "input";
+  /** The approval message, or the question for input. */
   message?: string;
   notify?: string;
-  approveUrl: string;
-  rejectUrl: string;
+  approveUrl?: string;
+  rejectUrl?: string;
+  answerUrl?: string;
   expiresAt: number;
 }
 
@@ -102,7 +106,7 @@ export interface StartRunOptions {
   runId?: string;
 }
 
-const WAITING_STEP = "('SLEEPING','RETRYING','WAITING_EVENT','WAITING_APPROVAL')";
+const WAITING_STEP = "('SLEEPING','RETRYING','WAITING_EVENT','WAITING_APPROVAL','WAITING_INPUT')";
 
 /**
  * Host-side run lifecycle over one actuator's SQLite database: starting runs,
@@ -292,11 +296,18 @@ export class RunManager {
     return { resumed: runIds, buffered: false };
   }
 
-  /** Apply a decision from a signed approval link. Links are single-use: a decided step ignores later clicks. */
-  async decide(token: string): Promise<{ ok: true; runId: string; step: string; approved: boolean } | { ok: false; reason: string }> {
+  /**
+   * Apply a signed link: approve, reject (with an optional note) or answer (waitForInput).
+   * Links are single-use: a step that is no longer waiting ignores later clicks.
+   */
+  async decide(
+    token: string,
+    extra: { note?: string; text?: string } = {},
+  ): Promise<{ ok: true; runId: string; step: string; approved: boolean } | { ok: false; reason: string }> {
     const claims = await verifyApproval(this.options.approvalSecret, token, this.now());
     if (!claims) return { ok: false, reason: "This link is invalid or has expired." };
-    return this.decideDirect(claims.r, claims.s, claims.d === 1);
+    if (claims.d === 2) return this.answerDirect(claims.r, claims.s, extra.text ?? "");
+    return this.decideDirect(claims.r, claims.s, claims.d === 1, extra.note);
   }
 
   /** Approve or reject a waiting step directly (e.g. from an authenticated dashboard). */
@@ -311,10 +322,54 @@ export class RunManager {
       [runId, step],
     )[0];
     if (!row) return { ok: false, reason: "This approval has already been decided or has expired." };
-    const result: Json = { approved, at: new Date(this.now()).toISOString(), ...(note ? { note } : {}) };
+    const trimmed = note?.trim().slice(0, 2_000);
+    const result: Json = { approved, at: new Date(this.now()).toISOString(), ...(trimmed ? { note: trimmed } : {}) };
     this.completeWait(runId, step, result);
     await this.execute(runId);
     return { ok: true, runId, step, approved };
+  }
+
+  /** Answer a step waiting in waitForInput. */
+  async answerDirect(
+    runId: string,
+    step: string,
+    text: string,
+  ): Promise<{ ok: true; runId: string; step: string; approved: boolean } | { ok: false; reason: string }> {
+    const row = this.sql.exec(
+      `SELECT output_json FROM _actuate_steps WHERE run_id = ? AND step_name = ? AND status = 'WAITING_INPUT'`,
+      [runId, step],
+    )[0];
+    if (!row) return { ok: false, reason: "This question has already been answered or has expired." };
+    const { maxLength = 4_000 } = fromJson<{ maxLength?: number }>(row.output_json as string) ?? {};
+    const answer = String(text ?? "").trim();
+    if (!answer) return { ok: false, reason: "The answer is empty." };
+    if (answer.length > maxLength) return { ok: false, reason: `The answer is longer than ${maxLength} characters.` };
+    this.completeWait(runId, step, { text: answer, at: new Date(this.now()).toISOString() });
+    await this.execute(runId);
+    return { ok: true, runId, step, approved: true };
+  }
+
+  /** What a signed link is for, to render its page. Null when invalid, expired or already used. */
+  async describeLink(token: string): Promise<
+    | { kind: "approval"; step: string; approve: boolean; message: string | null }
+    | { kind: "input"; step: string; prompt: string; initial: string | null; maxLength: number }
+    | null
+  > {
+    const claims = await verifyApproval(this.options.approvalSecret, token, this.now());
+    if (!claims) return null;
+    const row = this.sql.exec(
+      `SELECT status, output_json FROM _actuate_steps WHERE run_id = ? AND step_name = ? AND status IN ('WAITING_APPROVAL', 'WAITING_INPUT')`,
+      [claims.r, claims.s],
+    )[0];
+    if (!row) return null;
+    const data = fromJson<Record<string, unknown>>(row.output_json as string) ?? {};
+    if (row.status === "WAITING_INPUT" && claims.d === 2) {
+      return { kind: "input", step: claims.s, prompt: String(data.prompt ?? ""), initial: (data.initial as string | null) ?? null, maxLength: Number(data.maxLength ?? 4_000) };
+    }
+    if (row.status === "WAITING_APPROVAL" && claims.d !== 2) {
+      return { kind: "approval", step: claims.s, approve: claims.d === 1, message: (data.message as string | null) ?? null };
+    }
+    return null;
   }
 
   /** Resume every run whose wake time has passed. Call from the Durable Object alarm. */
@@ -437,38 +492,53 @@ export class RunManager {
     );
   }
 
-  private async signedLinks(runId: string, step: string, expiresAt: number): Promise<{ approveUrl: string; rejectUrl: string }> {
+  private async signedLinks(
+    runId: string,
+    step: string,
+    expiresAt: number,
+    kind: "approval" | "input",
+  ): Promise<{ approveUrl: string; rejectUrl: string } | { answerUrl: string }> {
     const secret = this.options.approvalSecret;
+    const base = typeof this.options.approvalUrl === "function" ? this.options.approvalUrl() : this.options.approvalUrl;
+    const url = (token: string) => `${base}${base.includes("?") ? "&" : "?"}token=${token}`;
+    if (kind === "input") return { answerUrl: url(await signApproval(secret, { r: runId, s: step, d: 2, e: expiresAt })) };
     const [approve, reject] = await Promise.all([
       signApproval(secret, { r: runId, s: step, d: 1, e: expiresAt }),
       signApproval(secret, { r: runId, s: step, d: 0, e: expiresAt }),
     ]);
-    const base = typeof this.options.approvalUrl === "function" ? this.options.approvalUrl() : this.options.approvalUrl;
-    const url = (token: string) => `${base}${base.includes("?") ? "&" : "?"}token=${token}`;
     return { approveUrl: url(approve), rejectUrl: url(reject) };
   }
 
   /**
-   * The signed links for a step that is waiting for approval, for an owner who
-   * has no messaging channel. Only expose this behind owner authentication.
+   * The signed links for a step waiting on a person, for an owner who has no
+   * messaging channel. Only expose this behind owner authentication.
    */
-  async approvalLinks(runId: string, step: string): Promise<{ approveUrl: string; rejectUrl: string; expiresAt: number } | null> {
+  async approvalLinks(
+    runId: string,
+    step: string,
+  ): Promise<({ approveUrl: string; rejectUrl: string } | { answerUrl: string }) & { expiresAt: number } | null> {
     const row = this.sql.exec(
-      `SELECT wake_at FROM _actuate_steps WHERE run_id = ? AND step_name = ? AND status = 'WAITING_APPROVAL'`,
+      `SELECT status, wake_at FROM _actuate_steps WHERE run_id = ? AND step_name = ? AND status IN ('WAITING_APPROVAL', 'WAITING_INPUT')`,
       [runId, step],
     )[0];
     if (!row || row.wake_at === null) return null;
     const expiresAt = Number(row.wake_at);
-    return { ...(await this.signedLinks(runId, step, expiresAt)), expiresAt };
+    const kind = row.status === "WAITING_INPUT" ? "input" : "approval";
+    return { ...(await this.signedLinks(runId, step, expiresAt, kind)), expiresAt };
   }
 
-  private async requestApproval(runId: string, step: string, opts: WaitForApprovalOptions & { expiresAt: number }): Promise<void> {
-    const { approveUrl, rejectUrl } = await this.signedLinks(runId, step, opts.expiresAt);
+  private async requestApproval(
+    runId: string,
+    step: string,
+    opts: WaitForApprovalOptions & { expiresAt: number; kind?: "approval" | "input" },
+  ): Promise<void> {
+    const kind = opts.kind ?? "approval";
+    const links = await this.signedLinks(runId, step, opts.expiresAt, kind);
     const request: ApprovalRequest = {
       runId,
       step,
-      approveUrl,
-      rejectUrl,
+      kind,
+      ...links,
       expiresAt: opts.expiresAt,
       ...(opts.message ? { message: opts.message } : {}),
       ...(opts.notify ? { notify: opts.notify } : {}),
@@ -527,13 +597,19 @@ export class RunManager {
   }
 
   /** Steps waiting for a human decision, oldest first: the approval queue. */
-  pendingApprovals(): Array<{ runId: string; step: string; message: string | null; expiresAt: number | null; since: number }> {
+  pendingApprovals(): Array<{ runId: string; step: string; kind: "approval" | "input"; message: string | null; expiresAt: number | null; since: number }> {
     return this.sql
-      .exec(`SELECT run_id, step_name, output_json, wake_at, updated_at FROM _actuate_steps WHERE status = 'WAITING_APPROVAL' ORDER BY updated_at`)
+      .exec(
+        `SELECT run_id, step_name, status, output_json, wake_at, updated_at FROM _actuate_steps WHERE status IN ('WAITING_APPROVAL', 'WAITING_INPUT') ORDER BY updated_at`,
+      )
       .map((r) => ({
         runId: String(r.run_id),
         step: String(r.step_name),
-        message: (fromJson<{ message?: string | null } | null>((r.output_json as string | null) ?? null)?.message ?? null),
+        kind: r.status === "WAITING_INPUT" ? ("input" as const) : ("approval" as const),
+        message: (() => {
+          const d = fromJson<{ message?: string | null; prompt?: string | null } | null>((r.output_json as string | null) ?? null);
+          return d?.message ?? d?.prompt ?? null;
+        })(),
         expiresAt: (r.wake_at as number | null) ?? null,
         since: Number(r.updated_at),
       }));

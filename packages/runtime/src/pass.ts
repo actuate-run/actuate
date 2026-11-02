@@ -18,8 +18,10 @@ import {
   type Step,
   type StepInfo,
   type StepOptions,
+  type InputResult,
   type WaitForApprovalOptions,
   type WaitForEventOptions,
+  type WaitForInputOptions,
 } from "@actuate/sdk";
 import { fromJson, serializeError, toJson, type Journal, type PassOutcome, type PassRequest, type StepRow } from "./journal.js";
 
@@ -229,7 +231,16 @@ class Pass {
         await this.write(this.row(name, { status: "COMPLETED", event: options.event, output_json: toJson(buffered.payload) }));
         return buffered.payload as T;
       }
-      const wakeAt = this.waitDeadline(options.timeout === undefined ? null : parseDuration(options.timeout));
+      if (options.timeout !== undefined && options.until !== undefined) {
+        throw new ActuatorError(`ctx.step.waitForEvent("${name}"): use timeout or until, not both.`);
+      }
+      let timeoutMs: number | null = options.timeout === undefined ? null : parseDuration(options.timeout);
+      if (options.until !== undefined) {
+        const at = typeof options.until === "number" ? options.until : options.until.getTime();
+        if (!Number.isFinite(at)) throw new ActuatorError(`ctx.step.waitForEvent("${name}"): invalid until.`);
+        timeoutMs = Math.max(0, at - this.now());
+      }
+      const wakeAt = this.waitDeadline(name, timeoutMs);
       await this.write(this.row(name, { status: "WAITING_EVENT", event: options.event, wake_at: wakeAt }));
       this.suspend(`waiting for event "${options.event}"`);
     },
@@ -240,7 +251,7 @@ class Pass {
       const resolved = await this.resolveWait(name, existing);
       if (resolved !== undefined) return resolved as ApprovalResult | null;
 
-      const expiresAt = this.waitDeadline(parseDuration(options.timeout ?? DEFAULT_APPROVAL_TIMEOUT))!;
+      const expiresAt = this.waitDeadline(name, parseDuration(options.timeout ?? DEFAULT_APPROVAL_TIMEOUT))!;
       await this.write(
         // While waiting, output_json holds the request so the approval queue can show what is being approved.
         this.row(name, {
@@ -250,8 +261,34 @@ class Pass {
           output_json: toJson({ message: options.message ?? null }),
         }),
       );
-      await this.journal.requestApproval(name, { ...options, expiresAt });
+      await this.journal.requestApproval(name, { ...options, expiresAt, kind: "approval" });
       this.suspend(`waiting for approval "${name}"`);
+    },
+
+    waitForInput: async (name: string, options: WaitForInputOptions): Promise<InputResult | null> => {
+      if (!options?.prompt) throw new ActuatorError(`ctx.step.waitForInput("${name}") needs a prompt.`);
+      this.enter("waitForInput", name);
+      const existing = this.rows.get(name);
+      const resolved = await this.resolveWait(name, existing);
+      if (resolved !== undefined) return resolved as InputResult | null;
+
+      const expiresAt = this.waitDeadline(name, parseDuration(options.timeout ?? DEFAULT_APPROVAL_TIMEOUT))!;
+      const maxLength = Math.min(Math.max(options.maxLength ?? 4_000, 1), 20_000);
+      await this.write(
+        this.row(name, {
+          status: "WAITING_INPUT",
+          event: approvalEventKey(this.request.runId, name),
+          wake_at: expiresAt,
+          output_json: toJson({ prompt: options.prompt, initial: options.initial ?? null, maxLength }),
+        }),
+      );
+      await this.journal.requestApproval(name, {
+        expiresAt,
+        kind: "input",
+        message: options.prompt,
+        ...(options.notify ? { notify: options.notify } : {}),
+      });
+      this.suspend(`waiting for input "${name}"`);
     },
   };
 
@@ -264,9 +301,13 @@ class Pass {
   }
 
   /** A wait's wake time: its timeout, clamped to the plan's longest wait (waits with no timeout get the maximum). */
-  private waitDeadline(timeoutMs: number | null): number | null {
+  private waitDeadline(name: string, timeoutMs: number | null): number | null {
     const max = this.request.limits?.maxWaitMs;
     if (max === undefined) return timeoutMs === null ? null : this.now() + timeoutMs;
+    // An explicit timeout beyond the plan's limit fails loudly; an open-ended wait gets the maximum.
+    if (timeoutMs !== null && timeoutMs > max && !this.rows.has(name)) {
+      throw new ActuatorError(`Step "${name}" waits ${Math.round(timeoutMs / 1000)}s, longer than this plan allows (${Math.round(max / 1000)}s).`);
+    }
     return this.now() + Math.min(timeoutMs ?? max, max);
   }
 

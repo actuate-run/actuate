@@ -82,6 +82,7 @@ export interface ActuatorMetadata {
   optionalCapabilities: string[];
   httpAllow: string[];
   cron: string[];
+  hints: { readOnly?: boolean; idempotent?: boolean; destructive?: boolean; openWorld?: boolean };
   inputSchema: unknown;
   configSchema: unknown;
   outputSchema: unknown | null;
@@ -96,6 +97,7 @@ export function describeActuator(actuator: Actuator): ActuatorMetadata {
     optionalCapabilities: [...(actuator.optionalCapabilities ?? [])],
     httpAllow: [...(actuator.http?.allow ?? [])],
     cron: [...(actuator.cron ?? [])],
+    hints: { ...(actuator.hints ?? {}) },
     inputSchema: z.toJSONSchema(actuator.input, opts),
     configSchema: z.toJSONSchema(actuator.config ?? z.object({}), opts),
     outputSchema: actuator.output ? z.toJSONSchema(actuator.output, { ...opts, io: "output" }) : null,

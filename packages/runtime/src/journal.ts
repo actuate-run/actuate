@@ -7,7 +7,8 @@ export type StepStatus =
   | "RETRYING"
   | "SLEEPING"
   | "WAITING_EVENT"
-  | "WAITING_APPROVAL";
+  | "WAITING_APPROVAL"
+  | "WAITING_INPUT";
 
 export interface StepRow {
   run_id: string;
@@ -35,7 +36,7 @@ export interface Journal {
   /** Take the oldest buffered event with this key, if one arrived before anyone waited for it. */
   consumeEvent(event: string): Promise<{ payload: Json } | null>;
   /** Issue signed approve/reject links and notify the approver. Called once, when the wait starts. */
-  requestApproval(stepName: string, options: WaitForApprovalOptions & { expiresAt: number }): Promise<void>;
+  requestApproval(stepName: string, options: WaitForApprovalOptions & { expiresAt: number; kind?: "approval" | "input" }): Promise<void>;
   query(sql: string, params: readonly SqlValue[]): Promise<Row[]>;
   migrate(statements: readonly string[]): Promise<void>;
   log(level: LogLevel, message: string, data?: Json): Promise<void>;

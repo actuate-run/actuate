@@ -5,8 +5,8 @@ export interface ApprovalClaims {
   r: string;
   /** Step name. */
   s: string;
-  /** Decision: 1 approve, 0 reject. */
-  d: 0 | 1;
+  /** Decision: 1 approve, 0 reject, 2 answer (waitForInput). */
+  d: 0 | 1 | 2;
   /** Expiry, epoch ms. */
   e: number;
 }

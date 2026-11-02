@@ -130,7 +130,10 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
     }
 
     private async notifyApproval(req: ApprovalRequest): Promise<void> {
-      const text = `${req.message ?? `Approval needed: ${actuator.name} / ${req.step}`}\n\nApprove: ${req.approveUrl}\nReject: ${req.rejectUrl}`;
+      const text =
+        req.kind === "input"
+          ? `${req.message ?? `${actuator.name} needs your input`}\n\nAnswer: ${req.answerUrl}`
+          : `${req.message ?? `Approval needed: ${actuator.name} / ${req.step}`}\n\nApprove: ${req.approveUrl}\nReject: ${req.rejectUrl}`;
       const messaging = this.getProviders().messaging;
       if (req.notify && messaging) await messaging.send(req.notify, text, { subject: `Approval needed: ${actuator.name}` });
       else console.log(`\n🔐  [approval requested] ${text}\n`);
@@ -167,15 +170,25 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
         // Public routes.
         if (path === "/health") return json({ ok: true });
         if (path === "/approve" && method === "GET") {
-          return new Response(approvalPage(actuator.name, url.searchParams.get("token") ?? ""), {
+          const token = url.searchParams.get("token") ?? "";
+          return new Response(approvalPage(actuator.name, token, await m.describeLink(token)), {
             headers: { "content-type": "text/html; charset=utf-8" },
           });
         }
         if (path === "/approve" && method === "POST") {
-          const form = await request.formData();
-          const result = await m.decide(String(form.get("token") ?? ""));
-          const message = result.ok ? (result.approved ? "Approved. You can close this page." : "Rejected. You can close this page.") : result.reason;
-          return new Response(approvalPage(actuator.name, "", message), {
+          const form = new URLSearchParams((await request.text()).slice(0, 64 * 1024));
+          const result = await m.decide(String(form.get("token") ?? ""), {
+            note: form.get("note") ?? undefined,
+            text: form.get("text") ?? undefined,
+          });
+          const message = result.ok
+            ? form.has("text")
+              ? "Answer sent. You can close this page."
+              : result.approved
+                ? "Approved. You can close this page."
+                : "Rejected. You can close this page."
+            : result.reason;
+          return new Response(approvalPage(actuator.name, "", null, message), {
             status: result.ok ? 200 : 410,
             headers: { "content-type": "text/html; charset=utf-8" },
           });

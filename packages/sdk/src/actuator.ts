@@ -50,8 +50,29 @@ export interface StepOptions {
 export interface WaitForEventOptions {
   /** The event key to wait for, e.g. `payment.${bookingId}`. */
   event: string;
-  /** Give up after this long and resolve to `null`. Default: wait forever. */
+  /** Give up after this long and resolve to `null`. Default: wait forever (or the plan's longest wait). */
   timeout?: Duration;
+  /** Give up at this moment instead (use one of `timeout` or `until`). An event cancels the wait early. */
+  until?: Date | number;
+}
+
+export interface WaitForInputOptions {
+  /** The question shown on the form. */
+  prompt: string;
+  /** Who gets the signed link: a chat ID, phone or email understood by the messaging provider. */
+  notify?: string;
+  /** Pre-filled text, e.g. a draft to edit. */
+  initial?: string;
+  /** Longest answer accepted, characters. Default 4,000. */
+  maxLength?: number;
+  /** Give up after this long and resolve to `null`. Default "7 days". */
+  timeout?: Duration;
+}
+
+export interface InputResult {
+  text: string;
+  /** ISO timestamp of the answer. */
+  at: string;
 }
 
 export interface WaitForApprovalOptions {
@@ -67,6 +88,7 @@ export interface ApprovalResult {
   approved: boolean;
   /** ISO timestamp of the decision. */
   at: string;
+  /** Optional note typed by the approver (on the approval page or in the dashboard). */
   note?: string;
 }
 
@@ -88,6 +110,22 @@ export interface Step {
   waitForEvent<T = Json>(name: string, options: WaitForEventOptions): Promise<T | null>;
   /** Pause until a person clicks a signed approve or reject link, or the timeout passes (resolves to `null`). */
   waitForApproval(name: string, options?: WaitForApprovalOptions): Promise<ApprovalResult | null>;
+  /**
+   * Pause until a person answers through a signed link to a short text form, or the timeout passes
+   * (resolves to `null`). For questions an agent can't answer: "What should we tell the customer?"
+   */
+  waitForInput(name: string, options: WaitForInputOptions): Promise<InputResult | null>;
+}
+
+export interface ToolHints {
+  /** Only reads; never changes anything. */
+  readOnly?: boolean;
+  /** Calling twice with the same arguments has the same effect as calling once. */
+  idempotent?: boolean;
+  /** May delete or irreversibly change data. */
+  destructive?: boolean;
+  /** Talks to the outside world (messages, payments, other APIs). */
+  openWorld?: boolean;
 }
 
 export interface Logger {
@@ -149,6 +187,11 @@ export interface ActuatorDefinition<
   http?: { allow: readonly string[] };
   /** Cron schedules. Each firing starts a run with an empty input `{}`. */
   cron?: readonly string[];
+  /**
+   * Hints for MCP clients about what calling this tool does (they shape how agents
+   * and people approve tool calls). Defaults: not read-only, not idempotent.
+   */
+  hints?: ToolHints;
   run(ctx: Context<K, P>, input: z.output<I>, config: z.output<C>): Promise<O> | O;
 }
 

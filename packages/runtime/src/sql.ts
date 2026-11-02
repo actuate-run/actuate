@@ -79,7 +79,7 @@ export const SCHEMA = [
     PRIMARY KEY (run_id, step_name)
   ) WITHOUT ROWID`,
   `CREATE INDEX IF NOT EXISTS _actuate_steps_event ON _actuate_steps (event) WHERE status = 'WAITING_EVENT'`,
-  `CREATE INDEX IF NOT EXISTS _actuate_steps_approval ON _actuate_steps (updated_at) WHERE status = 'WAITING_APPROVAL'`,
+  `CREATE INDEX IF NOT EXISTS _actuate_steps_human ON _actuate_steps (updated_at) WHERE status IN ('WAITING_APPROVAL', 'WAITING_INPUT')`,
   `CREATE TABLE IF NOT EXISTS _actuate_events (
     id           INTEGER PRIMARY KEY,
     event        TEXT NOT NULL,
