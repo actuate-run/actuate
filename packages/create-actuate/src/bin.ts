@@ -19,7 +19,16 @@ try {
     ...(values.template ? { template: values.template } : {}),
     ...(values.ref ? { ref: values.ref } : {}),
   });
-  console.log(`\nNext:\n  cd ${relative(process.cwd(), dir) || "."}\n  npm install\n  npx actuate dev\n`);
+  const cd = relative(process.cwd(), dir);
+  console.log(`
+Next:
+${cd ? `  cd ${cd}\n` : ""}  npm install
+  npx actuate dev       run it locally, with the platform's guards
+  npx actuate test      run its tests
+  npx actuate doctor    check Node, providers and login
+
+Docs: https://actuate.run/docs/getting-started/quickstart/
+`);
 } catch (err) {
   console.error(err instanceof Error ? err.message : err);
   process.exit(1);

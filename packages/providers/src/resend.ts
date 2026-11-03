@@ -2,7 +2,7 @@
 import { z } from "zod";
 import type { ProviderDefinition } from "./contract.js";
 import type { MessagingProvider } from "@actuate/sdk";
-import { htmlToText, optionalString, parseWith, requestJson } from "./util.js";
+import { fitIdempotencyKey, htmlToText, optionalString, parseWith, requestJson } from "./util.js";
 
 const schema = z.object({
   apiKey: z.string({ error: "apiKey is required" }).trim().startsWith("re_", 'apiKey must start with "re_"'),
@@ -39,7 +39,9 @@ export const resend: ProviderDefinition<ResendCredentials, "messaging"> = {
         const recipient = (to ?? "").trim();
         if (!EMAIL.test(recipient)) throw new Error("Resend send needs `to` as an email address");
         const headers: Record<string, string> = { authorization: `Bearer ${credentials.apiKey}`, "content-type": "application/json" };
-        if (options?.idempotencyKey) headers["idempotency-key"] = options.idempotencyKey.slice(0, 256);
+        // Resend deduplicates by the Idempotency-Key header (at most 256 characters, kept for 24 hours). Inside a
+        // step the runtime supplies a per-call key when the caller gives none.
+        if (options?.idempotencyKey) headers["idempotency-key"] = await fitIdempotencyKey(options.idempotencyKey, 256);
         const body = await requestJson<{ id?: string }>("Resend", ctx.fetch, "https://api.resend.com/emails", {
           method: "POST",
           headers,

@@ -64,6 +64,21 @@ describe("replay-safety linter", () => {
     ).toEqual(["warning:db-write-outside-step", "warning:db-write-outside-step", "error:no-provider-outside-step"]);
   });
 
+  it("knows ctx.db.batch and commitWithStep", () => {
+    expect(
+      rules(
+        wrap(`
+      await ctx.db.batch([ctx.db.statement\`INSERT INTO t VALUES (\${1})\`, { sql: "UPDATE t SET x = 1", params: [] }, ctx.db.statement\`SELECT 1\`]);
+      ctx.db.commitWithStep([ctx.db.statement\`DELETE FROM t\`]);
+      const later = ctx.db.statement\`INSERT INTO t VALUES (2)\`;
+      await ctx.step.do("ok", () => {
+        ctx.db.commitWithStep([later]);
+        return ctx.db.batch([ctx.db.statement\`INSERT INTO t VALUES (3)\`]);
+      });`),
+      ),
+    ).toEqual(["warning:db-write-outside-step", "warning:db-write-outside-step", "error:no-commit-outside-step"]);
+  });
+
   it("reports line and column", () => {
     const [d] = checkSource("a.ts", wrap(`await fetch("x");`));
     expect(d).toMatchObject({ line: 6, column: 7 });

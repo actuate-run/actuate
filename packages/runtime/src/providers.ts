@@ -57,11 +57,13 @@ export function consoleMessaging(log: (line: string) => void = console.log): Mes
 /**
  * A fake payment provider for local development. Bills are "paid" by posting
  * the event `payment.<referenceId>` to the actuator's /events endpoint.
- * Refunds always succeed and are printed; the same idempotency key returns the same refund.
+ * Refunds always succeed and are printed. Like Stripe, the same idempotency key returns the same bill or refund
+ * (inside a step the runtime supplies one per call).
  */
 export function fakePayment(baseUrl = "http://localhost:8787", log: (line: string) => void = console.log): PaymentProvider {
   const bills = new Map<string, Bill>();
   const refunds = new Map<string, string>();
+  const billKeys = new Map<string, string>();
   return {
     async refund(request) {
       const key = request.idempotencyKey;
@@ -73,7 +75,10 @@ export function fakePayment(baseUrl = "http://localhost:8787", log: (line: strin
       return { id, status: "succeeded" as const };
     },
     async createBill(request: CreateBillRequest): Promise<Bill> {
+      const earlier = request.idempotencyKey ? bills.get(billKeys.get(request.idempotencyKey) ?? "") : undefined;
+      if (earlier) return earlier;
       const id = `dev-bill-${bills.size + 1}`;
+      if (request.idempotencyKey) billKeys.set(request.idempotencyKey, id);
       const bill: Bill = {
         id,
         url: `${baseUrl}/events/payment.${encodeURIComponent(request.referenceId)}`,

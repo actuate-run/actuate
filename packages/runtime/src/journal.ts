@@ -1,4 +1,4 @@
-import type { Json, Row, SqlValue, Trigger, WaitForApprovalOptions } from "@actuate/sdk";
+import type { DbStatement, Json, Row, SqlValue, Trigger, WaitForApprovalOptions } from "@actuate/sdk";
 
 export type StepStatus =
   | "RUNNING"
@@ -38,6 +38,16 @@ export interface Journal {
   /** Issue signed approve/reject links and notify the approver. Called once, when the wait starts. */
   requestApproval(stepName: string, options: WaitForApprovalOptions & { expiresAt: number; kind?: "approval" | "input" }): Promise<void>;
   query(sql: string, params: readonly SqlValue[]): Promise<Row[]>;
+  /**
+   * `ctx.db.batch`: run the statements in one synchronous transaction, all or nothing, and return each one's rows.
+   * Optional so journals written against earlier versions still type-check; `ctx.db.batch` throws without it.
+   */
+  batch?(statements: readonly DbStatement[]): Promise<Row[][]>;
+  /**
+   * `ctx.db.commitWithStep`: apply the statements and write the step row in one synchronous transaction.
+   * If a statement fails, neither the statements nor the row are written. Optional, like `batch`.
+   */
+  commitStep?(row: StepRow, statements: readonly DbStatement[]): Promise<void>;
   migrate(statements: readonly string[]): Promise<void>;
   log(level: LogLevel, message: string, data?: Json): Promise<void>;
 }

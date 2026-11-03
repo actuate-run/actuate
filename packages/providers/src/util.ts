@@ -154,6 +154,27 @@ export function webhookFetch(ctx?: Pick<ProviderContext, "fetch">): typeof fetch
   return ctx?.fetch ?? ((input, init) => fetch(input, init));
 }
 
+async function sha256Hex(text: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+  return Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * An idempotency key no longer than `max` characters. Short keys pass through unchanged; a longer one keeps a
+ * prefix and ends in a hash of the whole key, so keys that differ only at the end (the runtime's per-call
+ * suffix, `...:send:1`) stay distinct. Never truncate a key with a plain slice: that merges such keys.
+ */
+export async function fitIdempotencyKey(key: string, max: number): Promise<string> {
+  if (key.length <= max) return key;
+  const hash = (await sha256Hex(key)).slice(0, 32);
+  return `${key.slice(0, Math.max(0, max - hash.length - 1))}~${hash}`.slice(-max);
+}
+
+/** A fixed-length token derived from an idempotency key, for APIs with short dedup fields (Discord's 25-character nonce). */
+export async function idempotencyNonce(key: string, length: number): Promise<string> {
+  return (await sha256Hex(key)).slice(0, length);
+}
+
 /** Read a form-encoded body into a plain object (last value wins). */
 export async function readForm(request: Request): Promise<Record<string, string>> {
   const text = await request.text();

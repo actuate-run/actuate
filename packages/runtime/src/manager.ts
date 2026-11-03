@@ -1,4 +1,4 @@
-import type { Json, Row, SqlValue, Trigger, WaitForApprovalOptions } from "@actuate/sdk";
+import type { DbStatement, Json, Row, SqlValue, Trigger, WaitForApprovalOptions } from "@actuate/sdk";
 import {
   fromJson,
   toJson,
@@ -470,19 +470,18 @@ export class RunManager {
   journal(runId: string): Journal {
     return {
       loadSteps: async () => this.sql.exec(`SELECT * FROM _actuate_steps WHERE run_id = ? ORDER BY seq`, [runId]) as unknown as StepRow[],
-      putStep: async (row) => {
-        this.sql.exec(
-          `INSERT INTO _actuate_steps (run_id, step_name, status, output_json, wake_at, event, attempts, error, seq, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT (run_id, step_name) DO UPDATE SET status = excluded.status, output_json = excluded.output_json,
-             wake_at = excluded.wake_at, event = excluded.event, attempts = excluded.attempts, error = excluded.error,
-             updated_at = excluded.updated_at`,
-          [runId, row.step_name, row.status, row.output_json, row.wake_at, row.event, row.attempts, row.error, ++this.seq + this.now() * 1000, this.now()],
-        );
-      },
+      putStep: async (row) => this.writeStep(runId, row),
       consumeEvent: async (event) => this.takeBufferedEvent(event),
       requestApproval: (step, opts) => this.requestApproval(runId, step, opts),
       query: async (sql, params) => this.sql.exec(sql, params as SqlValue[]),
+      // One synchronous transaction (transactionSync on a Durable Object): nothing else runs in between, and a
+      // statement that throws rolls back the ones before it.
+      batch: async (statements) => this.sql.transaction(() => this.execAll(statements)),
+      commitStep: async (row, statements) =>
+        this.sql.transaction(() => {
+          this.execAll(statements);
+          this.writeStep(runId, row);
+        }),
       migrate: async (statements) => {
         const changed: number[] = [];
         this.sql.transaction(() => {
@@ -506,6 +505,29 @@ export class RunManager {
       },
       log: (level, message, data) => this.writeLog(runId, level, message, data),
     };
+  }
+
+  private writeStep(runId: string, row: StepRow): void {
+    this.sql.exec(
+      `INSERT INTO _actuate_steps (run_id, step_name, status, output_json, wake_at, event, attempts, error, seq, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (run_id, step_name) DO UPDATE SET status = excluded.status, output_json = excluded.output_json,
+         wake_at = excluded.wake_at, event = excluded.event, attempts = excluded.attempts, error = excluded.error,
+         updated_at = excluded.updated_at`,
+      [runId, row.step_name, row.status, row.output_json, row.wake_at, row.event, row.attempts, row.error, ++this.seq + this.now() * 1000, this.now()],
+    );
+  }
+
+  /** Run tenant statements in order (inside the caller's transaction); a failure names the statement. */
+  private execAll(statements: readonly DbStatement[]): Row[][] {
+    return statements.map((st, i) => {
+      try {
+        return this.sql.exec(st.sql, (st.params ?? []) as SqlValue[]);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`Statement ${i + 1} of ${statements.length} failed, so none were applied: ${message}`, { cause: err });
+      }
+    });
   }
 
   private readonly logBuffers = new Map<string, LogRecord[]>();

@@ -42,6 +42,8 @@ export const slack: ProviderDefinition<SlackCredentials, "messaging"> = {
   create(credentials, ctx): MessagingProvider {
     return {
       async send(to, text, options) {
+        // Idempotency: neither chat.postMessage nor incoming webhooks take an idempotency key, so
+        // options.idempotencyKey is unused. A retried send can post twice.
         const body = options?.format === "html" ? htmlToSlack(text) : escapeSlack(text);
         const channel = (to ?? "").trim() || credentials.defaultChannel;
         if (credentials.botToken && channel) {

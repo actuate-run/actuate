@@ -9,6 +9,13 @@ export type Json = string | number | boolean | null | Json[] | { [key: string]: 
 export type SqlValue = string | number | bigint | boolean | null | Uint8Array | ArrayBuffer;
 export type Row = Record<string, SqlValue>;
 
+/** One parameterised statement for {@link Db.batch} and {@link Db.commitWithStep}. Build one with {@link Db.statement}. */
+export interface DbStatement {
+  /** One statement with `?` placeholders. Transaction control (BEGIN, COMMIT, SAVEPOINT, ...) is refused. */
+  sql: string;
+  params?: readonly SqlValue[];
+}
+
 /**
  * The actuator's own SQLite database. Only parameterised statements are
  * exposed: there is deliberately no string-interpolated `exec`.
@@ -24,6 +31,39 @@ export interface Db {
    */
   sql<T extends object = Row>(strings: TemplateStringsArray, ...values: SqlValue[]): Promise<T[]>;
   /**
+   * Build a statement for {@link Db.batch} or {@link Db.commitWithStep} without running it. Tagged template:
+   * interpolated values become bound parameters, as in {@link Db.sql}.
+   */
+  statement(strings: TemplateStringsArray, ...values: SqlValue[]): DbStatement;
+  /**
+   * Run several statements all-or-nothing, in one transaction: if any statement fails, none of them is
+   * applied and the error says which one failed. Resolves to each statement's rows, in order
+   * (`RETURNING` rows for writes; an empty array for writes without `RETURNING`).
+   * Later statements see earlier ones' writes, but nothing outside the batch runs in between.
+   *
+   * A batch is atomic on its own, not with the step around it: if the step throws after the batch and is
+   * retried, the batch runs again. For writes that should happen exactly once, together with the step's
+   * result, use {@link Db.commitWithStep}.
+   *
+   * ```ts
+   * await ctx.db.batch([
+   *   ctx.db.statement`UPDATE stock SET qty = qty - ${qty} WHERE sku = ${sku}`,
+   *   ctx.db.statement`INSERT INTO orders (id, sku, qty) VALUES (${orderId}, ${sku}, ${qty})`,
+   * ]);
+   * ```
+   */
+  batch<T extends object = Row>(statements: readonly DbStatement[]): Promise<T[][]>;
+  /**
+   * Queue statements to apply when the current step completes, in the same transaction that records the
+   * step's result. Only inside `ctx.step.do`. If the step throws (or is retried), none of them is applied;
+   * once the step has completed they are never applied again, even if the run is replayed. If one of them
+   * fails, none is applied and the step attempt fails with that error (and retries if it can).
+   *
+   * They run after the step function returns, so the step cannot read their effects or rows: use
+   * {@link Db.batch} for writes whose results you need.
+   */
+  commitWithStep(statements: readonly DbStatement[]): void;
+  /**
    * Apply schema migrations in order. Each entry is applied exactly once per
    * actuator (tracked by index), so it is safe to call at the top of every run.
    * Never reorder or edit an entry that has shipped; append a new one.
@@ -32,7 +72,15 @@ export interface Db {
 }
 
 export interface StepInfo {
-  /** Stable for this run and step: pass it to payment and messaging APIs that deduplicate. */
+  /**
+   * Stable for this run and step (`<runId>:<step name>`), the same on every retry and replay.
+   *
+   * Provider calls made in the step that accept an idempotency key (`messaging.send`, `payment.createBill`,
+   * `payment.refund`) get one derived from it when you pass none: `<this key>:<method>:<n>`, where `n` counts
+   * that method's calls in this attempt of the step from 0 (in a step named "notify", the second
+   * `send` gets `<runId>:notify:send:1`). So two sends in one step get different keys, and a retried step gives the same call the same key.
+   * A key you pass yourself is used as is. The adapter forwards it where the provider's API deduplicates.
+   */
   idempotencyKey: string;
   /** The host's clock when the step started, epoch ms. Prefer it to Date.now(): tests can control it. */
   now: number;

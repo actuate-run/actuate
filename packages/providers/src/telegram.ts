@@ -40,6 +40,8 @@ export const telegram: ProviderDefinition<TelegramCredentials, "messaging"> = {
     return {
       async send(to, text, options) {
         if (!to?.trim()) throw new Error("Telegram send needs a chat ID in `to`");
+        // Idempotency: the Bot API's sendMessage has no idempotency key or dedup field, so options.idempotencyKey
+        // is unused. A retried step whose first attempt reached Telegram sends the message again.
         // The bot token is part of the URL, so errors below never include the URL.
         const body = await requestJson<TelegramResponse>("Telegram", ctx.fetch, `https://api.telegram.org/bot${credentials.botToken}/sendMessage`, {
           method: "POST",

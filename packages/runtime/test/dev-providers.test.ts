@@ -7,6 +7,10 @@ describe("fakePayment (actuate dev)", () => {
     const bill = await pay.createBill({ amount: 50, referenceId: "run_1" });
     expect(bill.url).toBe("http://localhost:9999/events/payment.run_1");
     expect(await pay.getBill(bill.id)).toEqual(bill);
+    // Like Stripe: a retried step's createBill (same key) gets the same bill; another key, a new one.
+    const keyed = await pay.createBill({ amount: 50, referenceId: "run_2", idempotencyKey: "run_2:bill:createBill:0" });
+    expect(await pay.createBill({ amount: 50, referenceId: "run_2", idempotencyKey: "run_2:bill:createBill:0" })).toEqual(keyed);
+    expect((await pay.createBill({ amount: 50, referenceId: "run_2", idempotencyKey: "run_2:bill:createBill:1" })).id).not.toBe(keyed.id);
   });
 
   it("refunds, so refund templates run locally without a real provider", async () => {
