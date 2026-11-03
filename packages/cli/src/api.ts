@@ -57,7 +57,7 @@ export function errorMessage(body: unknown, text: string): string {
   return String(error) + lines.join("");
 }
 
-/** Call the Actuate control plane (or a self-hosted runtime) with the stored token. */
+/** Call the Actuate control plane with the stored token, or the local `actuate dev` runtime (`--local`, no token). */
 export async function api<T>(creds: Credentials, path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${creds.apiUrl.replace(/\/$/, "")}${path}`, {
     ...init,
