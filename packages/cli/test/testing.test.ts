@@ -333,4 +333,25 @@ describe("atomic writes under the local guards", () => {
     // Refused before it ran: nothing of the batch was written.
     expect(t.rows("entries")).toHaveLength(2);
   });
+
+  it("counts commitWithStep's writes in the run's usage, like a batch's", async () => {
+    const many = (n: number) =>
+      defineActuator({
+        name: `many${n}`,
+        description: "Ten inserts, by batch or commitWithStep.",
+        input: z.object({ how: z.enum(["batch", "commit"]) }),
+        async run(ctx, input) {
+          await ctx.db.migrate(["CREATE TABLE r (id TEXT PRIMARY KEY)"]);
+          const statements = Array.from({ length: 10 }, (_, i) => ctx.db.statement`INSERT INTO r VALUES (${`${ctx.runId}:${i}`})`);
+          if (input.how === "batch") await ctx.step.do("w", () => ctx.db.batch(statements));
+          else await ctx.step.do("w", () => (ctx.db.commitWithStep(statements), true));
+          return true;
+        },
+      });
+    const a = make(many(1));
+    const viaBatch = a.usage((await a.start({ how: "batch" })).runId).rowsWritten;
+    const b = make(many(2));
+    const viaCommit = b.usage((await b.start({ how: "commit" })).runId).rowsWritten;
+    expect(viaCommit).toBe(viaBatch);
+  });
 });

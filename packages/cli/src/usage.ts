@@ -30,6 +30,21 @@ export class UsageTracker {
   readonly other: RunUsage = emptyUsage();
   /** Set on every change, cleared by whoever persists it. */
   dirty = false;
+  /**
+   * Statements claimed ahead by ctx.db.commitWithStep: they run later, when the step commits, and name no run, so the
+   * next that many statements with no run of their own are this run's.
+   */
+  private readonly claims: Array<{ runId: string; left: number }> = [];
+
+  /** The next `count` statements no run accounts for are `runId`'s (ctx.db.commitWithStep's queued writes). */
+  claim(runId: string, count: number): void {
+    if (count > 0) this.claims.push({ runId, left: count });
+  }
+
+  /** The step that queued them failed: its writes never run, so its claims go. */
+  dropClaims(runId: string): void {
+    for (let i = this.claims.length - 1; i >= 0; i--) if (this.claims[i]!.runId === runId) this.claims.splice(i, 1);
+  }
 
   /** Run `fn` with statements attributed to `runId`. `fn` must reach the database synchronously (ctx.db calls do). */
   attribute<T>(runId: string, fn: () => T): T {
@@ -44,7 +59,12 @@ export class UsageTracker {
 
   record(params: readonly unknown[], cost: { rowsRead: number; rowsWritten: number }): void {
     if (this.paused > 0) return;
-    const runId = this.current ?? (params.find((p) => typeof p === "string" && RUN_ID.test(p)) as string | undefined) ?? null;
+    let runId = this.current ?? (params.find((p) => typeof p === "string" && RUN_ID.test(p)) as string | undefined) ?? null;
+    if (!runId && this.claims.length) {
+      const claim = this.claims[0]!;
+      runId = claim.runId;
+      if (--claim.left === 0) this.claims.shift();
+    }
     let usage = this.other;
     if (runId) {
       usage = this.runs.get(runId) ?? emptyUsage();
