@@ -21,7 +21,10 @@ export interface MessagingSendOptions {
   subject?: string;
   /** WhatsApp template name for messages outside the 24-hour service window. */
   template?: { name: string; language: string; variables?: string[] };
-  /** Passed to the provider when it supports deduplication. Defaults to the current step's idempotency key. */
+  /**
+   * Passed to the provider when it supports deduplication (Resend; Discord with a bot token, for a few minutes).
+   * Inside `ctx.step.do`, defaults to a key derived from the step's idempotency key: see `StepInfo.idempotencyKey`.
+   */
   idempotencyKey?: string;
 }
 
@@ -50,6 +53,10 @@ export interface CreateBillRequest {
   customer?: { name?: string; email?: string; phone?: string };
   /** Where the payer is sent after paying. */
   returnUrl?: string;
+  /**
+   * Passed to the provider when it supports deduplication (Stripe). Inside `ctx.step.do`, defaults to a key
+   * derived from the step's idempotency key: see `StepInfo.idempotencyKey`.
+   */
   idempotencyKey?: string;
 }
 
@@ -103,6 +110,10 @@ export interface RefundRequest {
   /** Major units. Omit for a full refund. */
   amount?: number;
   reason?: string;
+  /**
+   * Passed to the provider when it supports deduplication (Stripe). Inside `ctx.step.do`, defaults to a key
+   * derived from the step's idempotency key: see `StepInfo.idempotencyKey`.
+   */
   idempotencyKey?: string;
 }
 

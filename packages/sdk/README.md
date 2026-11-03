@@ -27,7 +27,7 @@ export default defineActuator({
 | `ctx.step.sleep` / `sleepUntil` | Hibernate until a time |
 | `ctx.step.waitForEvent` | Resume on a webhook, payment, inbound message or posted event |
 | `ctx.step.waitForApproval` / `waitForInput` | Resume when a person approves or answers through a signed link |
-| `ctx.db` | The actuator's own SQLite database |
+| `ctx.db` | The actuator's own SQLite database. `batch([...])` runs statements all-or-nothing; `commitWithStep([...])` applies them with the step's completion |
 | `ctx.messaging`, `ctx.payment`, `ctx.llm`, `ctx.http` | Declared capabilities, backed by your own accounts |
 
 Reference: [SDK API](https://actuate.run/docs/reference/sdk/).
