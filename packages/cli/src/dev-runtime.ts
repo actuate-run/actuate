@@ -23,6 +23,7 @@ export interface DevRuntimeOptions<E extends RuntimeEnv = RuntimeEnv> extends Ru
 export interface DevState {
   storage: {
     sql: { exec(query: string, ...params: unknown[]): DevCursor };
+    transactionSync?<T>(fn: () => T): T;
     get<T>(key: string): Promise<T | undefined>;
     put(key: string, value: unknown): Promise<void>;
   };
@@ -41,6 +42,9 @@ const RUN_PATHS = /^\/(run|webhook|runs(\/[^/]+(\/resume)?)?)$/;
 
 /** Count every statement's billed rows (Cloudflare's own counters) into `usage`. */
 export function meterSql(state: DevState, usage: UsageTracker): void {
+  // A transaction's statements are attributed together (see UsageTracker.transaction).
+  const transactionSync = state.storage.transactionSync?.bind(state.storage);
+  if (transactionSync) state.storage.transactionSync = <T>(fn: () => T): T => usage.transaction(() => transactionSync(fn));
   const sql = state.storage.sql;
   const exec = sql.exec.bind(sql);
   sql.exec = (query: string, ...params: unknown[]): DevCursor => {

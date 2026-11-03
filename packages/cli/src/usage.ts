@@ -30,20 +30,27 @@ export class UsageTracker {
   readonly other: RunUsage = emptyUsage();
   /** Set on every change, cleared by whoever persists it. */
   dirty = false;
+  /** Statements of the transaction running now, held until it ends (see transaction). */
+  private pending: Array<{ runId: string | null; cost: { rowsRead: number; rowsWritten: number } }> | null = null;
+
   /**
-   * Statements claimed ahead by ctx.db.commitWithStep: they run later, when the step commits, and name no run, so the
-   * next that many statements with no run of their own are this run's.
+   * Run a database transaction. Its statements are held until it ends; then those that name no run go to the one run
+   * the transaction's other statements name, if exactly one. A step's commit is such a transaction: the writes
+   * ctx.db.commitWithStep queued name no run, and the step row written with them does. Rolled-back work counts too,
+   * as it does on the platform (the rows were still read and written).
    */
-  private readonly claims: Array<{ runId: string; left: number }> = [];
-
-  /** The next `count` statements no run accounts for are `runId`'s (ctx.db.commitWithStep's queued writes). */
-  claim(runId: string, count: number): void {
-    if (count > 0) this.claims.push({ runId, left: count });
-  }
-
-  /** The step that queued them failed: its writes never run, so its claims go. */
-  dropClaims(runId: string): void {
-    for (let i = this.claims.length - 1; i >= 0; i--) if (this.claims[i]!.runId === runId) this.claims.splice(i, 1);
+  transaction<T>(fn: () => T): T {
+    if (this.pending) return fn(); // nested: part of the outer one
+    this.pending = [];
+    try {
+      return fn();
+    } finally {
+      const held = this.pending;
+      this.pending = null;
+      const runs = new Set(held.map((h) => h.runId).filter((r): r is string => r !== null));
+      const owner = runs.size === 1 ? [...runs][0]! : null;
+      for (const h of held) this.add(h.runId ?? owner, h.cost);
+    }
   }
 
   /** Run `fn` with statements attributed to `runId`. `fn` must reach the database synchronously (ctx.db calls do). */
@@ -59,12 +66,12 @@ export class UsageTracker {
 
   record(params: readonly unknown[], cost: { rowsRead: number; rowsWritten: number }): void {
     if (this.paused > 0) return;
-    let runId = this.current ?? (params.find((p) => typeof p === "string" && RUN_ID.test(p)) as string | undefined) ?? null;
-    if (!runId && this.claims.length) {
-      const claim = this.claims[0]!;
-      runId = claim.runId;
-      if (--claim.left === 0) this.claims.shift();
-    }
+    const runId = this.current ?? (params.find((p) => typeof p === "string" && RUN_ID.test(p)) as string | undefined) ?? null;
+    if (this.pending) this.pending.push({ runId, cost });
+    else this.add(runId, cost);
+  }
+
+  private add(runId: string | null, cost: { rowsRead: number; rowsWritten: number }): void {
     let usage = this.other;
     if (runId) {
       usage = this.runs.get(runId) ?? emptyUsage();

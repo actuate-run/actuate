@@ -183,7 +183,7 @@ export class ActuatorTest {
     const providers = { ...this.fakes(), ...options.providers } as Partial<Providers>;
     this.db = new (sqlite().DatabaseSync)(":memory:");
     this.manager = new RunManager({
-      sql: meteredNodeSqlite(this.db, { onStatement: (cost) => this.tracker.record(cost.params, cost) }),
+      sql: meteredNodeSqlite(this.db, { onStatement: (cost) => this.tracker.record(cost.params, cost), wrapTransaction: (run) => this.tracker.transaction(run) }),
       approvalSecret: "actuate-test",
       approvalUrl: "https://actuator.test/approve",
       now: () => this.clock,

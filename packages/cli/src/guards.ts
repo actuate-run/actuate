@@ -135,39 +135,14 @@ function attributeOnly(ctx: BaseContext, usage: UsageTracker | undefined): BaseC
   const db = ctx.db as unknown as Record<string, unknown>;
   const wrapped: Record<string, unknown> = { ...db };
   for (const [name, fn] of Object.entries(db)) {
-    if (typeof fn !== "function") continue;
-    wrapped[name] = (...args: unknown[]) => {
-      if (name === "commitWithStep" && Array.isArray(args[0])) usage.claim(ctx.runId, (args[0] as unknown[]).length);
-      return usage.attribute(ctx.runId, () => Reflect.apply(fn as (...a: unknown[]) => unknown, db, args));
-    };
+    if (typeof fn === "function") wrapped[name] = (...args: unknown[]) => usage.attribute(ctx.runId, () => Reflect.apply(fn as (...a: unknown[]) => unknown, db, args));
   }
-  return { ...(ctx as unknown as Record<string, unknown>), db: wrapped, step: droppingClaims(ctx.step, usage, ctx.runId) } as unknown as BaseContext;
-}
-
-/** A step that throws never commits what it queued with ctx.db.commitWithStep: drop those claims (see UsageTracker.claim). */
-function droppingClaims(step: Step, usage: UsageTracker | undefined, runId: string): Step {
-  if (!usage) return step;
-  const wrap = (fn: unknown) =>
-    typeof fn !== "function"
-      ? fn
-      : async (info: StepInfo) => {
-          try {
-            return await (fn as (i: StepInfo) => unknown)(info);
-          } catch (err) {
-            usage.dropClaims(runId);
-            throw err;
-          }
-        };
-  return {
-    ...step,
-    do: ((name: string, a: unknown, b?: unknown) =>
-      typeof a === "function" ? (step.do as (...x: unknown[]) => unknown)(name, wrap(a)) : (step.do as (...x: unknown[]) => unknown)(name, a, wrap(b))) as Step["do"],
-  };
+  return { ...(ctx as unknown as Record<string, unknown>), db: wrapped } as unknown as BaseContext;
 }
 
 function guardContext(ctx: BaseContext, pass: PassGuard, limits: Limits, usage: UsageTracker | undefined): BaseContext {
   const source = ctx as unknown as Record<string, unknown>;
-  const out: Record<string, unknown> = { ...source, db: guardDb(ctx, pass, usage), step: guardStep(droppingClaims(ctx.step, usage, ctx.runId), pass, limits) };
+  const out: Record<string, unknown> = { ...source, db: guardDb(ctx, pass, usage), step: guardStep(ctx.step, pass, limits) };
   for (const cap of CAPABILITIES) {
     const provider = source[cap];
     if (provider && typeof provider === "object") out[cap] = guardProvider(cap, provider, pass);
@@ -188,8 +163,6 @@ function guardDb(ctx: BaseContext, pass: PassGuard, usage: UsageTracker | undefi
           pass.statement();
           pass.sql((st as { sql?: unknown } | null)?.sql, (st as { params?: unknown } | null)?.params ?? []);
         }
-        // They run when the step commits, naming no run: claim them for this run so its usage counts them.
-        if (Array.isArray(statements)) usage?.claim(ctx.runId, statements.length);
         return Reflect.apply(fn as (...a: unknown[]) => unknown, db, [statements]);
       };
       continue;

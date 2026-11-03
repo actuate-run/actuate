@@ -354,4 +354,28 @@ describe("atomic writes under the local guards", () => {
     const viaCommit = b.usage((await b.start({ how: "commit" })).runId).rowsWritten;
     expect(viaCommit).toBe(viaBatch);
   });
+
+  it("attributes a commit's queued writes to its run even when they name the run, and leaves other runs alone", async () => {
+    const named = defineActuator({
+      name: "named",
+      description: "Queued writes that carry the run ID as a parameter.",
+      input: z.object({}),
+      async run(ctx) {
+        await ctx.db.migrate(["CREATE TABLE log (run_id TEXT NOT NULL, n INTEGER NOT NULL)"]);
+        await ctx.step.do("w", () => {
+          ctx.db.commitWithStep(Array.from({ length: 5 }, (_, i) => ctx.db.statement`INSERT INTO log VALUES (${ctx.runId}, ${i})`));
+          return true;
+        });
+        return true;
+      },
+    });
+    const t = make(named);
+    await t.start({}); // the first run also applies the migration
+    const second = (await t.start({})).runId;
+    const third = (await t.start({})).runId;
+    // Same work, same count (5 queued inserts plus the journal): nothing leaks from one run into the next.
+    expect(t.usage(second).rowsWritten).toBe(t.usage(third).rowsWritten);
+    expect(t.usage(second).rowsWritten).toBeGreaterThanOrEqual(5);
+    expect(t.rows("log")).toHaveLength(15);
+  });
 });

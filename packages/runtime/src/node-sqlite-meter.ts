@@ -22,6 +22,8 @@ export interface MeteredNodeSqliteOptions {
   meter?: SqlMeter;
   /** Called after every statement with its cost, e.g. to attribute rows to runs. */
   onStatement?: (cost: StatementCost) => void;
+  /** Wraps every transaction, e.g. to attribute a transaction's statements together. */
+  wrapTransaction?: <T>(run: () => T) => T;
 }
 
 /**
@@ -98,7 +100,7 @@ export function meteredNodeSqlite(db: DatabaseLike, options: MeteredNodeSqliteOp
 
   return {
     meter,
-    transaction: (fn) => base.transaction(fn),
+    transaction: (fn) => (options.wrapTransaction ? options.wrapTransaction(() => base.transaction(fn)) : base.transaction(fn)),
     exec(sql: string, params: readonly SqlValue[] = []): Row[] {
       const tokens = tokenizeSql(sql);
       const kind = statementKind(tokens);
