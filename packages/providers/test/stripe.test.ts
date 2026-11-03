@@ -153,6 +153,14 @@ describe("stripe webhooks", () => {
     expect(await stripe.parseWebhook!(await signed(other), creds)).toBeNull();
   });
 
+  it("takes the reference only from the metadata createBill sets, never the buyer-settable client_reference_id", async () => {
+    // A Payment Link opened as ?client_reference_id=order-7 on the same Stripe account.
+    const paymentLink = event("checkout.session.completed", { payment_status: "paid", client_reference_id: "order-7", metadata: {}, amount_total: 100 });
+    expect(await stripe.parseWebhook!(await signed(paymentLink), creds)).toBeNull();
+    const mismatched = event("checkout.session.completed", { payment_status: "paid", client_reference_id: "order-9" });
+    expect((await stripe.parseWebhook!(await signed(mismatched), creds))?.event).toBe("payment.order-7");
+  });
+
   it("rejects tampered bodies, wrong secrets and missing headers", async () => {
     const body = event("checkout.session.completed", { payment_status: "paid" });
     const req = await signed(body);
