@@ -312,7 +312,7 @@ describe("atomic writes under the local guards", () => {
           ctx.db.statement`INSERT INTO entries VALUES (${`${ctx.runId}:a`}, ${5})`,
           { sql: "SELECT SUM(amount) AS total FROM entries", params: [] },
         ]);
-        return sum[0]!.total;
+        return sum![0]!.total;
       });
       await ctx.step.do("later", () => {
         ctx.db.commitWithStep([ctx.db.statement`INSERT INTO entries VALUES (${`${ctx.runId}:b`}, ${7})`]);
