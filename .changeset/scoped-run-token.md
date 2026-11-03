@@ -15,4 +15,5 @@ Security hardening.
 - **runtime:** the approval page is sent with `Cache-Control: no-store`, `X-Frame-Options: DENY` and a restrictive Content-Security-Policy.
 - **providers:** Stripe payment events take their reference only from the `actuate_reference_id` metadata that `createBill` sets, not from `client_reference_id`, which buyers can set themselves on Payment Links and pricing tables.
 - **cli:** `actuate login` creates the credentials file as `0600` (and its folder as `0700`) from the start.
+- **cli:** `actuate login` points at the dashboard's new origin, `https://app.actuate.run/settings/tokens`.
 - **create-actuate:** `--ref` must be a plain git ref.
