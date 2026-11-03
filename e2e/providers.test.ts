@@ -8,7 +8,9 @@ import { billplzSignature } from "@actuate/providers";
 let mf: Miniflare;
 const calls: Array<{ url: string; body: string }> = [];
 let reference = "";
+// `actuate dev` behind a tunnel: providers call the public URL, the developer calls localhost.
 const base = "http://self.test";
+const local = "http://localhost";
 
 beforeAll(async () => {
   const out = await build({
@@ -24,6 +26,7 @@ beforeAll(async () => {
     durableObjects: { ACTUATOR: { className: "ActuatorObject", useSQLite: true } },
     bindings: {
       ACTUATE_DEV: "1",
+      ACTUATE_PUBLIC_URL: base,
       ACTUATE_MESSAGING: "telegram",
       TELEGRAM_BOT_TOKEN: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
       TELEGRAM_WEBHOOK_SECRET_TOKEN: "tg-secret",
@@ -47,7 +50,7 @@ beforeAll(async () => {
 afterAll(() => mf?.dispose());
 
 it("sends through Telegram, bills through Billplz, and resumes on the signed callback", async () => {
-  const started = await (await mf.dispatchFetch(`${base}/run`, { method: "POST", body: JSON.stringify({ chat: "9", email: "a@b.co" }) })).json<any>();
+  const started = await (await mf.dispatchFetch(`${local}/run`, { method: "POST", body: JSON.stringify({ chat: "9", email: "a@b.co" }) })).json<any>();
   expect(started.status).toBe("WAITING");
   const create = calls.find((c) => c.url.endsWith("/api/v3/bills"))!;
   expect(new URLSearchParams(create.body).get("callback_url")).toBe(`${base}/providers/billplz/webhook`);
@@ -58,7 +61,7 @@ it("sends through Telegram, bills through Billplz, and resumes on the signed cal
     mf.dispatchFetch(`${base}/providers/billplz/webhook`, { method: "POST", body: new URLSearchParams(f).toString(), headers: { "content-type": "application/x-www-form-urlencoded" } });
   expect((await post({ ...fields, x_signature: "bad" })).status).toBe(401);
   expect((await post({ ...fields, x_signature: await billplzSignature(fields, "xsig") })).status).toBe(200);
-  const run = await (await mf.dispatchFetch(`${base}/runs/${started.runId}`)).json<any>();
+  const run = await (await mf.dispatchFetch(`${local}/runs/${started.runId}`)).json<any>();
   expect(run).toMatchObject({ status: "COMPLETED", output: { status: "paid" } });
 });
 
@@ -74,4 +77,20 @@ it("delivers inbound Telegram messages as message.telegram.<chat> events", async
   const res = await send("tg-secret");
   expect(res.status).toBe(200);
   expect(await res.json()).toMatchObject({ event: "message.telegram.9", buffered: true });
+});
+
+it("serves the open dev routes only to this machine, never to a web page or another host", async () => {
+  const run = (url: string, headers: Record<string, string> = {}) =>
+    mf.dispatchFetch(url, { method: "POST", body: JSON.stringify({ chat: "9", email: "a@b.co" }), headers: { "content-type": "text/plain", ...headers } });
+  // Through the tunnel (or DNS rebinding), the open admin API and /webhook are refused.
+  expect((await run(`${base}/run`)).status).toBe(403);
+  expect((await run(`${base}/webhook`)).status).toBe(403);
+  expect((await mf.dispatchFetch(`${base}/tables`)).status).toBe(403);
+  // From a web page on another origin: refused, whether or not the browser sends Origin.
+  expect((await run(`${local}/run`, { origin: "https://evil.example" })).status).toBe(403);
+  expect((await run(`${local}/run`, { "sec-fetch-site": "cross-site" })).status).toBe(403);
+  expect((await mf.dispatchFetch(`${local}/events/payment.x`, { headers: { "sec-fetch-site": "cross-site" } })).status).toBe(403);
+  // curl, the CLI and a link clicked from the terminal still work.
+  expect((await mf.dispatchFetch(`${local}/events/payment.x`, { headers: { "sec-fetch-site": "none" } })).status).toBe(200);
+  expect((await mf.dispatchFetch(`${local}/runs`)).status).toBe(200);
 });

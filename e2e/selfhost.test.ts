@@ -52,7 +52,7 @@ beforeAll(async () => {
     compatibilityDate: "2025-09-01",
     compatibilityFlags: ["nodejs_compat"],
     durableObjects: { ACTUATOR: { className: "ActuatorObject", useSQLite: true } },
-    bindings: { ACTUATE_CONFIG: JSON.stringify({ greeting: "Hello" }), ACTUATE_TOKEN: "admin", ACTUATE_WEBHOOK_SECRET: "whs_test" },
+    bindings: { ACTUATE_CONFIG: JSON.stringify({ greeting: "Hello" }), ACTUATE_TOKEN: "admin", ACTUATE_RUN_TOKEN: "agent", ACTUATE_WEBHOOK_SECRET: "whs_test" },
   });
 }, 60_000);
 
@@ -61,13 +61,54 @@ afterAll(async () => {
 });
 
 const auth = { authorization: "Bearer admin" };
+const agentAuth = { authorization: "Bearer agent" };
 
 describe("self-hosted runtime on workerd", () => {
+  // Runs first: a stranger's Host header must not choose where approval links point.
+  it("learns its public origin only from an owner request", async () => {
+    for (const init of [{}, { headers: agentAuth }]) (await mf.dispatchFetch("http://attacker.example/health", init as never)).body?.cancel();
+    const viaAgent = await mf.dispatchFetch("http://attacker.example/run", {
+      method: "POST",
+      body: JSON.stringify({ name: "Eve", mode: "approval" }),
+      headers: { ...agentAuth, "content-type": "application/json" },
+    });
+    const runId = (await viaAgent.json<any>()).runId;
+    const links = await call(`/runs/${runId}/approvals/ok/links`, { headers: auth });
+    expect(new URL(links.body.approveUrl).origin).toBe(base);
+    await call(`/runs/${runId}/cancel`, { headers: auth, method: "POST" });
+  });
+
   it("describes the actuator and enforces the admin token", async () => {
     expect((await call("/")).status).toBe(401);
     const info = await call("/", { headers: auth });
     expect(info.body).toMatchObject({ name: "e2e_booking", capabilities: ["messaging"], configError: null });
     expect(info.body.input.required).toEqual(["name", "mode"]);
+  });
+
+  it("gives an agent's run token no way past its own approval", async () => {
+    const started = await call("/run", { headers: agentAuth, json: { name: "Agent", mode: "approval" } });
+    expect(started.status).toBe(201);
+    const runId = started.body.runId;
+    expect((await call("/", { headers: agentAuth })).status).toBe(200);
+    expect((await call(`/runs/${runId}`, { headers: agentAuth })).body.status).toBe("WAITING");
+    const refused = [
+      call(`/runs/${runId}/approvals/ok/approve`, { headers: agentAuth, json: { by: "manager" } }),
+      call(`/runs/${runId}/approvals/ok/links`, { headers: agentAuth }),
+      call(`/runs/${runId}/inputs/ok`, { headers: agentAuth, json: { text: "yes" } }),
+      call(`/runs/${runId}/cancel`, { headers: agentAuth, method: "POST" }),
+      call(`/events/payment.${runId}`, { headers: agentAuth, json: { status: "paid" } }),
+      call("/approvals", { headers: agentAuth }),
+      call("/runs", { headers: agentAuth }),
+      call("/tables", { headers: agentAuth }),
+    ];
+    for (const res of await Promise.all(refused)) expect(res.status).toBe(403);
+    expect((await call(`/runs/${runId}`, { headers: auth })).body.status).toBe("WAITING");
+    expect((await call("/run", { headers: { authorization: "Bearer nope" }, json: { name: "X", mode: "sleep" } })).status).toBe(401);
+    await call(`/runs/${runId}/cancel`, { headers: auth, method: "POST" });
+  });
+
+  it("only accepts events by POST outside actuate dev", async () => {
+    expect((await call("/events/payment.anything", { headers: auth })).status).toBe(404);
   });
 
   it("validates input before running", async () => {
@@ -122,6 +163,10 @@ describe("self-hosted runtime on workerd", () => {
 
     const page = await call(`/approve?token=${token}`);
     expect(page.body).toContain('<form method="post">');
+    const headers = (await mf.dispatchFetch(`${base}/approve?token=${token}`)).headers;
+    expect(headers.get("cache-control")).toBe("no-store");
+    expect(headers.get("x-frame-options")).toBe("DENY");
+    expect(headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     expect((await call(`/runs/${runId}`, { headers: auth })).body.status).toBe("WAITING");
 
     const res = await mf.dispatchFetch(`${base}/approve`, {

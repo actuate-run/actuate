@@ -68,7 +68,7 @@ claude mcp add --transport http refund_order https://run.actuate.run/a/<actuator
 
 Any MCP client works: Claude Code, Claude Desktop, Cursor, VS Code, or your own agent through an MCP SDK. Each hosted actuator also has an HTTP endpoint and an OpenAPI document. See [Connect your agent](https://actuate.run/docs/guides/connect-your-agent/).
 
-The MCP endpoint is part of the hosted platform, not the open-source runtime. A self-hosted actuator is called over the [runtime HTTP API](https://actuate.run/docs/reference/runtime-http/) (`POST /run`), which your agent can use as an HTTP tool.
+The MCP endpoint is part of the hosted platform, not the open-source runtime. A self-hosted actuator is called over the [runtime HTTP API](https://actuate.run/docs/reference/runtime-http/) (`POST /run`), which your agent can use as an HTTP tool. Give the agent `ACTUATE_RUN_TOKEN`, which can only start and read runs, never `ACTUATE_TOKEN`: that one can approve.
 
 ## What you get
 
