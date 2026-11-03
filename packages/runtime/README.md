@@ -14,6 +14,8 @@ export const ActuatorObject = runtime.ActuatorObject;
 
 Bind `ActuatorObject` as a SQLite-backed Durable Object named `ACTUATOR`, set `ACTUATE_TOKEN`, `ACTUATE_WEBHOOK_SECRET` and `ACTUATE_PUBLIC_URL`, and deploy with `wrangler deploy`. Give your agent `ACTUATE_RUN_TOKEN` (start and read runs only), never `ACTUATE_TOKEN`, which can approve. The runtime serves an HTTP API for runs, events, approvals and tables. Guide: [Self-hosting](https://actuate.run/docs/guides/self-hosting/) · [Runtime HTTP API](https://actuate.run/docs/reference/runtime-http/).
 
+For tests and Node hosts, `nodeSqlite` runs the engine on `node:sqlite`, and `meteredNodeSqlite` adds an estimate of the rows read and written that Durable Objects would bill. `checkActuatorSql` refuses the SQL the hosted platform refuses (recursive queries, PRAGMA, ATTACH, generator functions). To test an actuator, use `@actuate/cli/testing`, which builds on them.
+
 ---
 
 [Docs](https://actuate.run/docs) · [Source](https://github.com/actuate-run/actuate) · [Templates](https://github.com/actuate-run/templates) · Apache-2.0

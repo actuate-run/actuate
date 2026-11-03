@@ -79,6 +79,7 @@ The MCP endpoint is part of the hosted platform, not the open-source runtime. A 
 - **Your accounts.** Telegram, WhatsApp, Slack, Discord and email; Stripe, Chip, ToyyibPay and Billplz; Anthropic, OpenAI, Google or any OpenAI-compatible API. Credentials are yours and never reach the model.
 - **Schema-checked tools.** Input is validated before anything runs. The hosted platform generates MCP tools and OpenAPI from your Zod schemas.
 - **Replay-safe by lint.** `actuate check` flags network calls, provider calls, clocks and randomness outside a step before you deploy.
+- **Tested before it ships.** `actuate test` runs your tests on the real engine with a clock you control, recording fakes and a rows meter, and `actuate dev` and `actuate check --platform` apply the hosted platform's guards and deploy checks locally.
 - **Open source.** The SDK, runtime, CLI and provider adapters are Apache-2.0. Self-host on Cloudflare Workers, or use the hosted platform at [actuate.run](https://actuate.run).
 
 ## How it works
@@ -110,7 +111,7 @@ Each actuator is a Durable Object with its own SQLite database. Steps are journa
 | --- | --- |
 | [`@actuate/sdk`](packages/sdk) | `defineActuator`, `ctx.step.*`, `ctx.db`, provider types |
 | [`@actuate/runtime`](packages/runtime) | The step engine: journal, replay, sleeps, events, approvals and input links. Runs on `workerd` with SQLite |
-| [`@actuate/cli`](packages/cli) | The `actuate` command: `init`, `dev`, `check`, `deploy`, `run`, `logs`, `login`, `providers` |
+| [`@actuate/cli`](packages/cli) | The `actuate` command (`init`, `dev`, `test`, `check`, `deploy`, `run`, `logs`, `doctor`, ...) and the test harness `@actuate/cli/testing` |
 | [`@actuate/providers`](packages/providers) | Bring-your-own-credentials adapters for messaging, payments and LLMs |
 | [`create-actuate`](packages/create-actuate) | `npm create actuate`, with [11 templates](https://github.com/actuate-run/templates) |
 

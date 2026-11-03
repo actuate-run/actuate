@@ -59,14 +59,67 @@ export default defineActuator({
 });
 `;
 
+/** The hello starter's test: `actuate test` runs it with node:test, no other dependency needed. */
+export const HELLO_TEST = `import { test } from "node:test";
+import assert from "node:assert/strict";
+import { testActuator } from "@actuate/cli/testing";
+import actuator from "./actuator.js";
+
+test("greets, sleeps, then follows up", async () => {
+  const t = testActuator(actuator);
+  const run = await t.start({ name: "Aina" });
+  assert.equal(run.status, "WAITING"); // asleep until the follow-up
+
+  await t.advance("10 seconds"); // the test clock: no real waiting
+  assert.equal(t.run(run.runId).status, "COMPLETED");
+  assert.deepEqual(t.rows("greetings").map((r) => r.name), ["Aina"]);
+  assert.deepEqual(t.logs(run.runId).map((l) => l.message), ["Hello, Aina!", "Still there, Aina?"]);
+  // A budget: fails if a change makes this run cost more passes or rows.
+  assert.deepEqual(t.usage(run.runId).passes, 2);
+  assert.ok(t.usage(run.runId).rowsWritten <= 20);
+});
+
+test("refuses an empty name before any code runs", async () => {
+  const t = testActuator(actuator);
+  await assert.rejects(t.start({ name: "" }), /name/);
+});
+`;
+
+/** For coding agents (and people): the commands that check an actuator before it is deployed. */
+export const AGENTS_MD = `# Working on this actuator
+
+This is an [Actuate](https://actuate.run) actuator: \`actuator.ts\` exports \`defineActuator({ ... })\`.
+\`run\` is replayed from the top after every sleep, wait and retry, so every side effect
+(provider calls, fetch, database writes, Date.now(), Math.random()) goes inside \`ctx.step.do\`.
+
+Before you call a change done:
+
+1. \`npx actuate check --platform\`: replay safety, plus the hosted platform's deploy checks.
+2. \`npx actuate test\`: the tests (\`*.test.ts\`, written with \`@actuate/cli/testing\`). Add one
+   for each behaviour you change; pin passes and rows written with \`t.usage(runId)\`.
+3. \`npx actuate dev\`, then \`npx actuate run '{...}' --local\` and \`npx actuate logs <runId> --local\`
+   to try it by hand. Local runs get the platform's guards and show rows read and written.
+4. \`npx actuate deploy --dry-run\`, and only then \`npx actuate deploy\`: every deploy attempt
+   counts against the monthly deploy budget, failed ones included.
+
+\`npx actuate <command> --help\` explains each command; \`--json\` gives machine-readable output.
+Guide: https://actuate.run/docs/guides/best-practices/
+`;
+
 export function scaffoldFiles(name: string, actuatorSource: string, extra: Record<string, string> = {}): Record<string, string> {
   const pkg = {
     name,
     private: true,
     type: "module",
-    scripts: { dev: "actuate dev", check: "actuate check", deploy: "actuate deploy", typecheck: "tsc --noEmit" },
+    scripts: {
+      dev: "actuate dev",
+      test: "actuate test",
+      check: "actuate check --platform",
+      deploy: "actuate deploy",
+      typecheck: "tsc --noEmit",
+    },
     dependencies: { "@actuate/sdk": SDK_VERSION },
-    devDependencies: { "@actuate/cli": SDK_VERSION, typescript: "^5.9.3" },
+    devDependencies: { "@actuate/cli": SDK_VERSION, "@types/node": "^22.10.0", typescript: "^5.9.3" },
   };
   return {
     "package.json": JSON.stringify(pkg, null, 2) + "\n",
@@ -89,6 +142,7 @@ export function scaffoldFiles(name: string, actuatorSource: string, extra: Recor
       ) + "\n",
     ".gitignore": "node_modules/\n.actuate/\n.dev.vars\n.env\n",
     "actuate.config.json": "{}\n",
+    "AGENTS.md": AGENTS_MD,
     "actuator.ts": actuatorSource,
     ...extra,
   };
@@ -106,7 +160,8 @@ async function fetchTemplate(template: string, ref: string, doFetch: typeof fetc
     throw new Error(`Template "${template}" not found in ${TEMPLATES_REPO}@${ref} (HTTP ${res.status}). Templates: https://github.com/${TEMPLATES_REPO}`);
   }
   const files: Record<string, string> = { "actuator.ts": await res.text() };
-  for (const optional of ["README.md", ".env.example", "actuate.config.json"]) {
+  // actuator.test.ts: a template's own test, written with @actuate/cli/testing.
+  for (const optional of ["README.md", ".env.example", "actuate.config.json", "actuator.test.ts"]) {
     const r = await doFetch(raw(optional));
     if (r.ok) files[optional] = await r.text();
   }
@@ -123,7 +178,7 @@ export async function scaffold(options: ScaffoldOptions): Promise<string> {
   const template = options.template ?? "hello";
   let files: Record<string, string>;
   if (template === "hello") {
-    files = scaffoldFiles(basename(dir), HELLO_ACTUATOR);
+    files = scaffoldFiles(basename(dir), HELLO_ACTUATOR, { "actuator.test.ts": HELLO_TEST });
   } else {
     const fetched = await fetchTemplate(template, options.ref ?? "main", options.fetch ?? fetch);
     const { "actuator.ts": source, ...rest } = fetched;

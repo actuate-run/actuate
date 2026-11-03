@@ -10,8 +10,17 @@ describe("scaffold", () => {
   it("writes the hello starter", async () => {
     const dir = join(mkdtempSync(join(tmpdir(), "ca-")), "my-bot");
     await scaffold({ dir, log: quiet });
-    expect(readdirSync(dir).sort()).toEqual([".gitignore", "actuate.config.json", "actuator.ts", "package.json", "tsconfig.json"]);
-    expect(JSON.parse(readFileSync(join(dir, "package.json"), "utf8"))).toMatchObject({ name: "my-bot", scripts: { dev: "actuate dev" } });
+    expect(readdirSync(dir).sort()).toEqual([".gitignore", "AGENTS.md", "actuate.config.json", "actuator.test.ts", "actuator.ts", "package.json", "tsconfig.json"]);
+    expect(JSON.parse(readFileSync(join(dir, "package.json"), "utf8"))).toMatchObject({
+      name: "my-bot",
+      scripts: { dev: "actuate dev", test: "actuate test", check: "actuate check --platform" },
+      devDependencies: { "@types/node": expect.any(String) },
+    });
+    // The example test uses only node:test and @actuate/cli/testing, so `npm install` needs nothing more.
+    const test = readFileSync(join(dir, "actuator.test.ts"), "utf8");
+    expect(test).toContain('from "@actuate/cli/testing"');
+    expect(test).not.toContain("vitest");
+    expect(readFileSync(join(dir, "AGENTS.md"), "utf8")).toContain("npx actuate deploy --dry-run");
   });
 
   it("fetches a named template from the templates repo", async () => {
@@ -20,6 +29,7 @@ describe("scaffold", () => {
       urls.push(url);
       if (url.endsWith("/actuator.ts")) return new Response("// template");
       if (url.endsWith("/README.md")) return new Response("# readme");
+      if (url.endsWith("/actuator.test.ts")) return new Response("// its test");
       return new Response("", { status: 404 });
     }) as typeof fetch;
     const dir = join(mkdtempSync(join(tmpdir(), "ca-")), "x");
@@ -27,6 +37,7 @@ describe("scaffold", () => {
     expect(urls[0]).toBe("https://raw.githubusercontent.com/actuate-run/templates/main/daily-report/actuator.ts");
     expect(readFileSync(join(dir, "actuator.ts"), "utf8")).toBe("// template");
     expect(readFileSync(join(dir, "README.md"), "utf8")).toBe("# readme");
+    expect(readFileSync(join(dir, "actuator.test.ts"), "utf8")).toBe("// its test");
   });
 
   it("refuses non-empty directories and bad template names", async () => {
