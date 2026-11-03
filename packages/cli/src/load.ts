@@ -1,7 +1,7 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { build, type BuildOptions, type Plugin } from "esbuild";
 import { isActuator, z, type Actuator } from "@actuate/sdk";
 
@@ -66,9 +66,14 @@ export async function loadActuator(file: string, workDir: string): Promise<Actua
     logLevel: "silent",
   });
   mkdirSync(workDir, { recursive: true });
-  const out = join(workDir, `actuator-${Date.now()}.mjs`);
+  const out = join(workDir, `actuator-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mjs`);
   writeFileSync(out, code.outputFiles[0]!.text);
-  const mod = (await import(pathToFileURL(out).href)) as { default?: unknown };
+  let mod: { default?: unknown };
+  try {
+    mod = (await import(pathToFileURL(out).href)) as { default?: unknown };
+  } finally {
+    rmSync(out, { force: true }); // imported modules stay loaded; the file isn't needed again
+  }
   if (!isActuator(mod.default)) {
     throw new Error(`${file} must \`export default defineActuator({ ... })\`.`);
   }
@@ -106,4 +111,22 @@ export function describeActuator(actuator: Actuator): ActuatorMetadata {
 
 export function packageDir(specifier: string): string {
   return dirname(cliResolve(`${specifier}/package.json`));
+}
+
+/** A module of this package, as built (dist, .js) or as source (tests, .ts). */
+export function ownModule(name: string): string {
+  for (const ext of [".js", ".ts"]) {
+    const path = fileURLToPath(new URL(`./${name}${ext}`, import.meta.url));
+    if (existsSync(path)) return path;
+  }
+  throw new Error(`@actuate/cli is missing its ${name} module. Reinstall it.`);
+}
+
+/** The folder of package `name` as installed for a project in `cwd` (node_modules, walking up), or null. */
+export function findPackage(cwd: string, name: string): string | null {
+  for (let dir = resolve(cwd); ; dir = dirname(dir)) {
+    const candidate = join(dir, "node_modules", name);
+    if (existsSync(join(candidate, "package.json"))) return candidate;
+    if (dirname(dir) === dir) return null;
+  }
 }

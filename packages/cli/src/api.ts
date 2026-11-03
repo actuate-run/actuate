@@ -7,6 +7,9 @@ export const DEFAULT_API_URL = "https://api.actuate.run";
 export interface Credentials {
   apiUrl: string;
   token: string;
+  /** The account's plan when last seen (login, deploy), so offline commands can use its limits. */
+  plan?: string;
+  email?: string;
 }
 
 export function credentialsPath(): string {
@@ -20,8 +23,25 @@ export function readCredentials(): Credentials | null {
   }
   const p = credentialsPath();
   if (!existsSync(p)) return null;
-  const creds = JSON.parse(readFileSync(p, "utf8")) as Credentials;
+  let creds: Credentials;
+  try {
+    creds = JSON.parse(readFileSync(p, "utf8")) as Credentials;
+  } catch {
+    throw new Error(`${p} is not valid JSON. Run \`actuate login\` again.`);
+  }
   return { ...creds, apiUrl: process.env.ACTUATE_API_URL ?? creds.apiUrl };
+}
+
+/** Remember the account's plan next to the saved token (not when the token comes from ACTUATE_API_TOKEN). */
+export function rememberAccount(account: { plan?: string; email?: string }): void {
+  if (process.env.ACTUATE_API_TOKEN || !existsSync(credentialsPath())) return;
+  try {
+    const saved = JSON.parse(readFileSync(credentialsPath(), "utf8")) as Credentials;
+    if (saved.plan === account.plan && saved.email === account.email) return;
+    writeCredentials({ ...saved, ...(account.plan ? { plan: account.plan } : {}), ...(account.email ? { email: account.email } : {}) });
+  } catch {
+    /* best effort */
+  }
 }
 
 export function writeCredentials(creds: Credentials): string {
@@ -59,10 +79,24 @@ export function errorMessage(body: unknown, text: string): string {
 
 /** Call the Actuate control plane with the stored token, or the local `actuate dev` runtime (`--local`, no token). */
 export async function api<T>(creds: Credentials, path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${creds.apiUrl.replace(/\/$/, "")}${path}`, {
-    ...init,
-    headers: { authorization: `Bearer ${creds.token}`, "content-type": "application/json", ...(init.headers as object) },
-  });
+  const base = creds.apiUrl.replace(/\/$/, "");
+  let res: Response;
+  try {
+    res = await fetch(`${base}${path}`, {
+      ...init,
+      headers: {
+        ...(creds.token ? { authorization: `Bearer ${creds.token}` } : {}),
+        "content-type": "application/json",
+        ...(init.headers as object),
+      },
+    });
+  } catch (err) {
+    const cause = (err as { cause?: { code?: string } }).cause?.code ?? (err as Error).message;
+    if (/^http:\/\/(localhost|127\.0\.0\.1)/.test(base)) {
+      throw new Error(`Nothing is answering at ${base} (${cause}). Start \`actuate dev\` in another terminal first, or pass --port.`);
+    }
+    throw new Error(`Could not reach ${base} (${cause}). Check your connection, or ACTUATE_API_URL.`);
+  }
   const text = await res.text();
   let body: unknown = text;
   try {
@@ -72,4 +106,16 @@ export async function api<T>(creds: Credentials, path: string, init: RequestInit
   }
   if (!res.ok) throw new ApiError(res.status, `${res.status}: ${errorMessage(body, text)}`);
   return body as T;
+}
+
+/** The parts of `GET /v1/me` the CLI reads. */
+export interface Me {
+  email?: string;
+  plan?: string;
+  planDetails?: unknown;
+  usage?: { deploys?: number; runs?: number; passes?: number; rowsWritten?: number; rowsRead?: number };
+}
+
+export function fetchMe(creds: Credentials): Promise<Me> {
+  return api<Me>(creds, "/v1/me");
 }

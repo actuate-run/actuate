@@ -1,18 +1,128 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { deploy } from "../src/deploy.js";
+import { deploy, prepareDeploy } from "../src/deploy.js";
+import { fakeServer, runCli } from "./helpers.js";
+
+const fixture = fileURLToPath(new URL("./fixtures/project", import.meta.url));
+const quiet = () => {};
+
+const me = (deploys = 3, plan = "maker") => ({ email: "a@b.test", plan, usage: { deploys } });
+const deployed = { id: "act_1", name: "fixture_greeter", version: 4, urls: { api: "a", webhook: "w", mcp: "m", openapi: "o", dashboard: "d" } };
 
 describe("actuate deploy", () => {
   beforeEach(() => {
     vi.stubEnv("XDG_CONFIG_HOME", mkdtempSync(join(tmpdir(), "cli-")));
     vi.stubEnv("ACTUATE_API_TOKEN", "");
+    vi.stubEnv("ACTUATE_PLAN", "");
   });
   afterEach(() => vi.unstubAllEnvs());
+
+  const login = (url: string) => {
+    vi.stubEnv("ACTUATE_API_TOKEN", "ak_test");
+    vi.stubEnv("ACTUATE_API_URL", url);
+  };
 
   it("says you are not logged in before it bundles anything", async () => {
     // The file does not exist: a bundle attempt would fail with a different error.
     await expect(deploy("missing.ts", tmpdir(), { config: true, dryRun: false })).rejects.toThrow(/Not logged in/);
+  });
+
+  it("--dry-run runs the deploy checks without logging in, and exits 1 when they fail", async () => {
+    const out: string[] = [];
+    expect(await deploy("actuator.ts", fixture, { config: true, dryRun: true, json: true, plan: "maker", log: (l) => out.push(l) })).toBe(0);
+    const result = JSON.parse(out.join("\n"));
+    expect(result).toMatchObject({ dryRun: true, name: "fixture_greeter", plan: { id: "maker", source: "--plan" }, issues: [], metadata: { capabilities: ["messaging"] } });
+    expect(result.bundle.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(await deploy("actuator.ts", fixture, { config: true, dryRun: true, plan: "sandbox", log: quiet })).toBe(1);
+  });
+
+  it("stops before uploading when the account can't take the deploy", async () => {
+    const srv = await fakeServer({
+      "GET /v1/me": me(),
+      "GET /v1/providers": [],
+      "GET /v1/actuators/fixture_greeter": [404, { error: "Actuator not found" }],
+      "GET /v1/actuators": [],
+    });
+    login(srv.url);
+    try {
+      const res = await runCli(["deploy"], fixture);
+      expect(res.code).toBe(1);
+      expect(res.out).toContain("Deploy checks: Maker plan (from your account)");
+      expect(res.out).toContain("No provider configured for: messaging. Add one in the dashboard (Settings → Providers) first.  (provider-missing)");
+      expect(res.err).toContain("a refused deploy still counts against your deploy budget");
+      expect(srv.requests.some((r) => r.path === "/v1/actuators/deploy")).toBe(false);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("deploys, and says how many deploys this month have been used", async () => {
+    const srv = await fakeServer({
+      "GET /v1/me": me(3),
+      "GET /v1/providers": [{ capability: "messaging", kind: "telegram" }],
+      "GET /v1/actuators/fixture_greeter": { version: 4, versions: [{ version: 4, code_hash: "old" }] },
+      "POST /v1/actuators/deploy": [201, { ...deployed, version: 5 }],
+    });
+    login(srv.url);
+    try {
+      const res = await runCli(["deploy"], fixture);
+      expect(res.code).toBe(0);
+      expect(res.out).toContain("✓ Deployed fixture_greeter v5");
+      expect(res.out).toContain("Deploys this month: 4 of 2,000");
+      const sent = srv.requests.find((r) => r.path === "/v1/actuators/deploy")?.body as { config: unknown; metadata: { name: string } };
+      expect(sent).toMatchObject({ config: { greeting: "Hi" }, metadata: { name: "fixture_greeter" } });
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("updates only the configuration when the deployed version already runs this code", async () => {
+    const { codeHash } = await prepareDeploy("actuator.ts", fixture, true, quiet);
+    const routes = (config: unknown) => ({
+      "GET /v1/me": me(),
+      "GET /v1/providers": [{ capability: "messaging", kind: "telegram" }],
+      "GET /v1/actuators/fixture_greeter": { version: 4, versions: [{ version: 4, code_hash: codeHash }] },
+      "GET /v1/actuators/fixture_greeter/config": { config },
+      "PUT /v1/actuators/fixture_greeter/config": { ok: true },
+    });
+    const changed = await fakeServer(routes({ greeting: "Hello" }));
+    login(changed.url);
+    try {
+      const res = await runCli(["deploy"], fixture);
+      expect(res).toMatchObject({ code: 0, out: expect.stringContaining("already runs this code: updated its configuration only (no deploy used)") });
+      expect(changed.requests.find((r) => r.method === "PUT")?.body).toEqual({ config: { greeting: "Hi" } });
+      expect(changed.requests.some((r) => r.path === "/v1/actuators/deploy")).toBe(false);
+    } finally {
+      await changed.close();
+    }
+    const same = await fakeServer(routes({ greeting: "Hi" }));
+    login(same.url);
+    try {
+      expect((await runCli(["deploy"], fixture)).out).toContain("Nothing to deploy: fixture_greeter v4 already runs this code and configuration");
+      expect(same.requests.some((r) => r.method === "PUT" || r.path === "/v1/actuators/deploy")).toBe(false);
+    } finally {
+      await same.close();
+    }
+  });
+
+  it("--force deploys anyway, and account lookups that fail only skip their checks", async () => {
+    const srv = await fakeServer({
+      "GET /v1/me": [500, { error: "Internal error" }],
+      "GET /v1/providers": [500, { error: "Internal error" }],
+      "GET /v1/actuators/fixture_greeter": [500, { error: "Internal error" }],
+      "POST /v1/actuators/deploy": [201, { ...deployed, warnings: ["careful"] }],
+    });
+    login(srv.url);
+    try {
+      const res = await runCli(["deploy", "--force", "--json"], fixture);
+      expect(res.code).toBe(0);
+      // Without the account, the plan falls back to Sandbox, whose capability check fails: --force goes ahead.
+      expect(JSON.parse(res.out)).toMatchObject({ deployedNow: true, version: 4, warnings: ["careful"], plan: { id: "sandbox" } });
+    } finally {
+      await srv.close();
+    }
   });
 });

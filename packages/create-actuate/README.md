@@ -13,6 +13,8 @@ Templates come from [actuate-run/templates](https://github.com/actuate-run/templ
 cd my-tool && npm install && npx actuate dev
 ```
 
+The hello starter comes with `actuator.test.ts` (run it with `npx actuate test`; it uses `node:test` and `@actuate/cli/testing`, nothing else to install) and an `AGENTS.md` that tells coding agents how to check an actuator before it's deployed. A template that ships its own `actuator.test.ts` gets it too.
+
 [Quickstart](https://actuate.run/docs/getting-started/quickstart/)
 
 ---
