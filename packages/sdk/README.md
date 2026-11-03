@@ -1,6 +1,6 @@
 # @actuate/sdk
 
-Define an actuator: one TypeScript file that becomes a tool your AI agent can call over MCP. Steps run exactly once, waits cost nothing, and each actuator has its own SQLite database.
+Define an actuator: one TypeScript file that becomes a tool your AI agent can call over MCP (on the hosted platform) or HTTP. Steps run exactly once, waits cost nothing, and each actuator has its own SQLite database.
 
 ```bash
 npm create actuate   # new project with the SDK and CLI

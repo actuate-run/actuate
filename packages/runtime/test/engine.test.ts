@@ -362,6 +362,25 @@ describe("ctx.db and capabilities", () => {
     expect(h.manager.readTable("people").rows).toHaveLength(2);
   });
 
+  it("hides Miniflare's internal table from the table list", async () => {
+    // `wrangler dev` wraps a named Durable Object and adds this table to its SQLite database.
+    const db = new DatabaseSync(":memory:");
+    db.exec("CREATE TABLE __miniflare_do_name (id INTEGER PRIMARY KEY, name TEXT)");
+    const act = defineActuator({
+      name: "db",
+      description: "test",
+      input: z.object({}),
+      async run(ctx) {
+        await ctx.db.migrate(["CREATE TABLE people (name TEXT)"]);
+        return {};
+      },
+    });
+    const h = harness(act, { manager: { sql: nodeSqlite(db) } });
+    await h.start({});
+    expect(h.manager.listTables()).toEqual(["people"]);
+    expect(() => h.manager.readTable("__miniflare_do_name")).toThrow();
+  });
+
   it("warns when an already-applied migration is edited", async () => {
     let first = "CREATE TABLE notes (body TEXT)";
     const act = defineActuator({
