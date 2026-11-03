@@ -155,8 +155,26 @@ function guardDb(ctx: BaseContext, pass: PassGuard, usage: UsageTracker | undefi
   const out: Record<string, unknown> = { ...db };
   for (const [name, fn] of Object.entries(db)) {
     if (typeof fn !== "function") continue;
+    // Synchronous helpers stay synchronous: statement builds a { sql, params } value, commitWithStep queues writes.
+    if (name === "statement") continue;
+    if (name === "commitWithStep") {
+      out[name] = (statements: unknown) => {
+        for (const st of Array.isArray(statements) ? statements : []) {
+          pass.statement();
+          pass.sql((st as { sql?: unknown } | null)?.sql, (st as { params?: unknown } | null)?.params ?? []);
+        }
+        return Reflect.apply(fn as (...a: unknown[]) => unknown, db, [statements]);
+      };
+      continue;
+    }
     out[name] = async (...args: unknown[]) => {
-      pass.statement();
+      // A batch counts and checks each statement, as the platform does.
+      if (name === "batch" && Array.isArray(args[0])) {
+        for (const st of args[0] as Array<{ sql?: unknown; params?: unknown } | null>) {
+          pass.statement();
+          pass.sql(st?.sql, st?.params ?? []);
+        }
+      } else pass.statement();
       if (name === "query" || name === "first") pass.sql(args[0], args[1]);
       else if (name === "sql" && Array.isArray(args[0])) pass.sql((args[0] as string[]).join("?"), args.slice(1));
       else if (name === "migrate" && Array.isArray(args[0])) for (const statement of args[0]) pass.sql(statement, []);

@@ -44,7 +44,8 @@ describe("testActuator", () => {
     await t.approve();
     expect(t.run(run.runId)).toMatchObject({ status: "COMPLETED", output: { status: "REFUNDED", refundId: "refund-1" }, passes: 2 });
     expect(t.refunds).toEqual([{ billId: "bill-9", amount: 20, idempotencyKey: `${run.runId}:refund` }]);
-    expect(t.messages).toEqual([{ to: "+60123", text: "Refunded" }]);
+    // The runtime gives each provider call in a step its own idempotency key (runId:step:method:n).
+    expect(t.messages).toEqual([{ to: "+60123", text: "Refunded", options: { idempotencyKey: `${run.runId}:tell:send:0` } }]);
     expect(t.rows("refunds")).toEqual([{ run_id: run.runId, status: "REFUNDED" }]);
     const usage = t.usage(run.runId);
     expect(usage.passes).toBe(2);
@@ -293,5 +294,43 @@ describe("testActuator guards", () => {
     t.close();
     expect(Math.abs(Date.now() - realNow)).toBeLessThan(60_000);
     await expect(t.start(order)).rejects.toThrow("This test actuator is closed.");
+  });
+});
+
+describe("atomic writes under the local guards", () => {
+  const ledger = defineActuator({
+    name: "ledger",
+    description: "Writes with ctx.db.batch and ctx.db.commitWithStep.",
+    input: z.object({ mode: z.enum(["ok", "pragma"]) }),
+    async run(ctx, input) {
+      await ctx.db.migrate(["CREATE TABLE entries (id TEXT PRIMARY KEY, amount INTEGER NOT NULL)"]);
+      if (input.mode === "pragma") {
+        return ctx.step.do("bad", () => ctx.db.batch([ctx.db.statement`INSERT INTO entries VALUES ('a', 1)`, { sql: "PRAGMA writable_schema = 1", params: [] }]));
+      }
+      const rows = await ctx.step.do("pair", async () => {
+        const [, sum] = await ctx.db.batch<{ total: number }>([
+          ctx.db.statement`INSERT INTO entries VALUES (${`${ctx.runId}:a`}, ${5})`,
+          { sql: "SELECT SUM(amount) AS total FROM entries", params: [] },
+        ]);
+        return sum[0]!.total;
+      });
+      await ctx.step.do("later", () => {
+        ctx.db.commitWithStep([ctx.db.statement`INSERT INTO entries VALUES (${`${ctx.runId}:b`}, ${7})`]);
+        return true;
+      });
+      return { total: rows };
+    },
+  });
+
+  it("keeps ctx.db.statement synchronous, and checks every statement of a batch like the platform", async () => {
+    const t = make(ledger);
+    const ok = await t.start({ mode: "ok" });
+    expect(t.run(ok.runId)).toMatchObject({ status: "COMPLETED", output: { total: 5 } });
+    expect(t.rows("entries")).toHaveLength(2);
+    const bad = await t.start({ mode: "pragma" });
+    expect(t.run(bad.runId)).toMatchObject({ status: "FAILED" });
+    expect(t.run(bad.runId)!.error?.message).toMatch(/PRAGMA/);
+    // Refused before it ran: nothing of the batch was written.
+    expect(t.rows("entries")).toHaveLength(2);
   });
 });
