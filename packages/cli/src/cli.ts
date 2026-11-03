@@ -31,7 +31,14 @@ const DOCS = "https://actuate.run/docs/reference/cli/";
 
 const JSON_OPT: Record<string, OptionSpec> = { json: { type: "boolean", help: "Print JSON instead of text (for scripts and agents)" } };
 const PLAN_OPT: Record<string, OptionSpec> = {
-  plan: { type: "string", arg: "<plan>", help: "sandbox, maker or agency. Default: ACTUATE_PLAN, else your account's plan, else sandbox" },
+  plan: {
+    type: "string",
+    arg: "<plan>",
+    help: "sandbox, maker or agency. Default: ACTUATE_PLAN, else your account's (asked of the API when logged in, or the plan saved at login if it can't be reached), else sandbox",
+  },
+};
+const OFFLINE_OPT: Record<string, OptionSpec> = {
+  offline: { type: "boolean", help: "Don't call the API: use --plan, ACTUATE_PLAN or the plan saved at login, and skip the account checks" },
 };
 const PORT_OPT: Record<string, OptionSpec> = { port: { type: "string", short: "p", arg: "<port>", help: "Port of `actuate dev` (default 8787)" } };
 const TARGET_OPTS: Record<string, OptionSpec> = {
@@ -168,12 +175,13 @@ The hosted platform's guards apply, for a plan: per pass at most 1,000 ctx.db st
     options: {
       ...PORT_OPT,
       ...PLAN_OPT,
+      ...OFFLINE_OPT,
       "no-guards": { type: "boolean", help: "Don't apply the platform's guards" },
     },
     examples: ["actuate dev", "actuate dev --plan maker", "actuate dev --port 8790 --no-guards"],
     async run({ args, values, cwd }) {
       const [{ dev }, { resolvePlan }] = await Promise.all([import("./dev.js"), import("./account.js")]);
-      const plan = await resolvePlan(str(values, "plan"));
+      const plan = await resolvePlan(str(values, "plan"), { online: !values.offline });
       await dev({ file: args[0] ?? "actuator.ts", port: port(values), cwd, plan, guards: !values["no-guards"] });
     },
   },
@@ -183,18 +191,30 @@ The hosted platform's guards apply, for a plan: per pass at most 1,000 ctx.db st
     summary: "Run the project's tests (Vitest if they use it, otherwise node:test)",
     description: `Finds *.test.ts and *.spec.ts files outside node_modules. Files that import vitest run with the project's Vitest; the rest run with node --test, TypeScript included, no setup needed.
 
-Write tests with @actuate/cli/testing: testActuator(actuator) gives the real step engine on node:sqlite, a clock you move (t.advance("1 day")), recording fakes for messaging, payment, llm and http, t.approve() / t.answer() / t.event() / t.pay(), t.rows(table), and rows read and written per run (t.usage(runId)). The platform's guards apply for --plan (passed to tests as ACTUATE_PLAN).`,
+Write tests with @actuate/cli/testing: testActuator(actuator) gives the real step engine on node:sqlite, a clock you move (t.advance("1 day")), recording fakes for messaging, payment, llm and http, t.approve() / t.answer() / t.event() / t.pay(), t.rows(table), and rows read and written per run (t.usage(runId)). The platform's guards apply for --plan, passed to tests as ACTUATE_PLAN; a test can pick its own with testActuator(actuator, { plan }).
+
+Alongside the tests, actuator.ts's deploy checks run locally (no network, not in --watch) and print after them, only if they find something; they never fail the tests. With no test files, actuate test exits 1 so an empty suite doesn't look green in CI; --pass-with-no-tests exits 0.`,
     options: {
-      watch: { type: "boolean", short: "w", help: "Re-run on changes" },
+      watch: { type: "boolean", short: "w", help: "Re-run on changes (Vitest and node:test files side by side when both kinds exist)" },
       grep: { type: "string", short: "g", arg: "<pattern>", help: "Only tests whose name matches" },
       ...PLAN_OPT,
+      ...OFFLINE_OPT,
+      "no-checks": { type: "boolean", help: "Skip the deploy checks reported after the tests" },
+      "pass-with-no-tests": { type: "boolean", help: "Exit 0 when there are no test files" },
     },
     examples: ["actuate test", "actuate test actuator.test.ts --watch", "actuate test --grep refund --plan maker"],
     async run({ args, values, cwd }) {
-      const [{ runTests }, { resolvePlan, describePlan }] = await Promise.all([import("./test-runner.js"), import("./account.js")]);
-      const plan = await resolvePlan(str(values, "plan"));
-      console.error(`Platform guards: ${describePlan(plan)}`);
-      return runTests({ cwd, paths: args, watch: Boolean(values.watch), ...(str(values, "grep") ? { grep: str(values, "grep")! } : {}), env: { ACTUATE_PLAN: plan.plan.id } });
+      const [{ runTests }, { resolvePlan }] = await Promise.all([import("./test-runner.js"), import("./account.js")]);
+      const plan = await resolvePlan(str(values, "plan"), { online: !values.offline });
+      return runTests({
+        cwd,
+        paths: args,
+        watch: Boolean(values.watch),
+        plan,
+        checks: !values["no-checks"],
+        passWithNoTests: Boolean(values["pass-with-no-tests"]),
+        ...(str(values, "grep") ? { grep: str(values, "grep")! } : {}),
+      });
     },
   },
   {
@@ -204,7 +224,12 @@ Write tests with @actuate/cli/testing: testActuator(actuator) gives the real ste
     description: `Replay safety: side effects and non-determinism outside ctx.step.do (fetch, provider calls, Date.now(), new Date(), Math.random(), crypto.randomUUID(); writes through ctx.db as warnings).
 
 --platform also bundles the actuator and runs the hosted platform's deploy checks locally, so a deploy that would be refused (and still count against your deploy budget) stops here: bundle size, cron count and frequency for the plan, the cron input, http.allow, regexes in the input schema, capabilities on the plan, actuate.config.json against the config schema; logged in, also providers set up, actuator count and deploys left this month. They mirror the platform's rules; the platform has the final say.`,
-    options: { platform: { type: "boolean", help: "Also run the platform's deploy checks (bundles the actuator)" }, ...PLAN_OPT, ...JSON_OPT },
+    options: {
+      platform: { type: "boolean", help: "Also run the platform's deploy checks (bundles the actuator)" },
+      ...PLAN_OPT,
+      ...OFFLINE_OPT,
+      ...JSON_OPT,
+    },
     examples: ["actuate check", "actuate check --platform", "actuate check --platform --plan sandbox --json"],
     async run({ args, values, cwd, out }) {
       const file = args[0] ?? "actuator.ts";
@@ -219,8 +244,9 @@ Write tests with @actuate/cli/testing: testActuator(actuator) gives the real ste
       const diagnostics = checkSource(file, source);
       let errors = diagnostics.filter((d) => d.severity === "error").length;
       let warnings = diagnostics.length - errors;
-      if (!values.platform) {
-        if (json) out(JSON.stringify({ file, diagnostics, errors, warnings }, null, 2));
+      // --plan only means something for the deploy checks, so it implies --platform.
+      if (!values.platform && values.plan === undefined && !values.offline) {
+        if (json) out(JSON.stringify({ ok: errors === 0, file, diagnostics, errors, warnings }, null, 2));
         else {
           for (const d of diagnostics) out(formatDiagnostic(d));
           out(diagnostics.length ? `\n${errors} error(s), ${warnings} warning(s)` : "✓ No replay-safety problems found");
@@ -231,13 +257,14 @@ Write tests with @actuate/cli/testing: testActuator(actuator) gives the real ste
       if (!json) for (const d of diagnostics) out(formatDiagnostic(d));
       if (!json && !diagnostics.length) out("✓ No replay-safety problems found");
       const { deployChecks } = await import("./deploy.js");
-      const checked = await deployChecks(file, cwd, { withConfig: true, ...(str(values, "plan") ? { plan: str(values, "plan")! } : {}), log: json ? () => {} : out, stopOnLintErrors: false });
+      const checked = await deployChecks(file, cwd, { withConfig: true, ...(str(values, "plan") ? { plan: str(values, "plan")! } : {}), log: json ? () => {} : out, stopOnLintErrors: false, offline: Boolean(values.offline) });
       errors += checked.issues.filter((i) => i.severity === "error").length;
       warnings += checked.issues.filter((i) => i.severity === "warning").length;
       if (json) {
         out(
           JSON.stringify(
             {
+              ok: errors === 0,
               file,
               diagnostics,
               platform: { plan: checked.resolved.plan.id, planSource: checked.resolved.source, issues: checked.issues, skipped: checked.account.notes },
@@ -286,7 +313,8 @@ Write tests with @actuate/cli/testing: testActuator(actuator) gives the real ste
     name: "run",
     usage: "actuate run ['<json>'] [--local] [--idempotency-key <key>] [--json]",
     summary: "Start a run with this input and show where it got to",
-    description: "Prints the run's status, passes (and, under actuate dev, rows), steps and what to do next. Exits 1 if the run ended FAILED.",
+    description:
+      "Prints the run's status, passes (and, under actuate dev, rows), steps and what to do next. Exits 1 if the run ended FAILED.\n\n--json prints the run record as POST /run returns it (runId, status, output, error, passes, and usage under actuate dev), whatever its status; `actuate logs <runId> --json` gives the run with its steps and logs.",
     options: { ...TARGET_OPTS, "idempotency-key": { type: "string", arg: "<key>", help: "A retry with the same key returns the first run" }, ...JSON_OPT },
     examples: [`actuate run '{"name":"Aina"}' --local`, `actuate run '{"orderId":"A-1001"}' --idempotency-key refund-A-1001`],
     async run({ args, values, cwd, out }) {
@@ -294,8 +322,14 @@ Write tests with @actuate/cli/testing: testActuator(actuator) gives the real ste
       const t = target(values, cwd);
       const key = str(values, "idempotency-key");
       const started = await call<RunJson>(t, "/run", { method: "POST", body: JSON.stringify(input), ...(key ? { headers: { "idempotency-key": key } } : {}) });
+      if (values.json) {
+        // Always the run record POST /run returned; `actuate logs <runId> --json` adds steps and logs.
+        out(JSON.stringify(started, null, 2));
+        return started.status === "FAILED" ? 1 : 0;
+      }
+      // Steps (and what the run waits for) come with the full run.
       const run = started.status === "WAITING" || started.status === "RUNNING" ? await call<RunJson>(t, `/runs/${encodeURIComponent(started.runId)}`) : started;
-      out(values.json ? JSON.stringify(run, null, 2) : `${formatRun(run, t.flags)}\n\nLogs: actuate logs ${run.runId}${t.flags}`);
+      out(`${formatRun(run, t.flags)}\n\nLogs: actuate logs ${run.runId}${t.flags}`);
       return run.status === "FAILED" ? 1 : 0;
     },
   },
@@ -457,7 +491,7 @@ Write tests with @actuate/cli/testing: testActuator(actuator) gives the real ste
     name: "doctor",
     usage: "actuate doctor [file] [--offline] [--plan <plan>] [--json]",
     summary: "Check Node, the project, its deploy checks, providers in .dev.vars, and login",
-    options: { offline: { type: "boolean", help: "Don't call the API to check the saved token" }, ...PLAN_OPT, ...JSON_OPT },
+    options: { ...OFFLINE_OPT, ...PLAN_OPT, ...JSON_OPT },
     examples: ["actuate doctor", "actuate doctor --json"],
     async run({ args, values, cwd, out }) {
       const { doctor, formatDoctor } = await import("./doctor.js");
@@ -595,6 +629,8 @@ export async function main(argv: string[], io: { out?: (line: string) => void; e
     return typeof code === "number" ? code : 0;
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
+    // With --json, stdout always carries one JSON object, failures included.
+    if (parsed.values.json) out(JSON.stringify({ ok: false, error: message, ...(e instanceof CliError ? e.details : {}) }, null, 2));
     err(`✗ ${message}`);
     if (!(e instanceof CliError) && !(e instanceof ApiError) && process.env.ACTUATE_DEBUG && e instanceof Error && e.stack) err(e.stack);
     return e instanceof CliError ? e.exitCode : 1;

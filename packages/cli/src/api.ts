@@ -91,8 +91,9 @@ export async function api<T>(creds: Credentials, path: string, init: RequestInit
       },
     });
   } catch (err) {
-    const cause = (err as { cause?: { code?: string } }).cause?.code ?? (err as Error).message;
-    if (/^http:\/\/(localhost|127\.0\.0\.1)/.test(base)) {
+    const cause = (err as Error).name === "TimeoutError" ? "no answer in time" : ((err as { cause?: { code?: string } }).cause?.code ?? (err as Error).message);
+    // `--local` calls carry no token: they go to `actuate dev`.
+    if (!creds.token && /^http:\/\/(localhost|127\.0\.0\.1)/.test(base)) {
       throw new Error(`Nothing is answering at ${base} (${cause}). Start \`actuate dev\` in another terminal first, or pass --port.`);
     }
     throw new Error(`Could not reach ${base} (${cause}). Check your connection, or ACTUATE_API_URL.`);
@@ -116,6 +117,7 @@ export interface Me {
   usage?: { deploys?: number; runs?: number; passes?: number; rowsWritten?: number; rowsRead?: number };
 }
 
-export function fetchMe(creds: Credentials): Promise<Me> {
-  return api<Me>(creds, "/v1/me");
+/** GET /v1/me. `timeoutMs` bounds the wait, for commands that only want the plan and can do without it. */
+export function fetchMe(creds: Credentials, timeoutMs?: number): Promise<Me> {
+  return api<Me>(creds, "/v1/me", timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {});
 }

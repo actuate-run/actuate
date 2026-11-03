@@ -31,6 +31,11 @@ export interface PlatformCheckInput {
   /** The loaded actuator, for the checks that need its schemas. */
   actuator?: Actuator;
   plan: PlanRules;
+  /**
+   * The plan is only the default (nobody said which: not logged in, no --plan). Then the plan's own rules (capabilities,
+   * cron limits) are warnings, not errors: a fresh project made from a template that sends messages passes `check`.
+   */
+  planDefaulted?: boolean;
   bundleBytes?: number;
   /** actuate.config.json as it would be sent: its value, or why it couldn't be read. Omit when no config is sent. */
   config?: { value: unknown } | { error: string };
@@ -57,6 +62,8 @@ export function platformChecks(input: PlatformCheckInput): PlatformIssue[] {
   const error = (rule: string, message: string) => void issues.push({ severity: "error", rule, message });
   const warn = (rule: string, message: string) => void issues.push({ severity: "warning", rule, message });
   const { metadata: m, plan } = input;
+  const yours = "That is only the default plan here: log in or pass --plan to check against yours.";
+  const planRule = (rule: string, message: string) => (input.planDefaulted ? warn(rule, `${message} ${yours}`) : error(rule, message));
 
   if (input.bundleBytes !== undefined && input.bundleBytes > MAX_BUNDLE_BYTES) {
     error("bundle-size", `Bundle is larger than 5 MB (${(input.bundleBytes / 1024 / 1024).toFixed(1)} MB).`);
@@ -64,7 +71,7 @@ export function platformChecks(input: PlatformCheckInput): PlatformIssue[] {
   if (!/^[a-z][a-z0-9_]{0,63}$/.test(m.name)) error("name", `Invalid actuator name "${m.name}"`);
 
   const cron = cronProblem(m.cron, plan.limits.cronsPerActuator, plan.limits.minCronIntervalMinutes);
-  if (cron) error("cron", `${cron} The ${plan.name} plan allows ${plan.limits.cronsPerActuator} schedules, at least ${plan.limits.minCronIntervalMinutes} min apart.`);
+  if (cron) planRule("cron", `${cron} The ${plan.name} plan allows ${plan.limits.cronsPerActuator} schedules, at least ${plan.limits.minCronIntervalMinutes} min apart.`);
   if (m.cron.length && input.actuator && !input.actuator.input.safeParse({}).success) {
     warn("cron-input", "Every cron run starts with the input {}, which the input schema rejects, so every firing fails. Make the fields optional or give them defaults.");
   }
@@ -74,7 +81,7 @@ export function platformChecks(input: PlatformCheckInput): PlatformIssue[] {
 
   const disallowed = m.capabilities.filter((c) => !plan.capabilities.includes(c as never));
   if (disallowed.length) {
-    error("plan-capability", `The ${plan.name} plan cannot use ${disallowed.join(", ")}. Upgrade to Maker to use providers.`);
+    planRule("plan-capability", `The ${plan.name} plan cannot use ${disallowed.join(", ")}. Upgrade to Maker to use providers.`);
   }
   const optionalOff = m.optionalCapabilities.filter((c) => !plan.capabilities.includes(c as never));
   if (optionalOff.length) {

@@ -15,6 +15,11 @@ export interface GuardOptions {
   limits?: Partial<Limits>;
   /** false: enforce nothing, only attribute ctx.db rows to runs (for metering with the guards off). Default true. */
   enforce?: boolean;
+  /**
+   * Refuse capabilities this plan doesn't include, as the platform does: calls on a required one fail with the
+   * platform's message, and an optional one is undefined (the platform has no provider for it). `actuate dev` sets it.
+   */
+  plan?: PlanRules;
 }
 
 /** RunManager options for a plan: passes per run, the longest wait, the retry cap. */
@@ -54,7 +59,7 @@ export function withPlatformGuards<A extends Actuator>(actuator: A, options: Gua
         }, limits.wallMs);
       });
       try {
-        return await Promise.race([actuator.run(guardContext(ctx, pass, limits, options.usage) as never, input as never, config as never), timeout]);
+        return await Promise.race([actuator.run(guardContext(ctx, pass, limits, options, actuator) as never, input as never, config as never), timeout]);
       } finally {
         clearTimeout(timer);
         pass.closed = true;
@@ -140,14 +145,35 @@ function attributeOnly(ctx: BaseContext, usage: UsageTracker | undefined): BaseC
   return { ...(ctx as unknown as Record<string, unknown>), db: wrapped } as unknown as BaseContext;
 }
 
-function guardContext(ctx: BaseContext, pass: PassGuard, limits: Limits, usage: UsageTracker | undefined): BaseContext {
+function guardContext(ctx: BaseContext, pass: PassGuard, limits: Limits, options: GuardOptions, actuator: Actuator): BaseContext {
   const source = ctx as unknown as Record<string, unknown>;
-  const out: Record<string, unknown> = { ...source, db: guardDb(ctx, pass, usage), step: guardStep(ctx.step, pass, limits) };
+  const out: Record<string, unknown> = { ...source, db: guardDb(ctx, pass, options.usage), step: guardStep(ctx.step, pass, limits) };
+  const plan = options.plan;
   for (const cap of CAPABILITIES) {
+    if (plan && !plan.capabilities.includes(cap) && cap in source) {
+      if ((actuator.optionalCapabilities as readonly string[] | undefined)?.includes(cap)) out[cap] = undefined;
+      else out[cap] = refusedProvider(`The ${plan.name} plan cannot use ${cap}. Upgrade to Maker to use providers.`, pass);
+      continue;
+    }
     const provider = source[cap];
     if (provider && typeof provider === "object") out[cap] = guardProvider(cap, provider, pass);
   }
   return out as unknown as BaseContext;
+}
+
+/** A provider whose every method fails with `message`. */
+function refusedProvider(message: string, pass: PassGuard): object {
+  return new Proxy(
+    {},
+    {
+      get: (_target, prop) =>
+        typeof prop === "symbol" || prop === "then"
+          ? undefined
+          : () => {
+              throw pass.error(message, true);
+            },
+    },
+  );
 }
 
 function guardDb(ctx: BaseContext, pass: PassGuard, usage: UsageTracker | undefined): BaseContext["db"] {

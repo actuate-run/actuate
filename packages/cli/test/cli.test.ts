@@ -51,7 +51,30 @@ describe("actuate check", () => {
     const maker = await runCli(["check", "--platform", "--plan", "maker"], fixture);
     expect(maker.code).toBe(0);
     expect(maker.out).toContain("✓ passes the platform's deploy checks");
-    expect(maker.out).toContain("not logged in, so the provider, actuator-count and deploy-budget checks were skipped");
+    expect(maker.out).toContain("Deploy checks for the Maker plan (from --plan). The provider, actuator-count and deploy-budget checks need a login");
+    // --plan means the deploy checks, so it implies --platform.
+    const implied = await runCli(["check", "--plan", "sandbox", "--json"], fixture);
+    expect(implied.code).toBe(1);
+    expect(JSON.parse(implied.out)).toMatchObject({ ok: false, platform: { plan: "sandbox" } });
+  });
+
+  it("--offline skips the account even when logged in", async () => {
+    const srv = await fakeServer({});
+    vi.stubEnv("ACTUATE_API_TOKEN", "ak_test");
+    vi.stubEnv("ACTUATE_API_URL", srv.url);
+    try {
+      const res = await runCli(["check", "--offline", "--plan", "maker"], fixture);
+      expect(res).toMatchObject({ code: 0, out: expect.stringContaining("Offline: the provider, actuator-count and deploy-budget checks were skipped.") });
+      expect(srv.requests).toEqual([]);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("passes a fresh project that needs a paid plan when no plan was chosen, with a warning", async () => {
+    const res = await runCli(["check", "--platform"], fixture);
+    expect(res.code).toBe(0);
+    expect(res.out).toContain("warn   The Sandbox plan cannot use messaging. Upgrade to Maker to use providers. That is only the default plan here");
   });
 
   it("exits 1 on replay-safety errors and reports them as JSON", async () => {
@@ -84,8 +107,11 @@ describe("run commands against actuate dev (--local)", () => {
       expect(res.out).toContain("1 pass · 9 rows written · 12 rows read");
       expect(res.out).toContain(`actuate approve run_x --step ok --local --port ${srv.port}`);
       expect(srv.requests[0]).toMatchObject({ method: "POST", path: "/run", body: { name: "Aina" }, headers: { "idempotency-key": "k1" } });
+      // --json is always the run record POST /run returned, even for a waiting run (no extra GET).
+      const before = srv.requests.length;
       const json = await runCli(["run", "--local", "--port", String(srv.port), "--json"]);
-      expect(JSON.parse(json.out)).toMatchObject({ runId: "run_x", usage: { rowsWritten: 9 } });
+      expect(JSON.parse(json.out)).toEqual({ runId: "run_x", status: "WAITING", passes: 1 });
+      expect(srv.requests.slice(before).map((r) => r.method)).toEqual(["POST"]);
     } finally {
       await srv.close();
     }
@@ -145,6 +171,22 @@ describe("run commands against actuate dev (--local)", () => {
     } finally {
       await srv.close();
     }
+  });
+});
+
+describe("--json on failure", () => {
+  it("prints one JSON object on stdout, with what stopped the command, and exits non-zero", async () => {
+    const notLoggedIn = await runCli(["deploy", "--json"], fixture);
+    expect(notLoggedIn.code).toBe(1);
+    expect(JSON.parse(notLoggedIn.out)).toEqual({ ok: false, error: expect.stringContaining("Not logged in") });
+
+    const dir = mkdtempSync(join(tmpdir(), "chk-"));
+    writeFileSync(join(dir, "actuator.ts"), `import { defineActuator, z } from "@actuate/sdk";
+export default defineActuator({ name: "x", description: "x", input: z.object({}), async run(ctx) { return Math.random(); } });`);
+    const lint = await runCli(["deploy", "--dry-run", "--json"], dir);
+    expect(lint.code).toBe(1);
+    expect(JSON.parse(lint.out)).toMatchObject({ ok: false, diagnostics: [{ rule: "no-nondeterminism-outside-step" }] });
+    expect(JSON.parse((await runCli(["logs", "--json"], dir)).out)).toMatchObject({ ok: false, error: expect.stringContaining("Not logged in") });
   });
 });
 

@@ -50,10 +50,13 @@ describe("actuate deploy", () => {
     try {
       const res = await runCli(["deploy"], fixture);
       expect(res.code).toBe(1);
-      expect(res.out).toContain("Deploy checks: Maker plan (from your account)");
+      expect(res.out).toContain("Deploy checks for the Maker plan (from your account).");
       expect(res.out).toContain("No provider configured for: messaging. Add one in the dashboard (Settings → Providers) first.  (provider-missing)");
       expect(res.err).toContain("a refused deploy still counts against your deploy budget");
       expect(srv.requests.some((r) => r.path === "/v1/actuators/deploy")).toBe(false);
+      const json = await runCli(["deploy", "--json"], fixture);
+      expect(json.code).toBe(1);
+      expect(JSON.parse(json.out)).toMatchObject({ ok: false, error: expect.stringContaining("would refuse"), issues: [{ rule: "provider-missing" }], plan: { id: "maker" } });
     } finally {
       await srv.close();
     }

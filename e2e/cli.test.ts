@@ -48,8 +48,48 @@ describe("actuate CLI on a new project", () => {
     const res = actuate(["test"]);
     expect(res.code, res.out + res.err).toBe(0);
     expect(res.out).toContain("✔ greets, sleeps, then follows up");
-    expect(res.err).toContain("Platform guards: Sandbox plan");
+    expect(res.err).toContain("Platform guards: Sandbox plan (the default: not logged in), unless a test passes testActuator(actuator, { plan }).");
+    expect(res.err.match(/Platform guards/g)).toHaveLength(1);
+    expect(res.err).not.toContain("Deploy checks"); // they pass, so they stay quiet
     expect(res.err).not.toContain("ExperimentalWarning");
+  });
+
+  it("actuate test with no tests exits 1 without the guards line, unless --pass-with-no-tests", () => {
+    const empty = mkdtempSync(join(tmpdir(), "actuate-e2e-"));
+    const res = actuate(["test"], empty);
+    expect(res.code).toBe(1);
+    expect(res.out).toContain("No test files found");
+    expect(res.err).not.toContain("Platform guards");
+    expect(actuate(["test", "--pass-with-no-tests"], empty).code).toBe(0);
+    expect(actuate(["test", "missing.test.ts"]).err).not.toContain("Platform guards");
+  });
+
+  it("actuate test runs the node:test files when Vitest is missing, and reports the Vitest ones as skipped", () => {
+    const dir = mkdtempSync(join(tmpdir(), "actuate-e2e-"));
+    mkdirSync(join(dir, "node_modules/@actuate"), { recursive: true });
+    symlinkSync(join(root, "packages/sdk"), join(dir, "node_modules/@actuate/sdk"));
+    symlinkSync(join(root, "packages/cli"), join(dir, "node_modules/@actuate/cli"));
+    // A deploy-check problem (cron too frequent for Sandbox) shows as a header, without failing the tests.
+    writeFileSync(
+      join(dir, "actuator.ts"),
+      `import { defineActuator, z } from "@actuate/sdk";
+export default defineActuator({ name: "often", description: "t", input: z.object({}), cron: ["*/5 * * * *"], run: () => "ok" });
+`,
+    );
+    writeFileSync(join(dir, "a.test.ts"), `import { test } from "node:test";
+test("node runs", () => {});
+`);
+    writeFileSync(join(dir, "b.test.ts"), `import { it } from "vitest";
+it("vitest", () => {});
+`);
+    const res = actuate(["test"], dir);
+    expect(res.code).toBe(1);
+    expect(res.out).toContain("✔ node runs");
+    expect(res.err).toContain("Skipped b.test.ts: it imports vitest, which isn't installed here. Run `npm install -D vitest`");
+    // The plan is only the default, so the Sandbox cron limit is a warning.
+    expect(res.err).toContain("Deploy checks for actuator.ts, Sandbox plan (the default: not logged in): 0 error(s), 1 warning(s).");
+    expect(res.err).toContain('Cron "*/5 * * * *" fires more often than every 60 min.');
+    expect(actuate(["test", "--no-checks", "a.test.ts"], dir)).toMatchObject({ code: 0, err: expect.not.stringContaining("Deploy checks") });
   });
 
   it("actuate test fails when a test fails, and points at the line", () => {

@@ -95,8 +95,8 @@ export function formatRunList(runs: RunJson[]): string {
   const rows = runs.map((r) => [
     r.runId,
     r.status,
-    String(r.passes ?? ""),
-    ...(withRows ? [r.usage ? `${r.usage.rowsWritten}/${r.usage.rowsRead}` : ""] : []),
+    r.passes === undefined ? "" : r.passes.toLocaleString("en"),
+    ...(withRows ? [r.usage ? `${r.usage.rowsWritten.toLocaleString("en")}/${r.usage.rowsRead.toLocaleString("en")}` : ""] : []),
     iso(r.createdAt),
     `${r.trigger?.kind ?? ""}${r.trigger?.cron ? ` ${r.trigger.cron}` : ""}`,
   ]);

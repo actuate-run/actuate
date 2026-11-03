@@ -11,8 +11,8 @@ import { workerBuildOptions } from "../packages/cli/src/load.js";
 
 const actuator = fileURLToPath(new URL("./fixtures/guarded.ts", import.meta.url));
 
-async function start(plan: "sandbox" | "maker" | null) {
-  const out = await build({ ...workerBuildOptions, stdin: { contents: devEntry(actuator, 8787, plan), resolveDir: process.cwd(), loader: "ts" }, write: false });
+async function start(plan: "sandbox" | "maker" | null, opts: { refuseCapabilities?: boolean } = {}) {
+  const out = await build({ ...workerBuildOptions, stdin: { contents: devEntry(actuator, 8787, plan, opts), resolveDir: process.cwd(), loader: "ts" }, write: false });
   const mf = new Miniflare({
     modules: true,
     script: out.outputFiles[0]!.text,
@@ -57,10 +57,27 @@ describe("actuate dev with the platform's guards (Sandbox)", () => {
     expect(run).toMatchObject({ status: "FAILED", error: { message: "A step's result may be at most 1024 KiB of JSON." } });
   });
 
+  it("refuses capabilities the plan doesn't include, as the platform refuses the deploy", async () => {
+    const run = await dev.call("/run", { mode: "send" });
+    expect(run).toMatchObject({ status: "FAILED", error: { message: "The Sandbox plan cannot use messaging. Upgrade to Maker to use providers." } });
+  });
+
   it("applies the plan's longest wait", async () => {
     const run = await dev.call("/run", { mode: "sleep" });
     expect(run).toMatchObject({ status: "FAILED", error: { message: 'Step "long" sleeps 2592000s, longer than this plan allows (604800s).' } });
   });
+});
+
+describe("actuate dev on a Sandbox plan that was only defaulted", () => {
+  it("keeps the guards but lets capabilities through (the startup warning says the deploy would be refused)", async () => {
+    const dev = await start("sandbox", { refuseCapabilities: false });
+    try {
+      expect(await dev.call("/run", { mode: "send" })).toMatchObject({ status: "COMPLETED", output: "console" });
+      expect(await dev.call("/run", { mode: "pragma" })).toMatchObject({ status: "FAILED" });
+    } finally {
+      await dev.mf.dispose();
+    }
+  }, 60_000);
 });
 
 describe("actuate dev --no-guards", () => {
@@ -73,6 +90,7 @@ describe("actuate dev --no-guards", () => {
   it("allows what the guards refuse, and still meters rows", async () => {
     expect(await dev.call("/run", { mode: "pragma" })).toMatchObject({ status: "COMPLETED", output: 2 });
     expect(await dev.call("/run", { mode: "big" })).toMatchObject({ status: "COMPLETED", output: 1_100_000 });
+    expect(await dev.call("/run", { mode: "send" })).toMatchObject({ status: "COMPLETED", output: "console" });
     const sleeping = await dev.call("/run", { mode: "sleep" });
     expect(sleeping).toMatchObject({ status: "WAITING" });
     expect(sleeping.usage.rowsWritten).toBeGreaterThan(0);
