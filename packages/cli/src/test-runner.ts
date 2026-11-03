@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { CliError } from "./account.js";
+import { CliError, describePlan, planHint, type ResolvedPlan } from "./account.js";
 import { findPackage, ownModule } from "./load.js";
 
 const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
@@ -54,9 +54,44 @@ export interface TestRunOptions {
   watch: boolean;
   /** Only tests whose name matches this pattern. */
   grep?: string;
-  /** Environment for the test processes (ACTUATE_PLAN, ...). */
-  env: Record<string, string>;
+  /** The plan passed to the tests as ACTUATE_PLAN (the default for testActuator). */
+  plan: ResolvedPlan;
+  /** Run actuator.ts's local deploy checks first and print what they find (default true). */
+  checks?: boolean;
+  /** Exit 0 instead of 1 when there are no test files. */
+  passWithNoTests?: boolean;
+  /** Extra environment for the test processes. */
+  env?: Record<string, string>;
   log?: (line: string) => void;
+}
+
+/**
+ * actuator.ts's deploy checks, locally and offline, as lines to print after the tests: nothing when
+ * they pass, so `npm test` mentions a cron or plan mistake without being noisy. They never fail the tests.
+ */
+export async function deployCheckHeader(cwd: string, plan: ResolvedPlan): Promise<string[]> {
+  const file = join(cwd, "actuator.ts");
+  if (!existsSync(file)) return [];
+  const [{ loadActuator, describeActuator }, { platformChecks }, { readConfigFile, formatIssue }] = await Promise.all([
+    import("./load.js"),
+    import("./platform-checks.js"),
+    import("./deploy.js"),
+  ]);
+  let actuator: Awaited<ReturnType<typeof loadActuator>>;
+  try {
+    actuator = await loadActuator(file, join(cwd, ".actuate", "tmp"));
+  } catch (err) {
+    return [`Deploy checks skipped: actuator.ts doesn't load (${err instanceof Error ? err.message.split("\n")[0] : String(err)}).`];
+  }
+  const config = readConfigFile(cwd);
+  const issues = platformChecks({ metadata: describeActuator(actuator), actuator, plan: plan.plan, planDefaulted: plan.source === "default", ...(config ? { config } : {}) });
+  if (!issues.length) return [];
+  const errors = issues.filter((i) => i.severity === "error").length;
+  return [
+    `Deploy checks for actuator.ts, ${describePlan(plan)}: ${errors} error(s), ${issues.length - errors} warning(s). They don't fail the tests; \`actuate check --platform\` has the details.`,
+    ...issues.map((i) => `  ${formatIssue(i)}`),
+    "",
+  ];
 }
 
 export const NO_TESTS_HELP = `No test files found (*.test.ts or *.spec.ts, outside node_modules).
@@ -93,26 +128,34 @@ function exec(command: string, args: string[], cwd: string, env: Record<string, 
  */
 export async function runTests(opts: TestRunOptions): Promise<number> {
   const log = opts.log ?? console.log;
+  const note = (line: string) => process.stderr.write(`${line}\n`);
   const files = findTestFiles(opts.cwd, opts.paths);
   if (!files.length) {
     log(NO_TESTS_HELP);
-    return 1;
+    return opts.passWithNoTests ? 0 : 1;
   }
   const byRunner = { vitest: [] as string[], node: [] as string[] };
   for (const f of files) byRunner[runnerFor(readFileSync(resolve(opts.cwd, f), "utf8"))].push(f);
-  const env = { ...opts.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --disable-warning=ExperimentalWarning`.trim() };
-  if (opts.watch && byRunner.vitest.length && byRunner.node.length) {
-    throw new CliError("--watch runs one runner at a time: these tests mix Vitest and node:test. Pass the files to watch.", 2);
+  const vitest = byRunner.vitest.length ? findVitest(opts.cwd) : null;
+  const skipped = vitest ? [] : byRunner.vitest;
+  if (skipped.length && !byRunner.node.length) {
+    throw new CliError(`${skipped.join(", ")} ${skipped.length === 1 ? "imports" : "import"} vitest, which isn't installed here. Run \`npm install -D vitest\`, or write the tests with node:test.`);
   }
 
-  let code = 0;
-  if (byRunner.vitest.length) {
-    const vitest = findVitest(opts.cwd);
-    if (!vitest) {
-      throw new CliError(`${byRunner.vitest.join(", ")} ${byRunner.vitest.length === 1 ? "imports" : "import"} vitest, which isn't installed here. Run \`npm install -D vitest\`, or write the tests with node:test.`);
-    }
+  // The deploy checks run alongside the tests (they take about as long as a small suite) and report after them.
+  const checks = opts.checks === false || opts.watch ? Promise.resolve([]) : deployCheckHeader(opts.cwd, opts.plan).catch(() => []);
+  // Tests are about to run: say which plan's guards apply, once.
+  note(`Platform guards: ${describePlan(opts.plan)}, unless a test passes testActuator(actuator, { plan }).${planHint(opts.plan) ? ` ${planHint(opts.plan)}` : ""}`);
+
+  const env = {
+    ...opts.env,
+    ACTUATE_PLAN: opts.plan.plan.id,
+    NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --disable-warning=ExperimentalWarning`.trim(),
+  };
+  const runs: Array<() => Promise<number>> = [];
+  if (vitest) {
     const args = [vitest, opts.watch ? "watch" : "run", ...(opts.grep ? ["-t", opts.grep] : []), ...byRunner.vitest];
-    code = Math.max(code, await exec(process.execPath, args, opts.cwd, env));
+    runs.push(() => exec(process.execPath, args, opts.cwd, env));
   }
   if (byRunner.node.length) {
     const args = [
@@ -127,7 +170,21 @@ export async function runTests(opts: TestRunOptions): Promise<number> {
       ...(opts.grep ? [`--test-name-pattern=${opts.grep}`] : []),
       ...byRunner.node,
     ];
-    code = Math.max(code, await exec(process.execPath, args, opts.cwd, env));
+    runs.push(() => exec(process.execPath, args, opts.cwd, env));
+  }
+  let code = 0;
+  if (opts.watch && runs.length > 1) {
+    // Watching both kinds: run the two watchers side by side (their output interleaves; Ctrl-C stops both).
+    note("Watching with Vitest and node --test side by side.");
+    code = Math.max(...(await Promise.all(runs.map((r) => r()))));
+  } else {
+    for (const r of runs) code = Math.max(code, await r());
+  }
+  const found = await checks;
+  if (found.length) note(`\n${found.join("\n").trimEnd()}`);
+  if (skipped.length) {
+    note(`\n✗ Skipped ${skipped.join(", ")}: ${skipped.length === 1 ? "it imports" : "they import"} vitest, which isn't installed here. Run \`npm install -D vitest\`, or write ${skipped.length === 1 ? "it" : "them"} with node:test.`);
+    code = Math.max(code, 1);
   }
   return code;
 }

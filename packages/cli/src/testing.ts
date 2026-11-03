@@ -135,11 +135,23 @@ class TestDate extends RealDate {
  * you replace it; inputs and config are validated with the actuator's schemas,
  * as the platform does.
  */
-export function testActuator(actuator: Actuator, options: TestActuatorOptions = {}): ActuatorTest {
+export function testActuator<A extends Actuator>(actuator: A, options: TestActuatorOptions = {}): ActuatorTest<A> {
   return new ActuatorTest(actuator, options);
 }
 
-export class ActuatorTest {
+/** What the actuator's `run` returns (after the JSON round trip every result makes). */
+export type OutputOf<A> = A extends { run(...args: never[]): infer R } ? Awaited<R> : unknown;
+
+/** A run record whose `output` has the actuator's output type. */
+export type TestRun<T = unknown> = Omit<RunRecord, "output"> & { output: T | null };
+
+/** An approval or input request as the runtime sent it; `message` is "" when the step gave none. */
+export type TestApprovalRequest = ApprovalRequest & { message: string };
+
+/** What following a signed link did: the decision, or why the link was refused (expired, already used). */
+export type LinkResult = { ok: true; runId: string; step: string; approved: boolean } | { ok: false; reason: string };
+
+export class ActuatorTest<A extends Actuator = Actuator> {
   /** Messages sent through `ctx.messaging`. */
   readonly messages: SentMessage[] = [];
   /** Bills created through `ctx.payment`, with the ID the fake gave each. */
@@ -151,8 +163,8 @@ export class ActuatorTest {
   readonly llmReplies: string[];
   /** Requests made through `ctx.http` (clones, so you can read their bodies). */
   readonly requests: Request[] = [];
-  /** Approval and input requests as the runtime sent them, links included. */
-  readonly approvals: ApprovalRequest[] = [];
+  /** Approval and input requests as the runtime sent them, links included (see {@link followLink}). */
+  readonly approvals: TestApprovalRequest[] = [];
   readonly manager: RunManager;
   readonly db: DatabaseSync;
   /** The plan whose guards apply, or null when they are off. */
@@ -161,10 +173,13 @@ export class ActuatorTest {
   private clock: number;
   private readonly tracker = new UsageTracker();
   private readonly paidStatus = new Map<string, Bill["status"]>();
+  /** Idempotency key → bill or refund ID: a repeated key gets the first one back, as real providers do. */
+  private readonly billKeys = new Map<string, string>();
+  private readonly refundKeys = new Map<string, string>();
   private closed = false;
 
   constructor(
-    private readonly actuator: Actuator,
+    private readonly actuator: A,
     private readonly options: TestActuatorOptions = {},
   ) {
     this.clock = options.now === undefined ? TEST_START : new RealDate(options.now).getTime();
@@ -188,7 +203,7 @@ export class ActuatorTest {
       approvalUrl: "https://actuator.test/approve",
       now: () => this.clock,
       consoleLogs: options.logs ?? false,
-      notifyApproval: async (request) => void this.approvals.push(request),
+      notifyApproval: async (request) => void this.approvals.push({ ...request, message: request.message ?? "" }),
       ...(this.plan ? planGuards(PLANS[this.plan]) : {}),
       invoke: (request, journal) => executePass(guarded, request, { journal, config, providers }),
     });
@@ -203,7 +218,7 @@ export class ActuatorTest {
   }
 
   /** Start a run. The input is validated with the input schema first, as the platform does. */
-  async start(input: unknown = {}, opts: { trigger?: Trigger | TriggerKind; idempotencyKey?: string } = {}): Promise<RunRecord> {
+  async start(input: unknown = {}, opts: { trigger?: Trigger | TriggerKind; idempotencyKey?: string } = {}): Promise<TestRun<OutputOf<A>>> {
     this.activate();
     const parsed = this.actuator.input.safeParse(input);
     if (!parsed.success) throw new Error(`Invalid input:${formatIssues(parsed.error.issues)}`);
@@ -213,22 +228,22 @@ export class ActuatorTest {
       trigger,
       ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
     });
-    return run;
+    return run as TestRun<OutputOf<A>>;
   }
 
   /** Fire a cron schedule: a run with the input `{}`. Default: the actuator's first schedule. */
-  async cron(expression = this.actuator.cron?.[0] ?? "* * * * *"): Promise<RunRecord> {
+  async cron(expression = this.actuator.cron?.[0] ?? "* * * * *"): Promise<TestRun<OutputOf<A>>> {
     this.activate();
     const parsed = this.actuator.input.safeParse({});
     if (!parsed.success) throw new Error(`Cron runs start with the input {}, which the input schema rejects:${formatIssues(parsed.error.issues)}`);
-    return (await this.manager.start({ input: parsed.data as Json, trigger: { kind: "cron", cron: expression } })).run;
+    return (await this.manager.start({ input: parsed.data as Json, trigger: { kind: "cron", cron: expression } })).run as TestRun<OutputOf<A>>;
   }
 
-  /** A run's record. Throws if there is no such run. */
-  run(runId: string): RunRecord {
+  /** A run's record, its output typed as the actuator's (or as `T`). Throws if there is no such run. */
+  run<T = OutputOf<A>>(runId: string): TestRun<T> {
     const run = this.manager.getRun(runId);
     if (!run) throw new Error(`No run ${runId}.`);
-    return run;
+    return run as TestRun<T>;
   }
 
   steps(runId: string): StepRecord[] {
@@ -280,7 +295,10 @@ export class ActuatorTest {
     return this.event(`payment.${referenceId}`, event as unknown as Json);
   }
 
-  /** Approve a waiting `waitForApproval` through its signed link, as a click would. Default: the most recent request. */
+  /**
+   * Approve a waiting `waitForApproval` through its signed link, as a click would. Default: the most recent request.
+   * Throws, saying what is waiting, when nothing matches or the link is refused; to test a refusal, use {@link followLink}.
+   */
   approve(step?: string, opts: DecideOptions = {}): Promise<void> {
     return this.decide("approval", step, opts, (token) => this.manager.decide(token, { ...(opts.note ? { note: opts.note } : {}), ...(opts.by ? { by: opts.by } : {}) }), "approve");
   }
@@ -294,6 +312,17 @@ export class ActuatorTest {
     return this.decide("input", opts.step, opts, (token) => this.manager.decide(token, { text, ...(opts.by ? { by: opts.by } : {}) }), "answer");
   }
 
+  /**
+   * Follow a signed link (an `approveUrl`, `rejectUrl` or `answerUrl` from {@link approvals}) as a person would,
+   * and return what happened instead of throwing: use it to test that an expired or used link is refused.
+   * `text` answers a waitForInput; `note` goes with an approval.
+   */
+  async followLink(url: string, opts: { note?: string; text?: string; by?: string } = {}): Promise<LinkResult> {
+    this.activate();
+    const token = new URL(url).searchParams.get("token") ?? "";
+    return this.manager.decide(token, { ...(opts.note ? { note: opts.note } : {}), ...(opts.text !== undefined ? { text: opts.text } : {}), ...(opts.by ? { by: opts.by } : {}) });
+  }
+
   /** Steps waiting for a person, oldest first. */
   pending(): ReturnType<RunManager["pendingApprovals"]> {
     return this.manager.pendingApprovals();
@@ -303,12 +332,13 @@ export class ActuatorTest {
   rows<T extends object = Row>(table: string): T[] {
     const tables = this.manager.listTables();
     if (!tables.includes(table)) throw new Error(`No table "${table}". Tables: ${tables.join(", ") || "none yet (has a run applied the migrations?)"}.`);
-    return this.manager.readTable(table, { limit: 10_000 }).rows as T[];
+    // node:sqlite rows have no prototype, which node:assert's deepStrictEqual reports as a difference: copy them.
+    return this.manager.readTable(table, { limit: 10_000 }).rows.map((r) => ({ ...r })) as T[];
   }
 
   /** Run SQL directly against the database, unmetered, for assertions. */
   query<T extends object = Row>(sql: string, params: readonly SqlValue[] = []): T[] {
-    return this.db.prepare(sql).all(...(params as never[])) as T[];
+    return this.db.prepare(sql).all(...(params as never[])).map((r) => ({ ...r })) as T[];
   }
 
   /**
@@ -381,8 +411,11 @@ export class ActuatorTest {
       },
       payment: {
         createBill: async (request) => {
+          const known = request.idempotencyKey ? this.billKeys.get(request.idempotencyKey) : undefined;
+          if (known) return this.bill(known)!;
           const id = `bill-${this.bills.length + 1}`;
           this.bills.push({ ...request, id });
+          if (request.idempotencyKey) this.billKeys.set(request.idempotencyKey, id);
           return this.bill(id)!;
         },
         getBill: async (id) => {
@@ -391,8 +424,12 @@ export class ActuatorTest {
           return bill;
         },
         refund: async (request) => {
+          const known = request.idempotencyKey ? this.refundKeys.get(request.idempotencyKey) : undefined;
+          if (known) return { id: known, status: "succeeded" as const };
           this.refunds.push(request);
-          return { id: `refund-${this.refunds.length}`, status: "succeeded" as const };
+          const id = `refund-${this.refunds.length}`;
+          if (request.idempotencyKey) this.refundKeys.set(request.idempotencyKey, id);
+          return { id, status: "succeeded" as const };
         },
       },
       llm: {

@@ -29,6 +29,16 @@ describe("platform deploy checks", () => {
     expect(check(def as never, { plan: PLANS.maker })).toEqual([]);
   });
 
+  it("only warns about the plan's own rules when the plan is just the default", () => {
+    const def = { ...base, capabilities: ["messaging"], cron: ["*/10 * * * *"] };
+    const issues = check(def as never, { planDefaulted: true });
+    expect(issues).toHaveLength(2);
+    for (const i of issues) {
+      expect(i).toMatch(/^warning:(cron|plan-capability):/);
+      expect(i).toContain("That is only the default plan here: log in or pass --plan to check against yours.");
+    }
+  });
+
   it("checks cron schedules per plan, and warns when cron runs can't start", () => {
     const def = { ...base, input: z.object({ id: z.string() }), cron: ["*/10 * * * *"] };
     expect(check(def)).toEqual([

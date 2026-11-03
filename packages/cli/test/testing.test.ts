@@ -1,15 +1,16 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { defineActuator, z } from "@actuate/sdk";
-import { TEST_START, testActuator, type ActuatorTest } from "../src/testing.js";
+import assert from "node:assert/strict";
+import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
+import { defineActuator, z, type Actuator } from "@actuate/sdk";
+import { TEST_START, testActuator, type ActuatorTest, type TestActuatorOptions } from "../src/testing.js";
 
-const open: ActuatorTest[] = [];
-const make = (...args: Parameters<typeof testActuator>) => {
-  const t = testActuator(...args);
-  open.push(t);
+const open: Array<() => void> = [];
+const make = <A extends Actuator>(actuator: A, options?: TestActuatorOptions): ActuatorTest<A> => {
+  const t = testActuator(actuator, options);
+  open.push(() => t.close());
   return t;
 };
 afterEach(() => {
-  for (const t of open.splice(0)) t.close();
+  for (const close of open.splice(0)) close();
 });
 
 const refund = defineActuator({
@@ -47,11 +48,62 @@ describe("testActuator", () => {
     // The runtime gives each provider call in a step its own idempotency key (runId:step:method:n).
     expect(t.messages).toEqual([{ to: "+60123", text: "Refunded", options: { idempotencyKey: `${run.runId}:tell:send:0` } }]);
     expect(t.rows("refunds")).toEqual([{ run_id: run.runId, status: "REFUNDED" }]);
+    // Plain objects, so node:assert/strict compares them as written.
+    assert.deepEqual(t.rows("refunds"), [{ run_id: run.runId, status: "REFUNDED" }]);
+    assert.deepEqual(t.query("SELECT status FROM refunds"), [{ status: "REFUNDED" }]);
     const usage = t.usage(run.runId);
     expect(usage.passes).toBe(2);
     expect(usage.rowsWritten).toBeGreaterThan(5);
     expect(usage.rowsWritten).toBeLessThan(40);
     expect(t.usage()).toMatchObject({ rowsWritten: usage.rowsWritten, passes: 2 });
+  });
+
+  it("types outputs from the actuator, and keeps approval messages strings", async () => {
+    const t = make(refund);
+    const run = await t.start(order);
+    const output = t.run(run.runId).output;
+    expectTypeOf(output).not.toBeUnknown();
+    expectTypeOf<NonNullable<typeof output>["status"]>().toEqualTypeOf<string>();
+    expectTypeOf<NonNullable<typeof run.output>["status"]>().toEqualTypeOf<string>();
+    expectTypeOf(t.approvals[0]!.message).toEqualTypeOf<string>();
+    expect(t.approvals[0]!.message).toBe("Refund 20?");
+    expectTypeOf(t.run<{ custom: true }>(run.runId).output).toEqualTypeOf<{ custom: true } | null>();
+  });
+
+  it("follows a signed link and reports a refusal instead of throwing", async () => {
+    const t = make(refund);
+    const run = await t.start(order);
+    const request = t.approvals[0]!;
+    await t.advance("2 days"); // the approval times out after 1 day
+    expect(await t.followLink(request.approveUrl!)).toEqual({ ok: false, reason: "This link is invalid or has expired." });
+    expect(t.run(run.runId).output).toEqual({ status: "EXPIRED", note: null });
+
+    const fresh = await t.start(order);
+    const link = t.approvals.at(-1)!;
+    expect(await t.followLink(link.rejectUrl!, { note: "no" })).toMatchObject({ ok: true, approved: false });
+    expect(await t.followLink(link.approveUrl!)).toEqual({ ok: false, reason: "This approval has already been decided or has expired." });
+    expect(t.run(fresh.runId).output).toEqual({ status: "REJECTED", note: "no" });
+  });
+
+  it("deduplicates bills and refunds by idempotency key, as real providers do", async () => {
+    const act = defineActuator({
+      name: "twice",
+      description: "test",
+      input: z.object({}),
+      capabilities: ["payment"],
+      async run(ctx) {
+        return ctx.step.do("pay", async () => {
+          const a = await ctx.payment.createBill({ amount: 5, referenceId: "r", idempotencyKey: "k" });
+          const b = await ctx.payment.createBill({ amount: 5, referenceId: "r", idempotencyKey: "k" });
+          const c = await ctx.payment.refund!({ billId: a.id, idempotencyKey: "rk" });
+          const d = await ctx.payment.refund!({ billId: a.id, idempotencyKey: "rk" });
+          return [a.id, b.id, c.id, d.id];
+        });
+      },
+    });
+    const t = make(act);
+    expect((await t.start()).output).toEqual(["bill-1", "bill-1", "refund-1", "refund-1"]);
+    expect([t.bills.length, t.refunds.length]).toEqual([1, 1]);
   });
 
   it("rejects with a note, and times out when the clock passes the deadline", async () => {

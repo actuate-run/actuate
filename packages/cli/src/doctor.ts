@@ -95,14 +95,14 @@ export async function doctor(cwd: string, file = "actuator.ts", opts: { offline?
     }
   })();
   if (creds === null) add("login", "info", "Not logged in: fine for dev and test; deploy needs it.", "actuate login");
-  const resolved = await resolvePlan(opts.plan, { online: !opts.offline && Boolean(creds), creds: creds ?? null });
+  const resolved = await resolvePlan(opts.plan, { online: !opts.offline, alwaysAskAccount: true, creds: creds ?? null });
   if (creds) {
     if (resolved.me) {
       const deploys = resolved.me.usage?.deploys;
       add(
         "login",
         "ok",
-        `Logged in${resolved.me.email ? ` as ${resolved.me.email}` : ""}, ${resolved.plan.name} plan${deploys !== undefined ? `, ${deploys} of ${resolved.plan.limits.deploysPerMonth} deploys used this month` : ""}`,
+        `Logged in${resolved.me.email ? ` as ${resolved.me.email}` : ""}, ${resolved.plan.name} plan${deploys !== undefined ? `, ${deploys.toLocaleString("en")} of ${resolved.plan.limits.deploysPerMonth.toLocaleString("en")} deploys used this month` : ""}`,
       );
     } else if (opts.offline) add("login", "info", `Token saved (${process.env.ACTUATE_API_TOKEN ? "ACTUATE_API_TOKEN" : credentialsPath()}); not checked (--offline).`);
     else if (/^401\b|Unauthorized/i.test(resolved.meError ?? "")) add("login", "fail", "The saved token was rejected.", "Create a full token in the dashboard and run `actuate login` again.");
@@ -112,7 +112,7 @@ export async function doctor(cwd: string, file = "actuator.ts", opts: { offline?
   // Configuration and deploy checks
   if (loaded) {
     const config = readConfigFile(cwd);
-    const issues = platformChecks({ metadata: describeActuator(loaded), actuator: loaded, plan: resolved.plan, ...(config ? { config } : {}) });
+    const issues = platformChecks({ metadata: describeActuator(loaded), actuator: loaded, plan: resolved.plan, planDefaulted: resolved.source === "default", ...(config ? { config } : {}) });
     const errors = issues.filter((i) => i.severity === "error");
     if (errors.length) add("deploy-checks", "fail", `${errors.length} deploy check(s) fail: ${errors.map((e) => e.rule).join(", ")}. Checked for the ${describePlan(resolved)}.`, "Run `actuate check --platform` to see them.");
     else if (issues.length) add("deploy-checks", "warn", `Deploy checks pass with ${issues.length} warning(s), for the ${describePlan(resolved)}.`, "Run `actuate check --platform` to see them.");

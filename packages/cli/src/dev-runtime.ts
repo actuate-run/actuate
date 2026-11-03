@@ -17,6 +17,8 @@ import { UsageTracker, type RunUsage } from "./usage.js";
 export interface DevRuntimeOptions<E extends RuntimeEnv = RuntimeEnv> extends RuntimeOptions<E> {
   /** Whose guards apply; null turns them off. */
   plan: PlanId | null;
+  /** Refuse calls on capabilities the plan lacks (default true with a plan). `actuate dev` turns it off when the plan was only defaulted. */
+  refuseCapabilities?: boolean;
 }
 
 /** The parts of DurableObjectState the dev wrapper touches. */
@@ -89,6 +91,7 @@ export function createDevRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Ac
   const guarded = withPlatformGuards(actuator, {
     usage,
     enforce: plan !== null,
+    ...(plan && options.refuseCapabilities !== false ? { plan } : {}),
     onTrip: (message) => {
       if (warned.has(message)) return;
       warned.add(message);
@@ -97,7 +100,7 @@ export function createDevRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Ac
       );
     },
   });
-  const { plan: _plan, ...runtimeOptions } = options;
+  const { plan: _plan, refuseCapabilities: _refuse, ...runtimeOptions } = options;
   const runtime = createRuntime<E>(guarded, {
     ...runtimeOptions,
     ...(plan ? { guards: { ...planGuards(plan), ...runtimeOptions.guards } } : {}),

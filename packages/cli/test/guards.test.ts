@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { defineActuator, z, type Actuator, type Providers } from "@actuate/sdk";
 import { RunManager, createHttpProvider, executePass, meteredNodeSqlite } from "@actuate/runtime";
 import { withPlatformGuards, type GuardOptions } from "../src/guards.js";
+import { PLANS } from "../src/plans.js";
 import { UsageTracker } from "../src/usage.js";
 
 /** A bare engine with guards, to try limits smaller than the platform's. */
@@ -104,6 +105,33 @@ describe("withPlatformGuards", () => {
     expect(e.manager.getRun(run.runId)?.output).toBe(1);
     // The migration and the insert carry no run ID; they are counted because ctx.db made them.
     expect(e.usage.of(run.runId).rowsWritten).toBeGreaterThanOrEqual(3 + 2 + 3);
+  });
+});
+
+describe("withPlatformGuards with a plan", () => {
+  it("refuses capabilities the plan lacks, with the platform's message, and leaves optional ones undefined", async () => {
+    const sent: string[] = [];
+    const messaging = { send: async (to: string) => (sent.push(to), { id: "m", channel: "test" }) };
+    const act = defineActuator({
+      name: "notify",
+      description: "test",
+      input: z.object({}),
+      capabilities: ["messaging"],
+      optionalCapabilities: ["llm"],
+      async run(ctx) {
+        const hasLlm = ctx.llm !== undefined;
+        await ctx.step.do("send", () => ctx.messaging.send("a", "b"));
+        return hasLlm;
+      },
+    });
+    const llm = { complete: async () => ({ text: "", model: "x" }) };
+    const sandbox = engine(act, { plan: PLANS.sandbox }, { messaging, llm });
+    const run = await sandbox.start();
+    expect(sandbox.manager.getRun(run.runId)?.error?.message).toBe("The Sandbox plan cannot use messaging. Upgrade to Maker to use providers.");
+    expect(sent).toEqual([]);
+    const maker = engine(act, { plan: PLANS.maker }, { messaging, llm });
+    expect(maker.manager.getRun((await maker.start()).runId)?.output).toBe(true);
+    expect(sent).toEqual(["a"]);
   });
 });
 

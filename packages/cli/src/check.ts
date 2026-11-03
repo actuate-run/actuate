@@ -18,7 +18,10 @@ const WRITE_SQL = /^\s*(INSERT|UPDATE|DELETE|REPLACE)\b/i;
  *
  * Errors: `fetch`, provider calls (`ctx.payment.*` etc.), `Date.now()`,
  * `new Date()`, `Math.random()` and `crypto.randomUUID()` outside a step.
- * Warnings: literal INSERT/UPDATE/DELETE through `ctx.db` outside a step.
+ * `ctx.db.commitWithStep()` outside a step.
+ * Warnings: literal INSERT/UPDATE/DELETE through `ctx.db` outside a step, including
+ * the entries of a `ctx.db.batch([...])`. A statement built with `ctx.db.statement`
+ * isn't flagged on its own: building one has no effect until it is run.
  */
 export function checkSource(fileName: string, source: string): Diagnostic[] {
   const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -54,6 +57,13 @@ export function checkSource(fileName: string, source: string): Diagnostic[] {
             report(node, "error", "no-provider-outside-step", `${ctxName}.${chain[1]}.${chain[2]}() must be called inside ctx.step.do.`);
           } else if (dotted === "Date.now" || dotted === "Math.random" || dotted === "crypto.randomUUID" || dotted === "performance.now") {
             report(node, "error", "no-nondeterminism-outside-step", `${dotted}() gives a different value on each replay. Compute it inside ctx.step.do.`);
+          } else if (chain[0] === ctxName && chain[1] === "db" && chain[2] === "commitWithStep" && chain.length === 3) {
+            report(node, "error", "no-commit-outside-step", `${ctxName}.db.commitWithStep() queues writes for the step that is running, so it must be called inside ctx.step.do.`);
+          } else if (chain[0] === ctxName && chain[1] === "db" && chain[2] === "batch" && chain.length === 3) {
+            const list = node.arguments[0];
+            for (const el of list && ts.isArrayLiteralExpression(list) ? list.elements : []) {
+              if (isWriteStatement(el, ctxName)) report(el, "warning", "db-write-outside-step", "This write runs again on every replay. Put the batch inside ctx.step.do.");
+            }
           } else if (chain[0] === ctxName && chain[1] === "db" && (chain[2] === "query" || chain[2] === "first")) {
             const sql = node.arguments[0];
             if (sql && (ts.isStringLiteral(sql) || ts.isNoSubstitutionTemplateLiteral(sql)) && WRITE_SQL.test(sql.text)) {
@@ -77,6 +87,24 @@ export function checkSource(fileName: string, source: string): Diagnostic[] {
     visit(fn.body, false);
   }
   return diagnostics.sort((a, b) => a.line - b.line || a.column - b.column);
+}
+
+/** A batch entry that writes: ctx.db.statement`INSERT ...`, or { sql: "UPDATE ..." }. */
+function isWriteStatement(el: ts.Expression, ctxName: string): boolean {
+  if (ts.isTaggedTemplateExpression(el)) {
+    const chain = propertyChain(el.tag);
+    if (chain?.[0] !== ctxName || chain[1] !== "db" || chain[2] !== "statement") return false;
+    return WRITE_SQL.test(ts.isNoSubstitutionTemplateLiteral(el.template) ? el.template.text : el.template.head.text);
+  }
+  if (ts.isObjectLiteralExpression(el)) {
+    for (const p of el.properties) {
+      if (ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.name.text === "sql") {
+        const v = p.initializer;
+        return (ts.isStringLiteral(v) || ts.isNoSubstitutionTemplateLiteral(v)) && WRITE_SQL.test(v.text);
+      }
+    }
+  }
+  return false;
 }
 
 /** Find `run` functions in object literals passed to defineActuator(...). */
