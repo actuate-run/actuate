@@ -1,6 +1,6 @@
 {
   "name": "@actuate/cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "The actuate command: init, dev, check, deploy and logs for Actuate actuators.",
   "license": "Apache-2.0",
   "type": "module",
