@@ -96,6 +96,10 @@ export function scaffoldFiles(name: string, actuatorSource: string, extra: Recor
 
 async function fetchTemplate(template: string, ref: string, doFetch: typeof fetch): Promise<Record<string, string>> {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(template)) throw new Error(`Invalid template name "${template}"`);
+  // A branch, tag or commit of the templates repo, and nothing that walks out of it ("../../other/repo/main").
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(ref) || ref.split("/").some((part) => part === "." || part === "..")) {
+    throw new Error(`Invalid git ref "${ref}"`);
+  }
   const raw = (file: string) => `https://raw.githubusercontent.com/${TEMPLATES_REPO}/${ref}/${template}/${file}`;
   const res = await doFetch(raw("actuator.ts"));
   if (!res.ok) {

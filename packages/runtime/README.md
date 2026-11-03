@@ -12,7 +12,7 @@ export default runtime.worker;
 export const ActuatorObject = runtime.ActuatorObject;
 ```
 
-Bind `ActuatorObject` as a SQLite-backed Durable Object named `ACTUATOR`, set `ACTUATE_TOKEN` and `ACTUATE_WEBHOOK_SECRET`, and deploy with `wrangler deploy`. The runtime serves an HTTP API for runs, events, approvals and tables. Guide: [Self-hosting](https://actuate.run/docs/guides/self-hosting/) · [Runtime HTTP API](https://actuate.run/docs/reference/runtime-http/).
+Bind `ActuatorObject` as a SQLite-backed Durable Object named `ACTUATOR`, set `ACTUATE_TOKEN`, `ACTUATE_WEBHOOK_SECRET` and `ACTUATE_PUBLIC_URL`, and deploy with `wrangler deploy`. Give your agent `ACTUATE_RUN_TOKEN` (start and read runs only), never `ACTUATE_TOKEN`, which can approve. The runtime serves an HTTP API for runs, events, approvals and tables. Guide: [Self-hosting](https://actuate.run/docs/guides/self-hosting/) · [Runtime HTTP API](https://actuate.run/docs/reference/runtime-http/).
 
 ---
 

@@ -65,6 +65,8 @@ export interface Bill {
 /**
  * Payload of the `payment.<referenceId>` event a payment provider's webhook
  * delivers. Wait for it with `ctx.step.waitForEvent("paid", { event: \`payment.${referenceId}\` })`.
+ * Before acting on it, check `status` and that `billId`, `amount` and `currency` match the bill you created:
+ * use a reference nobody else can guess (e.g. include `ctx.runId`), and don't trust the event alone for a large amount.
  */
 export interface PaymentEvent {
   provider: string;

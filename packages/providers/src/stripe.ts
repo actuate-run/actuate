@@ -49,7 +49,7 @@ function toBill(s: CheckoutSession): Bill {
     status: sessionStatus(s),
     amount: s.amount_total == null ? 0 : fromMinor(s.amount_total, currency || "USD"),
     currency,
-    referenceId: s.client_reference_id ?? s.metadata?.actuate_reference_id ?? "",
+    referenceId: s.metadata?.actuate_reference_id ?? s.client_reference_id ?? "",
   };
 }
 
@@ -187,8 +187,11 @@ export const stripe: ProviderDefinitionWithWebhookLookup<StripeCredentials, "pay
       else return null;
     }
     if (!status) return null;
-    const referenceId = session.client_reference_id ?? session.metadata?.actuate_reference_id;
-    if (!referenceId) return null; // not a session this platform created
+    // Only the metadata createBill sets. A buyer can choose client_reference_id themselves (Payment Links
+    // and pricing tables take it from the URL), which would let any cheap payment on the account mark
+    // someone else's reference as paid.
+    const referenceId = session.metadata?.actuate_reference_id;
+    if (!referenceId) return null; // not a session createBill made
     const bill = toBill(session);
     return {
       event: `payment.${referenceId}`,

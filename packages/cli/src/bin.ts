@@ -102,7 +102,7 @@ async function main(): Promise<void> {
       let token = values.token;
       if (!token) {
         const rl = createInterface({ input: process.stdin, output: process.stdout });
-        token = (await rl.question("Paste an API token from https://actuate.run/dashboard/settings/tokens (a full token): ")).trim();
+        token = (await rl.question("Paste an API token from https://app.actuate.run/settings/tokens (a full token): ")).trim();
         rl.close();
       }
       if (!token) throw new Error("No token given.");

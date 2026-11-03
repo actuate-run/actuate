@@ -34,6 +34,9 @@ describe("scaffold", () => {
     await scaffold({ dir: join(dir, "a"), log: quiet });
     await expect(scaffold({ dir: join(dir, "a"), log: quiet })).rejects.toThrow(/not empty/);
     await expect(scaffold({ dir: join(dir, "b"), template: "../etc", log: quiet })).rejects.toThrow(/Invalid template/);
+    for (const ref of ["../../evil/repo/main", "main/../../x", "-x", "a b"]) {
+      await expect(scaffold({ dir: join(dir, "b"), template: "daily-report", ref, log: quiet })).rejects.toThrow(/Invalid git ref/);
+    }
     const notFound = (async () => new Response("", { status: 404 })) as unknown as typeof fetch;
     await expect(scaffold({ dir: join(dir, "c"), template: "nope", fetch: notFound, log: quiet })).rejects.toThrow(
       /not found in actuate-run\/templates@main \(HTTP 404\)\. Templates: https:\/\/github\.com\/actuate-run\/templates/,

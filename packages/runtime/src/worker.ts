@@ -10,13 +10,22 @@ export interface RuntimeEnv {
   ACTUATOR: DurableObjectNamespace;
   /** JSON object of configuration values, validated against the actuator's ConfigSchema. */
   ACTUATE_CONFIG?: string;
-  /** Bearer token required for the admin API (runs, events, tables). Unset means open (local dev only). */
+  /** The owner's bearer token: every admin route (runs, approvals, events, tables). Unset means open (local dev only). */
   ACTUATE_TOKEN?: string;
+  /**
+   * A bearer token to give an agent: it can describe the actuator, start runs (POST /run) and read
+   * one run (GET /runs/:runId), and nothing else. It never approves, answers, posts events or reads tables,
+   * so the agent a run is gated against can't let itself through.
+   */
+  ACTUATE_RUN_TOKEN?: string;
   /** Secret for POST /webhook: sent as `x-actuate-secret` or `?secret=`, or used to sign the body (`X-Hub-Signature-256`). */
   ACTUATE_WEBHOOK_SECRET?: string;
   /** HMAC secret for approval links. Generated and stored on first use if unset. */
   ACTUATE_APPROVAL_SECRET?: string;
-  /** Public origin, e.g. https://bot.example.com. Defaults to the origin of the first request; set it in production. */
+  /**
+   * Public origin, e.g. https://bot.example.com. Set it in production. If unset, the origin of the first request
+   * made with ACTUATE_TOKEN is used (under `actuate dev`, the first request to localhost).
+   */
   ACTUATE_PUBLIC_URL?: string;
   /** "1" only under `actuate dev`: serves admin routes and webhooks without secrets. */
   ACTUATE_DEV?: string;
@@ -54,6 +63,44 @@ function safeEqual(a: string, b: string): boolean {
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body, null, 2), { status, headers: { "content-type": "application/json; charset=utf-8" } });
+
+/** The page behind a signed link carries the token: never cache it, never frame it. */
+const html = (body: string, status = 200) =>
+  new Response(body, {
+    status,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "x-frame-options": "DENY",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      "referrer-policy": "no-referrer",
+    },
+  });
+
+const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * `actuate dev` serves routes whose secret is unset without one. Those answer only requests made on this
+ * machine and not by a web page: a page the developer has open could otherwise start runs (with the real
+ * providers in .dev.vars) or, through DNS rebinding, read them. Returns why a request is refused, or null.
+ */
+function devOpenRouteRefusal(request: Request, url: URL): string | null {
+  if (!LOOPBACK.has(url.hostname)) {
+    return `Without a secret, actuate dev serves this route only on localhost (got host "${url.hostname}"). Set ACTUATE_TOKEN or ACTUATE_WEBHOOK_SECRET in .dev.vars to use it from elsewhere.`;
+  }
+  const site = request.headers.get("sec-fetch-site");
+  if (site && site !== "same-origin" && site !== "none") return "Cross-site requests are refused by actuate dev.";
+  const origin = request.headers.get("origin");
+  if (origin && origin !== url.origin) return "Cross-origin requests are refused by actuate dev.";
+  return null;
+}
+
+/** Routes an agent's ACTUATE_RUN_TOKEN reaches: describe, start a run, read one run. */
+function agentRoute(method: string, path: string): boolean {
+  if (method === "GET" && path === "/") return true;
+  if (method === "POST" && path === "/run") return true;
+  return method === "GET" && /^\/runs\/[^/]+$/.test(path);
+}
 
 /**
  * Build a self-contained Worker and Durable Object for one actuator:
@@ -105,7 +152,10 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
           ...options.guards,
           sql: durableObjectSql(state.storage),
           approvalSecret: secret,
-          approvalUrl: () => `${this.publicUrl}/approve`,
+          approvalUrl: () => {
+            if (!this.publicUrl) console.warn("[actuate] ACTUATE_PUBLIC_URL is not set, so approval links are relative. Set it to this actuator's origin.");
+            return `${this.publicUrl}/approve`;
+          },
           invoke: (request, journal) =>
             this.configError
               ? Promise.resolve({ status: "failed", error: { name: "ConfigError", message: this.configError } })
@@ -150,9 +200,15 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
       else console.log(`\n🔐  [approval requested] ${text}\n`);
     }
 
+    /**
+     * Without ACTUATE_PUBLIC_URL, learn the origin for approval links and provider callbacks. Only from a
+     * request we trust to name it: anyone can send a Host header, and the origin is kept for good, so the
+     * first stranger to call would otherwise choose where every approval link (and its token) points.
+     */
     private async rememberOrigin(url: URL): Promise<void> {
       if (this.publicUrl) return;
       this.publicUrl = url.origin;
+      this.providers = {}; // rebuilt with the new callback URLs
       await this.ctx.storage.put("public_url", this.publicUrl);
     }
 
@@ -188,7 +244,9 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
 
     private async route(request: Request): Promise<Response> {
       const url = new URL(request.url);
-      await this.rememberOrigin(url);
+      // Fail closed: without secrets, only `actuate dev` (ACTUATE_DEV=1) serves the open routes.
+      const dev = this.env.ACTUATE_DEV === "1";
+      if (dev && LOOPBACK.has(url.hostname)) await this.rememberOrigin(url);
       const path = url.pathname.replace(/\/+$/, "") || "/";
       const method = request.method;
       const m = this.manager;
@@ -198,9 +256,7 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
         if (path === "/health") return json({ ok: true });
         if (path === "/approve" && method === "GET") {
           const token = url.searchParams.get("token") ?? "";
-          return new Response(approvalPage(actuator.name, token, await m.describeLink(token)), {
-            headers: { "content-type": "text/html; charset=utf-8" },
-          });
+          return html(approvalPage(actuator.name, token, await m.describeLink(token)));
         }
         if (path === "/approve" && method === "POST") {
           const form = new URLSearchParams((await request.text()).slice(0, 64 * 1024));
@@ -216,10 +272,7 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
                 ? "Approved. You can close this page."
                 : "Rejected. You can close this page."
             : result.reason;
-          return new Response(approvalPage(actuator.name, "", null, message), {
-            status: result.ok ? 200 : 410,
-            headers: { "content-type": "text/html; charset=utf-8" },
-          });
+          return html(approvalPage(actuator.name, "", null, message), result.ok ? 200 : 410);
         }
         const providerHook = /^\/providers\/([a-z0-9-]+)\/webhook$/.exec(path);
         if (providerHook && options.providerWebhook) {
@@ -236,12 +289,13 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
             throw err;
           }
         }
-        // Fail closed: without secrets, only `actuate dev` (ACTUATE_DEV=1) serves the open routes.
-        const dev = this.env.ACTUATE_DEV === "1";
         if (path === "/webhook" && method === "POST") {
           const secret = this.env.ACTUATE_WEBHOOK_SECRET;
           if (!secret && !dev) return json({ error: "Set ACTUATE_WEBHOOK_SECRET to accept webhooks." }, 503);
-          if (!secret) return this.startRun(request, "webhook");
+          if (!secret) {
+            const refused = devOpenRouteRefusal(request, url);
+            return refused ? json({ error: refused }, 403) : this.startRun(request, "webhook");
+          }
           const given = request.headers.get("x-actuate-secret") ?? url.searchParams.get("secret");
           if (given !== null) {
             if (!safeEqual(given, secret)) return json({ error: "unauthorized" }, 401);
@@ -256,10 +310,25 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
           return this.startRun(new Request(request.url, { method: "POST", body: raw }), "webhook", `sig:${sig.slice(7, 39)}`);
         }
 
-        // Admin routes.
+        // Admin routes. ACTUATE_TOKEN (the owner) reaches every one; ACTUATE_RUN_TOKEN (an agent) only
+        // starts and reads runs, so an agent can never approve, answer or fake an event for its own run.
         const token = this.env.ACTUATE_TOKEN;
-        if (!token && !dev) return json({ error: "Set ACTUATE_TOKEN to use the admin API." }, 503);
-        if (token && !safeEqual(request.headers.get("authorization") ?? "", `Bearer ${token}`)) return json({ error: "unauthorized" }, 401);
+        const runToken = this.env.ACTUATE_RUN_TOKEN;
+        const authorization = request.headers.get("authorization") ?? "";
+        const owner = token ? safeEqual(authorization, `Bearer ${token}`) : dev;
+        const agent = !owner && !!runToken && safeEqual(authorization, `Bearer ${runToken}`);
+        if (!owner && !agent) {
+          if (!token && !runToken) return json({ error: "Set ACTUATE_TOKEN to use the admin API." }, 503);
+          return json({ error: "unauthorized" }, 401);
+        }
+        if (owner && !token) {
+          const refused = devOpenRouteRefusal(request, url);
+          if (refused) return json({ error: refused }, 403);
+        }
+        if (agent && !agentRoute(method, path)) {
+          return json({ error: "ACTUATE_RUN_TOKEN can only describe the actuator, start runs and read a run. Use ACTUATE_TOKEN." }, 403);
+        }
+        if (owner && token) await this.rememberOrigin(url);
 
         if (path === "/" && method === "GET") {
           return json({
@@ -316,8 +385,8 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
           }
         }
         const eventMatch = /^\/events\/(.+)$/.exec(path);
-        if (eventMatch && (method === "POST" || method === "GET")) {
-          // GET is accepted so the dev payment provider's "bill URL" can be clicked in a browser.
+        if (eventMatch && (method === "POST" || (method === "GET" && dev))) {
+          // Under `actuate dev`, GET is accepted so the dev payment provider's "bill URL" can be clicked in a browser.
           const key = decodeURIComponent(eventMatch[1]!);
           const payload =
             method === "POST"
