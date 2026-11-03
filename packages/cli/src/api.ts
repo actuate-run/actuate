@@ -26,9 +26,10 @@ export function readCredentials(): Credentials | null {
 
 export function writeCredentials(creds: Credentials): string {
   const p = credentialsPath();
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(creds, null, 2));
-  chmodSync(p, 0o600);
+  mkdirSync(dirname(p), { recursive: true, mode: 0o700 });
+  // Created owner-only, so the token is never readable by others, even for a moment.
+  writeFileSync(p, JSON.stringify(creds, null, 2), { mode: 0o600 });
+  chmodSync(p, 0o600); // an existing file keeps its old mode on write
   return p;
 }
 

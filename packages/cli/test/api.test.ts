@@ -1,5 +1,23 @@
-import { describe, expect, it } from "vitest";
-import { errorMessage } from "../src/api.js";
+import { mkdtempSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { errorMessage, writeCredentials } from "../src/api.js";
+
+describe("writeCredentials", () => {
+  const before = process.env.XDG_CONFIG_HOME;
+  afterEach(() => {
+    if (before === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = before;
+  });
+
+  it.skipIf(process.platform === "win32")("keeps the token file and its folder owner-only", () => {
+    process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "actuate-creds-"));
+    const p = writeCredentials({ apiUrl: "https://api.actuate.run", token: "t" });
+    expect(statSync(p).mode & 0o777).toBe(0o600);
+    expect(statSync(join(process.env.XDG_CONFIG_HOME, "actuate")).mode & 0o777).toBe(0o700);
+  });
+});
 
 describe("errorMessage", () => {
   it("lists validation issues under the error, so `actuate run` shows what was wrong", () => {
