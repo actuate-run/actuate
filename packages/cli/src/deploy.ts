@@ -49,11 +49,18 @@ interface Prepared {
   config: { value: unknown } | { error: string } | undefined;
 }
 
-async function prepare(file: string, cwd: string, withConfig: boolean, log: (line: string) => void, stopOnLintErrors = true): Promise<Prepared> {
+async function prepare(
+  file: string,
+  cwd: string,
+  withConfig: boolean,
+  log: (line: string) => void,
+  stopOnLintErrors = true,
+  printDiagnostics = true,
+): Promise<Prepared> {
   const abs = resolve(cwd, file);
   if (!existsSync(abs)) throw new CliError(`${file} not found. Run this in your project folder, or pass the actuator file.`);
   const diagnostics = checkSource(file, readFileSync(abs, "utf8"));
-  for (const d of diagnostics) log(formatDiagnostic(d));
+  if (printDiagnostics) for (const d of diagnostics) log(formatDiagnostic(d));
   if (stopOnLintErrors && diagnostics.some((d) => d.severity === "error")) {
     throw new CliError("Fix the replay-safety errors before deploying (`actuate check` lists them).", 1, { diagnostics });
   }
@@ -131,11 +138,11 @@ export interface DeployChecks {
 export async function deployChecks(
   file: string,
   cwd: string,
-  opts: { withConfig: boolean; plan?: string; log: (line: string) => void; creds?: Credentials | null; stopOnLintErrors?: boolean; offline?: boolean },
+  opts: { withConfig: boolean; plan?: string; log: (line: string) => void; creds?: Credentials | null; stopOnLintErrors?: boolean; offline?: boolean; printDiagnostics?: boolean },
 ): Promise<DeployChecks> {
   const log = opts.log;
   const creds = opts.creds === undefined ? readCredentials() : opts.creds;
-  const prepared = await prepare(file, cwd, opts.withConfig, log, opts.stopOnLintErrors ?? true);
+  const prepared = await prepare(file, cwd, opts.withConfig, log, opts.stopOnLintErrors ?? true, opts.printDiagnostics ?? true);
   const { request } = prepared;
   const resolved = await resolvePlan(opts.plan, { online: !opts.offline, alwaysAskAccount: true, creds });
   const account = creds && !opts.offline ? await accountFacts(creds, request.metadata.name, resolved) : { facts: {}, notes: [] as string[] };

@@ -167,7 +167,7 @@ Docs: https://actuate.run/docs/getting-started/quickstart/`);
   },
   {
     name: "dev",
-    usage: "actuate dev [file] [--port 8787] [--plan <plan>] [--no-guards]",
+    usage: "actuate dev [file] [--port 8787] [--plan <plan>] [--offline] [--no-guards]",
     summary: "Run locally on workerd with real SQLite and alarms, and the platform's guards",
     description: `Rebuilds on save. Prints messages and approval links to the console unless .dev.vars picks real providers.
 
@@ -187,7 +187,7 @@ The hosted platform's guards apply, for a plan: per pass at most 1,000 ctx.db st
   },
   {
     name: "test",
-    usage: "actuate test [files or folders...] [--watch] [--grep <pattern>] [--plan <plan>]",
+    usage: "actuate test [files or folders...] [--watch] [--grep <pattern>] [--plan <plan>] [--offline] [--no-checks] [--pass-with-no-tests]",
     summary: "Run the project's tests (Vitest if they use it, otherwise node:test)",
     description: `Finds *.test.ts and *.spec.ts files outside node_modules. Files that import vitest run with the project's Vitest; the rest run with node --test, TypeScript included, no setup needed.
 
@@ -219,7 +219,7 @@ Alongside the tests, actuator.ts's deploy checks run locally (no network, not in
   },
   {
     name: "check",
-    usage: "actuate check [file] [--platform] [--plan <plan>] [--json]",
+    usage: "actuate check [file] [--platform] [--plan <plan>] [--offline] [--json]",
     summary: "Lint for replay safety; with --platform, also run the platform's deploy checks",
     description: `Replay safety: side effects and non-determinism outside ctx.step.do (fetch, provider calls, Date.now(), new Date(), Math.random(), crypto.randomUUID(); writes through ctx.db as warnings).
 
@@ -257,7 +257,7 @@ Alongside the tests, actuator.ts's deploy checks run locally (no network, not in
       if (!json) for (const d of diagnostics) out(formatDiagnostic(d));
       if (!json && !diagnostics.length) out("✓ No replay-safety problems found");
       const { deployChecks } = await import("./deploy.js");
-      const checked = await deployChecks(file, cwd, { withConfig: true, ...(str(values, "plan") ? { plan: str(values, "plan")! } : {}), log: json ? () => {} : out, stopOnLintErrors: false, offline: Boolean(values.offline) });
+      const checked = await deployChecks(file, cwd, { withConfig: true, ...(str(values, "plan") ? { plan: str(values, "plan")! } : {}), log: json ? () => {} : out, stopOnLintErrors: false, printDiagnostics: false, offline: Boolean(values.offline) });
       errors += checked.issues.filter((i) => i.severity === "error").length;
       warnings += checked.issues.filter((i) => i.severity === "warning").length;
       if (json) {

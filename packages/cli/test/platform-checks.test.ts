@@ -39,6 +39,21 @@ describe("platform deploy checks", () => {
     }
   });
 
+  it("refuses a malformed cron expression even when the plan is only the default", () => {
+    const actuator = defineActuator(base as never);
+    const metadata = { ...describeActuator(actuator), cron: ["not a cron"] };
+    const issues = platformChecks({ metadata, actuator, plan: PLANS.sandbox, planDefaulted: true });
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ severity: "error", rule: "cron" });
+    expect(issues[0]!.message).not.toContain("only the default plan");
+    // The other schedules are still checked against the plan.
+    const mixed = platformChecks({ metadata: { ...metadata, cron: ["not a cron", "* * * * *"] }, actuator, plan: PLANS.sandbox });
+    expect(mixed.map((i) => `${i.severity}:${i.rule}`)).toEqual(["error:cron", "error:cron"]);
+    expect(mixed[1]!.message).toContain('Cron "* * * * *" fires more often than every 60 min.');
+    const many = platformChecks({ metadata: { ...metadata, cron: ["bad", "0 * * * *", "0 * * * *", "0 * * * *"] }, actuator, plan: PLANS.sandbox });
+    expect(many.some((i) => i.message.startsWith("An actuator may have at most 3 cron schedules"))).toBe(true);
+  });
+
   it("checks cron schedules per plan, and warns when cron runs can't start", () => {
     const def = { ...base, input: z.object({ id: z.string() }), cron: ["*/10 * * * *"] };
     expect(check(def)).toEqual([

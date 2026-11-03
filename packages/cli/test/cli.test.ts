@@ -86,6 +86,15 @@ export default defineActuator({ name: "x", description: "x", input: z.object({})
     expect(JSON.parse(res.out)).toMatchObject({ errors: 1, diagnostics: [{ rule: "no-nondeterminism-outside-step", line: 2 }] });
     expect(await runCli(["check", "nope.ts"], dir)).toMatchObject({ code: 1, err: expect.stringContaining("nope.ts not found") });
   });
+
+  it("prints each replay-safety diagnostic once with --platform", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chk-"));
+    writeFileSync(join(dir, "actuator.ts"), `import { defineActuator, z } from "@actuate/sdk";
+export default defineActuator({ name: "x", description: "x", input: z.object({}), async run(ctx) { return Date.now(); } });`);
+    const res = await runCli(["check", "--offline", "--plan", "maker"], dir);
+    expect(res.code).toBe(1);
+    expect(res.out.match(/no-nondeterminism-outside-step/g)).toHaveLength(1);
+  });
 });
 
 describe("run commands against actuate dev (--local)", () => {

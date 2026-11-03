@@ -1,5 +1,5 @@
 import { z, type Actuator } from "@actuate/sdk";
-import { cronProblem } from "./cron.js";
+import { cronProblem, parseCron } from "./cron.js";
 import type { ActuatorMetadata } from "./load.js";
 import { MAX_BUNDLE_BYTES, type PlanRules } from "./plans.js";
 
@@ -70,7 +70,21 @@ export function platformChecks(input: PlatformCheckInput): PlatformIssue[] {
   }
   if (!/^[a-z][a-z0-9_]{0,63}$/.test(m.name)) error("name", `Invalid actuator name "${m.name}"`);
 
-  const cron = cronProblem(m.cron, plan.limits.cronsPerActuator, plan.limits.minCronIntervalMinutes);
+  // A malformed expression is refused on every plan, so it is an error even when the plan is only the default.
+  // The plan's limits are still checked on the count of all schedules and on the expressions that parse.
+  const parsable: string[] = [];
+  for (const expr of m.cron) {
+    try {
+      parseCron(expr);
+      parsable.push(expr);
+    } catch (err) {
+      error("cron", (err as Error).message);
+    }
+  }
+  const cron =
+    m.cron.length > plan.limits.cronsPerActuator
+      ? cronProblem(m.cron, plan.limits.cronsPerActuator, plan.limits.minCronIntervalMinutes)
+      : cronProblem(parsable, plan.limits.cronsPerActuator, plan.limits.minCronIntervalMinutes);
   if (cron) planRule("cron", `${cron} The ${plan.name} plan allows ${plan.limits.cronsPerActuator} schedules, at least ${plan.limits.minCronIntervalMinutes} min apart.`);
   if (m.cron.length && input.actuator && !input.actuator.input.safeParse({}).success) {
     warn("cron-input", "Every cron run starts with the input {}, which the input schema rejects, so every firing fails. Make the fields optional or give them defaults.");
