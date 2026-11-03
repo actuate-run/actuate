@@ -56,6 +56,8 @@ export const whatsapp: ProviderDefinition<WhatsAppCredentials, "messaging"> = {
       async send(to, text, options) {
         const recipient = (to ?? "").replace(/[\s+()-]/g, "");
         if (!/^\d{6,20}$/.test(recipient)) throw new Error("WhatsApp send needs `to` as a phone number in international format, e.g. 60123456789");
+        // Idempotency: the Cloud API's messages endpoint has no idempotency key (biz_opaque_callback_data is only
+        // echoed back in status webhooks), so options.idempotencyKey is unused. A retried send can arrive twice.
         const base = { messaging_product: "whatsapp", recipient_type: "individual", to: recipient };
         const message = options?.template
           ? {

@@ -9,6 +9,7 @@ import {
   type BaseContext,
   type Capability,
   type Db,
+  type DbStatement,
   type Duration,
   type Json,
   type Logger,
@@ -27,6 +28,24 @@ import { fromJson, serializeError, toJson, type Journal, type PassOutcome, type 
 
 export const DEFAULT_APPROVAL_TIMEOUT = "7 days";
 const RESERVED_TABLE = /\b_actuate_/i;
+/**
+ * A batch is already one transaction: a statement that opened, ended or nested one would break that
+ * (Durable Objects refuse them anyway; node:sqlite would commit half a batch). Leading comments are skipped.
+ */
+const TRANSACTION_CONTROL = /^(?:\s|--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)*(?:begin|commit|end|rollback|savepoint|release)\b/i;
+/** Longest idempotency key handed to a provider: Stripe's limit (Resend allows 256). */
+const MAX_IDEMPOTENCY_KEY = 255;
+
+/**
+ * Provider methods that take an idempotency key, and where: `messaging.send(to, text, options)` in its
+ * options (argument 2); `payment.createBill(request)` and `payment.refund(request)` in the request (argument 0).
+ * `payment.getBill` only reads, and `llm.complete` and `http.fetch` have no key field (no LLM API this
+ * runtime has adapters for deduplicates; an HTTP call's headers are the caller's to set).
+ */
+const KEYED_METHODS: Partial<Record<Capability, Record<string, number>>> = {
+  messaging: { send: 2 },
+  payment: { createBill: 0, refund: 0 },
+};
 
 /** Thrown on replay when a step that failed permanently is reached again. */
 export class StepFailedError extends Error {
@@ -94,6 +113,11 @@ export async function executePass(
 class Pass {
   suspended = false;
   private inStep: string | null = null;
+  /** The running step's idempotency key, and how many calls each keyed provider method has had in this attempt. */
+  private stepKey: string | null = null;
+  private keyedCalls = new Map<string, number>();
+  /** Statements `ctx.db.commitWithStep` queued during the running step's attempt. */
+  private stepWrites: DbStatement[] = [];
   private readonly seen = new Set<string>();
   private readonly rows = new Map<string, StepRow>();
   private sleepCounter = 0;
@@ -177,12 +201,7 @@ class Pass {
         await this.write(this.row(name, { status: "RUNNING", attempts: attempt, wake_at: null }));
       }
 
-      let result: T;
-      this.inStep = name;
-      try {
-        result = await fn({ idempotencyKey: `${this.request.runId}:${name}`, attempt, now: this.now() });
-      } catch (err) {
-        this.inStep = null;
+      const failed = async (err: unknown): Promise<never> => {
         if (isSuspendSignal(err)) throw err;
         const retries = Math.min(options.retries ?? 0, this.request.limits?.maxRetries ?? 10);
         const message = err instanceof Error ? err.message : String(err);
@@ -194,12 +213,43 @@ class Pass {
         await this.write(this.row(name, { status: "RETRYING", error: message, attempts: attempt, wake_at: this.now() + backoff }));
         await this.journal.log("warn", `Step "${name}" failed on attempt ${attempt}; retrying in ${backoff} ms`, { error: message });
         this.suspend(`step "${name}" retrying`);
+      };
+
+      let result: T;
+      const idempotencyKey = `${this.request.runId}:${name}`;
+      this.inStep = name;
+      // Per attempt: a retry derives the same provider keys in the same order, and starts with no queued writes.
+      this.stepKey = idempotencyKey;
+      this.keyedCalls = new Map();
+      this.stepWrites = [];
+      try {
+        result = await fn({ idempotencyKey, attempt, now: this.now() });
+      } catch (err) {
+        this.inStep = null;
+        return failed(err);
       } finally {
         this.inStep = null;
+        this.stepKey = null;
       }
 
       const output = toJson(result);
-      await this.write(this.row(name, { status: "COMPLETED", output_json: output, error: null, attempts: attempt }));
+      const done = this.row(name, { status: "COMPLETED", output_json: output, error: null, attempts: attempt });
+      const writes = this.stepWrites;
+      this.stepWrites = [];
+      if (writes.length === 0) {
+        await this.write(done);
+      } else {
+        // The queued writes and the COMPLETED row commit together, or neither does.
+        if (typeof this.journal.commitStep !== "function") {
+          return failed(new NonRetryableError("ctx.db.commitWithStep is not supported by this host yet (its runtime predates it). Nothing was written."));
+        }
+        try {
+          await this.journal.commitStep(done, writes);
+        } catch (err) {
+          return failed(unsupportedByHost(err, "ctx.db.commitWithStep", true));
+        }
+        this.rows.set(name, done);
+      }
       // Return the JSON round-trip so the first pass and every replay see the same value.
       return fromJson(output) as T;
     }) as Step["do"],
@@ -354,6 +404,30 @@ class Pass {
       }
       return this.db.query<T>(strings.join("?"), values);
     },
+    statement: (strings: TemplateStringsArray, ...values: SqlValue[]): DbStatement => {
+      if (!Array.isArray(strings) || !("raw" in strings)) {
+        throw new ActuatorError("ctx.db.statement must be used as a tagged template: ctx.db.statement`INSERT ... ${value}`.");
+      }
+      return { sql: strings.join("?"), params: values };
+    },
+    batch: async <T extends object = Row>(statements: readonly DbStatement[]): Promise<T[][]> => {
+      const checked = checkStatements("batch", statements);
+      if (checked.length === 0) return [];
+      if (typeof this.journal.batch !== "function") {
+        throw new ActuatorError("ctx.db.batch is not supported by this host yet (its runtime predates it). Nothing was written.");
+      }
+      try {
+        return (await this.journal.batch(checked)) as T[][];
+      } catch (err) {
+        throw unsupportedByHost(err, "ctx.db.batch", false);
+      }
+    },
+    commitWithStep: (statements: readonly DbStatement[]): void => {
+      if (this.inStep === null) {
+        throw new ActuatorError("ctx.db.commitWithStep() must be called inside ctx.step.do(...): its writes commit with that step.");
+      }
+      this.stepWrites.push(...checkStatements("commitWithStep", statements));
+    },
     migrate: async (statements: readonly string[]): Promise<void> => {
       if (statements.some((s) => RESERVED_TABLE.test(s))) {
         throw new ActuatorError("Tables starting with _actuate_ are reserved for the runtime.");
@@ -367,6 +441,34 @@ class Pass {
     warn: (message, data) => void this.journal.log("warn", message, data),
     error: (message, data) => void this.journal.log("error", message, data),
   };
+
+  /**
+   * Give a keyed provider call (see KEYED_METHODS) the running step's key when the caller passed none.
+   *
+   * One step can call a provider several times (two messages, a bill then a refund), so the calls cannot share
+   * the step's key: the provider would answer the second with the first's result. Each call gets
+   * `<step key>:<method>:<n>`, `n` counting that method's calls in this attempt of the step from 0. Counting per
+   * method keeps a call's key the same when a retry takes a different path through other methods (say, an
+   * extra message on attempt 2 before the refund). The count is taken when the call is made, before any await,
+   * so calls started together (Promise.all) are numbered in the order the code makes them. Calls with their
+   * own key are counted too, so adding a key to one call does not renumber the others.
+   */
+  private withIdempotencyKey(method: string, at: number, args: unknown[]): Promise<unknown[]> {
+    const n = this.keyedCalls.get(method) ?? 0;
+    this.keyedCalls.set(method, n + 1);
+    const holder = args[at];
+    if (holder != null && typeof holder !== "object") return Promise.resolve(args); // not ours to change; the provider rejects it
+    const given = (holder as { idempotencyKey?: unknown } | undefined)?.idempotencyKey;
+    if (given !== undefined && given !== null && given !== "") return Promise.resolve(args);
+    const derived = `${this.stepKey}:${method}:${n}`;
+    return fitKey(derived).then((idempotencyKey) => {
+      const keyed = [...args];
+      while (keyed.length < at) keyed.push(undefined);
+      // A new object: the caller's request or options are left as they were.
+      keyed[at] = { ...(holder as object | null | undefined), idempotencyKey };
+      return keyed;
+    });
+  }
 
   /**
    * Wrap a provider so every method call must happen inside `ctx.step.do`.
@@ -391,6 +493,9 @@ class Pass {
                 `ctx.${cap}.${prop}() must be called inside ctx.step.do(...); otherwise it repeats on every replay.`,
               );
             }
+            const keyed = KEYED_METHODS[cap];
+            const at = keyed && Object.hasOwn(keyed, prop) ? keyed[prop] : undefined;
+            if (at !== undefined) return this.withIdempotencyKey(prop, at, args).then((keyed) => Reflect.apply(value as (...a: unknown[]) => unknown, provider, keyed));
             // Reflect.apply, not value.apply: on an RPC stub, ".apply" would be a remote property lookup.
             return Reflect.apply(value as (...a: unknown[]) => unknown, provider, args);
           };
@@ -398,6 +503,44 @@ class Pass {
       },
     );
   }
+}
+
+/**
+ * On the hosted platform the journal is an RPC stub, so a host built before batches answers the call with
+ * "The RPC receiver does not implement the method ...". Say what that means, and don't spend retries on it.
+ */
+function unsupportedByHost(err: unknown, api: string, nonRetryable: boolean): unknown {
+  if (!(err instanceof Error) || !/does not implement the method/.test(err.message)) return err;
+  const message = `${api} is not supported by this host yet (its runtime predates it). Nothing was written.`;
+  return nonRetryable ? new NonRetryableError(message) : new ActuatorError(message);
+}
+
+/** Validate and copy statements for `ctx.db.batch` / `commitWithStep` (the guards `ctx.db.query` applies, per statement). */
+function checkStatements(kind: string, statements: readonly DbStatement[]): DbStatement[] {
+  if (!Array.isArray(statements)) throw new ActuatorError(`ctx.db.${kind} needs an array of statements: [{ sql, params }] or ctx.db.statement\`...\`.`);
+  return statements.map((st, i) => {
+    const sql = (st as DbStatement | undefined)?.sql;
+    const params = (st as DbStatement | undefined)?.params ?? [];
+    if (typeof sql !== "string") throw new ActuatorError(`ctx.db.${kind}: statement ${i + 1} needs sql as a string.`);
+    if (!Array.isArray(params)) throw new ActuatorError(`ctx.db.${kind}: statement ${i + 1} has params that are not an array.`);
+    if (RESERVED_TABLE.test(sql)) throw new ActuatorError("Tables starting with _actuate_ are reserved for the runtime.");
+    if (TRANSACTION_CONTROL.test(sql)) {
+      throw new ActuatorError(`ctx.db.${kind}: statement ${i + 1} controls a transaction. The ${kind} is already one transaction; leave out BEGIN, COMMIT, ROLLBACK and SAVEPOINT.`);
+    }
+    // A copy: the caller changing its array later must not change what was queued or sent.
+    return { sql, params: [...params] };
+  });
+}
+
+/**
+ * A key no longer than providers accept. Keys the runtime derives fit (run IDs are 32 characters and step
+ * names at most 200); a longer one (a custom run ID) keeps its first 190 characters and gains a hash of the
+ * whole key, so it stays distinct and deterministic.
+ */
+async function fitKey(key: string): Promise<string> {
+  if (key.length <= MAX_IDEMPOTENCY_KEY) return key;
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)));
+  return `${key.slice(0, 190)}~${Array.from(digest.slice(0, 16), (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
 export function approvalEventKey(runId: string, stepName: string): string {

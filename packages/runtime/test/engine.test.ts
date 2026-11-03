@@ -622,7 +622,8 @@ describe("optional capabilities and the step clock", () => {
     const send = vi.fn(async () => ({ id: "1", channel: "t" }));
     const out = (await harness(act, { providers: { messaging: { send } } }).start()).run.output;
     expect(out).toMatchObject({ sent: true });
-    expect(send).toHaveBeenCalledWith("ops", `at ${Date.parse("2026-11-02T00:00:00Z")}`);
+    // Optional capabilities get the step's default idempotency key too.
+    expect(send).toHaveBeenCalledWith("ops", `at ${Date.parse("2026-11-02T00:00:00Z")}`, { idempotencyKey: expect.stringMatching(/:alert:send:0$/) });
   });
 
   it("rejects bad declarations", () => {
@@ -859,5 +860,314 @@ describe("dashboard reads", () => {
     expect(h.manager.getRun(short.runId)).toMatchObject({ status: "COMPLETED", output: "woke" });
     expect(h.manager.getRun(long.runId)).toMatchObject({ status: "WAITING", wakeAt: long.wakeAt });
     expect(h.manager.wakeDeferred()).toBe(0);
+  });
+});
+
+describe("default idempotency keys for provider calls", () => {
+  function recorder() {
+    const keys: Array<[string, string | undefined]> = [];
+    const providers: Partial<Providers> = {
+      messaging: { send: async (_to, text, options) => (keys.push([`send ${text}`, options?.idempotencyKey]), { id: text, channel: "test" }) },
+      payment: {
+        createBill: async (r) => (keys.push(["createBill", r.idempotencyKey]), { id: "b1", url: "u", status: "pending", amount: r.amount, currency: "MYR", referenceId: r.referenceId }),
+        getBill: async () => {
+          throw new Error("unused");
+        },
+        refund: async (r) => (keys.push(["refund", r.idempotencyKey]), { id: "r1", status: "succeeded" as const }),
+      },
+    };
+    return { keys, providers };
+  }
+
+  it("gives each call in a step its own key, derived from the step's key, and leaves the caller's options alone", async () => {
+    const { keys, providers } = recorder();
+    const options = { format: "text" as const };
+    const act = defineActuator({
+      name: "keys",
+      description: "test",
+      input: z.object({}),
+      capabilities: ["messaging", "payment"],
+      async run(ctx) {
+        await ctx.step.do("pay", async ({ idempotencyKey }) => {
+          await ctx.payment.createBill({ amount: 5, referenceId: "r" });
+          await ctx.messaging.send("a", "one", options);
+          await ctx.messaging.send("b", "two");
+          await ctx.payment.refund!({ billId: "b1" });
+          return idempotencyKey;
+        });
+        await ctx.step.do("later", () => ctx.messaging.send("c", "three"));
+      },
+    });
+    const { run } = await harness(act, { providers }).start();
+    expect(run.status).toBe("COMPLETED");
+    const step = `${run.runId}:pay`;
+    expect(keys).toEqual([
+      ["createBill", `${step}:createBill:0`],
+      ["send one", `${step}:send:0`],
+      ["send two", `${step}:send:1`],
+      ["refund", `${step}:refund:0`],
+      ["send three", `${run.runId}:later:send:0`],
+    ]);
+    expect(options).toEqual({ format: "text" });
+  });
+
+  it("gives a retried step the same keys, even when the retry makes other calls first", async () => {
+    const { keys, providers } = recorder();
+    const act = defineActuator({
+      name: "retry_keys",
+      description: "test",
+      input: z.object({}),
+      capabilities: ["messaging", "payment"],
+      async run(ctx) {
+        await ctx.step.do("refund", { retries: 2, backoff: "1 second" }, async ({ attempt }) => {
+          if (attempt > 1) await ctx.messaging.send("ops", `retrying ${attempt}`);
+          await ctx.payment.refund!({ billId: "b1" });
+          await ctx.messaging.send("customer", `refunded ${attempt}`);
+          if (attempt < 3) throw new Error("network blip after the refund went through");
+        });
+      },
+    });
+    const h = harness(act, { providers });
+    const { run } = await h.start();
+    await h.advance(1_000);
+    await h.advance(2_000);
+    expect(h.manager.getRun(run.runId)!.status).toBe("COMPLETED");
+    const step = `${run.runId}:refund`;
+    const refundKeys = keys.filter(([what]) => what === "refund").map(([, k]) => k);
+    expect(refundKeys).toEqual([`${step}:refund:0`, `${step}:refund:0`, `${step}:refund:0`]);
+    expect(keys.filter(([what]) => what.startsWith("send refunded")).map(([, k]) => k)).toEqual([
+      `${step}:send:0`,
+      `${step}:send:1`,
+      `${step}:send:1`,
+    ]);
+    // Same position in the attempt, same key: attempts 2 and 3 agree call for call.
+    expect(keys.slice(2, 5)).toEqual(keys.slice(5, 8).map(([what, k]) => [what.replace("3", "2"), k]));
+  });
+
+  it("uses a key the caller passes, and still counts that call", async () => {
+    const { keys, providers } = recorder();
+    const act = defineActuator({
+      name: "explicit_keys",
+      description: "test",
+      input: z.object({}),
+      capabilities: ["messaging", "payment"],
+      async run(ctx) {
+        await ctx.step.do("s", async ({ idempotencyKey }) => {
+          await ctx.payment.refund!({ billId: "b1", idempotencyKey });
+          await ctx.messaging.send("a", "mine", { idempotencyKey: "order-42-receipt" });
+          await ctx.messaging.send("a", "default");
+        });
+      },
+    });
+    const { run } = await harness(act, { providers }).start();
+    expect(keys).toEqual([
+      ["refund", `${run.runId}:s`],
+      ["send mine", "order-42-receipt"],
+      ["send default", `${run.runId}:s:send:1`],
+    ]);
+  });
+
+  it("keeps keys within 255 characters, distinct and stable, for long run IDs", async () => {
+    const { keys, providers } = recorder();
+    const act = defineActuator({
+      name: "long_keys",
+      description: "test",
+      input: z.object({}),
+      capabilities: ["messaging"],
+      async run(ctx) {
+        await ctx.step.do("x".repeat(200), async () => {
+          await ctx.messaging.send("a", "1");
+          await ctx.messaging.send("a", "2");
+        });
+      },
+    });
+    const h = harness(act, { providers });
+    await h.manager.start({ input: {}, trigger: { kind: "api" }, runId: `run_${"r".repeat(60)}` });
+    const [a, b] = keys.map(([, k]) => k!);
+    expect(a!.length).toBeLessThanOrEqual(255);
+    expect(b!.length).toBeLessThanOrEqual(255);
+    expect(a).not.toBe(b);
+    const again = recorder();
+    await harness(act, { providers: again.providers }).manager.start({ input: {}, trigger: { kind: "api" }, runId: `run_${"r".repeat(60)}` });
+    expect(again.keys.map(([, k]) => k)).toEqual([a, b]);
+  });
+});
+
+describe("ctx.db.batch and ctx.db.commitWithStep", () => {
+  const schema = ["CREATE TABLE stock (sku TEXT PRIMARY KEY, qty INTEGER NOT NULL CHECK (qty >= 0))", "CREATE TABLE orders (id TEXT PRIMARY KEY, sku TEXT)"];
+
+  it("applies a batch all or nothing, and returns each statement's rows", async () => {
+    let failure = "";
+    let counts: unknown;
+    let returned: unknown;
+    const act = defineActuator({
+      name: "batch",
+      description: "test",
+      input: z.object({}),
+      async run(ctx) {
+        await ctx.db.migrate(schema);
+        await ctx.step.do("seed", () => ctx.db.batch([{ sql: "INSERT INTO stock VALUES (?, ?)", params: ["tea", 1] }]));
+        await ctx.step.do("oversell", async () => {
+          try {
+            await ctx.db.batch([
+              ctx.db.statement`INSERT INTO orders VALUES (${"o1"}, ${"tea"})`,
+              ctx.db.statement`INSERT INTO orders VALUES (${"o2"}, ${"tea"})`,
+              ctx.db.statement`UPDATE stock SET qty = qty - ${2} WHERE sku = ${"tea"}`,
+            ]);
+          } catch (err) {
+            failure = (err as Error).message;
+          }
+        });
+        counts = await ctx.db.first("SELECT (SELECT COUNT(*) FROM orders) AS orders, (SELECT qty FROM stock) AS qty");
+        returned = await ctx.step.do("sell", () =>
+          ctx.db.batch([
+            ctx.db.statement`UPDATE stock SET qty = qty - ${1} WHERE sku = ${"tea"} RETURNING qty`,
+            { sql: "INSERT INTO orders VALUES (?, ?)", params: ["o3", "tea"] },
+            { sql: "SELECT id FROM orders" },
+          ]),
+        );
+      },
+    });
+    const { run } = await harness(act).start();
+    expect(run.status).toBe("COMPLETED");
+    expect(failure).toMatch(/Statement 3 of 3 failed, so none were applied: .*CHECK constraint failed/);
+    expect(counts).toEqual({ orders: 0, qty: 1 });
+    expect(returned).toEqual([[{ qty: 0 }], [], [{ id: "o3" }]]);
+  });
+
+  it("applies the same guards as ctx.db.query to every statement", async () => {
+    const errors: string[] = [];
+    const act = defineActuator({
+      name: "batch_guards",
+      description: "test",
+      input: z.object({}),
+      async run(ctx) {
+        const attempts: Array<() => unknown> = [
+          () => ctx.db.batch([{ sql: "SELECT 1" }, { sql: "DELETE FROM _actuate_runs" }]),
+          () => ctx.db.batch([{ sql: "  /* hi */ BEGIN" }]),
+          () => ctx.db.batch([{ sql: "-- note\nsavepoint a" }]),
+          () => ctx.db.batch("SELECT 1" as never),
+          () => ctx.db.batch([{ sql: 1 } as never]),
+          () => ctx.db.commitWithStep([{ sql: "SELECT 1" }]),
+          () => (ctx.db.statement as unknown as (s: string) => unknown)("SELECT 1"),
+        ];
+        for (const attempt of attempts) {
+          try {
+            await attempt();
+            errors.push("no error");
+          } catch (err) {
+            errors.push((err as Error).message);
+          }
+        }
+        return ctx.db.batch([]);
+      },
+    });
+    const { run } = await harness(act).start();
+    expect(run).toMatchObject({ status: "COMPLETED", output: [] });
+    expect(errors).toEqual([
+      expect.stringMatching(/reserved/),
+      expect.stringMatching(/controls a transaction/),
+      expect.stringMatching(/controls a transaction/),
+      expect.stringMatching(/needs an array/),
+      expect.stringMatching(/statement 1 needs sql/),
+      expect.stringMatching(/inside ctx.step.do/),
+      expect.stringMatching(/tagged template/),
+    ]);
+  });
+
+  it("commits queued writes with the step's result: never for a failed attempt, never twice", async () => {
+    let attempts = 0;
+    const act = defineActuator({
+      name: "commit_with_step",
+      description: "test",
+      input: z.object({}),
+      async run(ctx) {
+        await ctx.db.migrate(schema);
+        const order = await ctx.step.do("order", { retries: 1, backoff: "1 second" }, async ({ attempt }) => {
+          attempts++;
+          ctx.db.commitWithStep([ctx.db.statement`INSERT INTO orders VALUES (${"o1"}, ${"tea"})`]);
+          ctx.db.commitWithStep([{ sql: "INSERT INTO stock VALUES (?, ?)", params: ["tea", 9] }]);
+          if (attempt === 1) throw new Error("provider timed out");
+          return "o1";
+        });
+        await ctx.step.sleep("1 hour"); // the replay after this must not apply the writes again
+        return { order, rows: await ctx.db.query("SELECT (SELECT COUNT(*) FROM orders) AS orders, (SELECT COUNT(*) FROM stock) AS stock") };
+      },
+    });
+    const h = harness(act);
+    const { run } = await h.start();
+    expect(run.status).toBe("WAITING");
+    expect(h.manager.readTable("orders", {}).rows).toEqual([]);
+    await h.advance(1_000);
+    expect(h.manager.readTable("orders", {}).rows).toEqual([{ id: "o1", sku: "tea" }]);
+    await h.advance(60 * 60_000);
+    expect(h.manager.getRun(run.runId)).toMatchObject({ status: "COMPLETED", output: { order: "o1", rows: [{ orders: 1, stock: 1 }] } });
+    expect(attempts).toBe(2);
+  });
+
+  it("fails the step, and records nothing, when a queued write fails", async () => {
+    const act = defineActuator({
+      name: "commit_fails",
+      description: "test",
+      input: z.object({}),
+      async run(ctx) {
+        await ctx.db.migrate(schema);
+        await ctx.step.do("seed", () => ctx.db.query("INSERT INTO orders VALUES ('o1', 'tea')"));
+        await ctx.step.do("dup", async () => {
+          ctx.db.commitWithStep([
+            { sql: "INSERT INTO stock VALUES ('tea', 1)" },
+            { sql: "INSERT INTO orders VALUES ('o1', 'tea')" },
+          ]);
+          return "done";
+        });
+      },
+    });
+    const h = harness(act);
+    const { run } = await h.start();
+    expect(run.status).toBe("FAILED");
+    expect(run.error?.message).toMatch(/Statement 2 of 2 failed, so none were applied: .*UNIQUE constraint failed/);
+    expect(h.manager.readTable("stock", {}).rows).toEqual([]);
+    expect(h.manager.getSteps(run.runId).find((s) => s.name === "dup")).toMatchObject({ status: "FAILED", output: null });
+  });
+
+  it("says so when the host's journal predates batches", async () => {
+    const act = defineActuator({
+      name: "old_host",
+      description: "test",
+      input: z.object({}),
+      async run(ctx) {
+        await ctx.db.batch([{ sql: "SELECT 1" }]);
+      },
+    });
+    const h = harness(act, {
+      manager: {
+        invoke: (request, journal) => executePass(act, request, { journal: { ...journal, batch: undefined, commitStep: undefined }, config: {} }),
+      },
+    });
+    expect((await h.start()).run.error?.message).toMatch(/ctx.db.batch is not supported by this host/);
+  });
+
+  it("does not spend retries when an RPC host predates commitWithStep", async () => {
+    let attempts = 0;
+    const act = defineActuator({
+      name: "old_rpc_host",
+      description: "test",
+      input: z.object({}),
+      async run(ctx) {
+        await ctx.step.do("s", { retries: 3 }, () => {
+          attempts++;
+          ctx.db.commitWithStep([{ sql: "SELECT 1" }]);
+        });
+      },
+    });
+    const missing = async () => {
+      throw new TypeError('The RPC receiver does not implement the method "commitStep".');
+    };
+    const h = harness(act, {
+      manager: { invoke: (request, journal) => executePass(act, request, { journal: { ...journal, commitStep: missing }, config: {} }) },
+    });
+    const { run } = await h.start();
+    expect(run).toMatchObject({ status: "FAILED", error: { name: "NonRetryableError", message: expect.stringMatching(/commitWithStep is not supported by this host/) } });
+    expect(attempts).toBe(1);
   });
 });

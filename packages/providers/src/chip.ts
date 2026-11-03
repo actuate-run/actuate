@@ -103,6 +103,9 @@ export const chip: ProviderDefinitionWithWebhookLookup<ChipCredentials, "payment
   create(credentials, ctx): PaymentProvider {
     const headers = { authorization: `Bearer ${credentials.secretKey}`, "content-type": "application/json" };
     return {
+      // Idempotency: CHIP's purchase and refund endpoints document no idempotency key, so req.idempotencyKey is
+      // unused. A retried createBill can make a second (unpaid) purchase; a retried partial refund can refund
+      // twice, up to the purchase's refundable_amount. Keep refunds in steps without retries, or check first.
       async createBill(req) {
         const currency = normaliseCurrency(req.currency);
         if (!req.referenceId) throw new Error("referenceId is required");

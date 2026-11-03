@@ -86,6 +86,8 @@ export const billplz: ProviderDefinitionWithWebhookLookup<BillplzCredentials, "p
   create(credentials, ctx): PaymentProvider {
     const base = billplzBase(credentials);
     return {
+      // Idempotency: the v3 bills API documents no idempotency key or dedup field (reference_1 is only a
+      // reference), so req.idempotencyKey is unused. A retried createBill can make a second, unpaid bill. No refunds.
       async createBill(req) {
         const currency = requireMyr("Billplz", req.currency);
         if (!req.referenceId) throw new Error("referenceId is required");

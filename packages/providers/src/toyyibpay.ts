@@ -85,6 +85,8 @@ export const toyyibpay: ProviderDefinitionWithWebhookLookup<ToyyibPayCredentials
   create(credentials, ctx): PaymentProvider {
     const base = toyyibPayBase(credentials);
     return {
+      // Idempotency: ToyyibPay's API documents no idempotency key or dedup field (billExternalReferenceNo is only
+      // a reference), so req.idempotencyKey is unused. A retried createBill can make a second, unpaid bill. No refunds.
       async createBill(req) {
         const currency = requireMyr("ToyyibPay", req.currency);
         if (!req.referenceId) throw new Error("referenceId is required");

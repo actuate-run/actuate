@@ -7,7 +7,7 @@ import {
   type ProviderDefinition,
 } from "./contract.js";
 import type { Bill, PaymentProvider } from "@actuate/sdk";
-import { type ProviderDefinitionWithWebhookLookup, formEncode, fromMinor, normaliseCurrency, optionalString, parseWith, requestJson, toMinor } from "./util.js";
+import { type ProviderDefinitionWithWebhookLookup, fitIdempotencyKey, formEncode, fromMinor, normaliseCurrency, optionalString, parseWith, requestJson, toMinor } from "./util.js";
 
 const API = "https://api.stripe.com/v1";
 /** Same default as Stripe's own libraries. */
@@ -103,13 +103,16 @@ export const stripe: ProviderDefinitionWithWebhookLookup<StripeCredentials, "pay
   parseCredentials: (input) => parseWith("Stripe", schema, input),
   create(credentials, ctx): PaymentProvider {
     const auth = { authorization: `Bearer ${credentials.secretKey}` };
-    const post = <T>(path: string, data: Record<string, unknown>, idempotencyKey?: string) =>
+    // Idempotency: Stripe deduplicates POSTs by the Idempotency-Key header (at most 255 characters, kept for at
+    // least 24 hours): a repeat returns the first response, and a repeat with different parameters is an error.
+    // Inside a step the runtime supplies a per-call key when the caller gives none. getBill is a GET and needs none.
+    const post = async <T>(path: string, data: Record<string, unknown>, idempotencyKey?: string) =>
       requestJson<T>("Stripe", ctx.fetch, `${API}${path}`, {
         method: "POST",
         headers: {
           ...auth,
           "content-type": "application/x-www-form-urlencoded",
-          ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
+          ...(idempotencyKey ? { "idempotency-key": await fitIdempotencyKey(idempotencyKey, 255) } : {}),
         },
         body: formEncode(data),
       });
