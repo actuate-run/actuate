@@ -683,11 +683,11 @@ export class RunManager {
       }));
   }
 
-  /** User tables in this actuator's database (excluding runtime and SQLite internals). */
+  /** User tables in this actuator's database (excluding runtime, SQLite, Cloudflare and Miniflare internals). */
   listTables(): string[] {
     return this.sql
       .exec(
-        `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_actuate\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' ORDER BY name`,
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_actuate\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' AND name NOT LIKE '\\_\\_miniflare\\_%' ESCAPE '\\' ORDER BY name`,
       )
       .map((r) => String(r.name));
   }

@@ -171,6 +171,22 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
     }
 
     override async fetch(request: Request): Promise<Response> {
+      const response = await this.route(request);
+      // Most routes ignore the body. Left unread, workerd logs "Can't read from request stream
+      // after response has been sent" for every such request. Cancelling the stream doesn't stop
+      // it, so read it to the end, a chunk at a time so a large body isn't held in memory.
+      if (request.body && !request.bodyUsed) {
+        try {
+          const reader = request.body.getReader();
+          while (!(await reader.read()).done);
+        } catch {
+          // The client went away mid-body; nothing left to release.
+        }
+      }
+      return response;
+    }
+
+    private async route(request: Request): Promise<Response> {
       const url = new URL(request.url);
       await this.rememberOrigin(url);
       const path = url.pathname.replace(/\/+$/, "") || "/";

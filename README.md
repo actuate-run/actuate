@@ -18,11 +18,11 @@
 <p align="center">
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-c2410c" /></a>
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-141413" />
-  <img alt="MCP" src="https://img.shields.io/badge/MCP-streamable%20HTTP-141413" />
+  <img alt="MCP" src="https://img.shields.io/badge/MCP-hosted%2C%20streamable%20HTTP-141413" />
   <img alt="Runs on Cloudflare Workers" src="https://img.shields.io/badge/runs%20on-Cloudflare%20Workers-141413" />
 </p>
 
-**Actuate turns one TypeScript file into a tool your AI agent can call over MCP or HTTP.** The tool checks its input against a schema, runs each step exactly once, sleeps for days at no cost, waits for payments, replies or a person's approval, and keeps its own SQLite database. Your messaging, payment and LLM keys stay out of the prompt.
+**Actuate turns one TypeScript file into a tool your AI agent can call: over MCP on the hosted platform, or over HTTP wherever it runs.** The tool checks its input against a schema, runs each step exactly once, sleeps for days at no cost, waits for payments, replies or a person's approval, and keeps its own SQLite database. Your messaging, payment and LLM keys stay out of the prompt.
 
 ```bash
 npm create actuate
@@ -66,7 +66,9 @@ claude mcp add --transport http refund_order https://run.actuate.run/a/<actuator
   --header "Authorization: Bearer <agent token>"
 ```
 
-Any MCP client works: Claude Code, Claude Desktop, Cursor, VS Code, or your own agent through an MCP SDK. Each actuator also has an HTTP endpoint and an OpenAPI document. See [Connect your agent](https://actuate.run/docs/guides/connect-your-agent/).
+Any MCP client works: Claude Code, Claude Desktop, Cursor, VS Code, or your own agent through an MCP SDK. Each hosted actuator also has an HTTP endpoint and an OpenAPI document. See [Connect your agent](https://actuate.run/docs/guides/connect-your-agent/).
+
+The MCP endpoint is part of the hosted platform, not the open-source runtime. A self-hosted actuator is called over the [runtime HTTP API](https://actuate.run/docs/reference/runtime-http/) (`POST /run`), which your agent can use as an HTTP tool.
 
 ## What you get
 
@@ -75,7 +77,7 @@ Any MCP client works: Claude Code, Claude Desktop, Cursor, VS Code, or your own 
 - **People in the loop.** `waitForApproval` and `waitForInput` send a signed, single-use link and resume when someone answers.
 - **Its own database.** A SQLite database per actuator, with parameterised queries, migrations, and CSV and `.sql` export.
 - **Your accounts.** Telegram, WhatsApp, Slack, Discord and email; Stripe, Chip, ToyyibPay and Billplz; Anthropic, OpenAI, Google or any OpenAI-compatible API. Credentials are yours and never reach the model.
-- **Schema-checked tools.** Input is validated before anything runs; MCP tools and OpenAPI are generated from your Zod schemas.
+- **Schema-checked tools.** Input is validated before anything runs. The hosted platform generates MCP tools and OpenAPI from your Zod schemas.
 - **Replay-safe by lint.** `actuate check` flags network calls, provider calls, clocks and randomness outside a step before you deploy.
 - **Open source.** The SDK, runtime, CLI and provider adapters are Apache-2.0. Self-host on Cloudflare Workers, or use the hosted platform at [actuate.run](https://actuate.run).
 
@@ -115,7 +117,7 @@ Each actuator is a Durable Object with its own SQLite database. Steps are journa
 ## Hosted or self-hosted
 
 - **Hosted, at [actuate.run](https://actuate.run):** `npx actuate deploy`, a dashboard with runs, approvals and tables, MCP for your agents, and plans with hard monthly limits (no surprise bills). Free Sandbox plan.
-- **Self-hosted:** the open-source runtime runs an actuator as a Worker plus a SQLite-backed Durable Object, on Cloudflare or plain `workerd`, with no Actuate account. See [Self-hosting](https://actuate.run/docs/guides/self-hosting/).
+- **Self-hosted:** the open-source runtime runs an actuator as a Worker plus a SQLite-backed Durable Object, on Cloudflare or plain `workerd`, with no Actuate account. It serves the runtime HTTP API; MCP and OpenAPI come with the hosted platform. See [Self-hosting](https://actuate.run/docs/guides/self-hosting/).
 
 ## Contributing
 

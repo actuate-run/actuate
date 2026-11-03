@@ -9,7 +9,7 @@ import { checkSource, formatDiagnostic } from "./check.js";
 import { deploy } from "./deploy.js";
 import { dev } from "./dev.js";
 
-const HELP = `actuate: durable TypeScript actuators with SQLite and MCP
+const HELP = `actuate: durable TypeScript actuators with SQLite, served over MCP when deployed to Actuate
 
 Usage
   actuate init [dir] [--template <name>] [--ref <git-ref>]
