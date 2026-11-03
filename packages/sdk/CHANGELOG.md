@@ -1,5 +1,17 @@
 # @actuate/sdk
 
+## 0.3.0
+
+### Minor Changes
+
+- b9ea870: Default idempotency keys for provider calls, and atomic database writes.
+
+  - **runtime:** inside `ctx.step.do`, `ctx.messaging.send`, `ctx.payment.createBill` and `ctx.payment.refund` now get an idempotency key when you pass none, as `MessagingSendOptions.idempotencyKey` always documented. Each call gets its own key, `<runId>:<step>:<method>:<n>`, where `n` counts that method's calls in this attempt of the step from 0, so two sends in one step are not deduplicated against each other, and a retried step sends the same key for the same call. A key you pass is used as is. Keys are at most 255 characters. This works the same self-hosted and on the hosted platform, because the runtime adds the key before the call reaches the provider. **Behaviour change:** a retried step whose earlier attempt reached Stripe or Resend now gets the first attempt's result instead of a second checkout session, refund or email. If the retry sends different parameters with the same key, Stripe and Resend reject it. Keys expire after 24 hours at both, so a retry after a longer backoff is not deduplicated.
+  - **providers:** Stripe sends the key as `Idempotency-Key` on `createBill` and `refund` (as before). Resend sends it as `Idempotency-Key`. Discord bot-token sends now pass a nonce derived from it with `enforce_nonce`, so Discord drops duplicates within a few minutes. A key too long for an API is shortened with a hash, never cut off, so keys that differ only at the end stay distinct. Telegram, WhatsApp, Slack, Discord webhooks, CHIP, ToyyibPay and Billplz document no idempotency key, so those adapters do not use it: a retried call can repeat there. The dev payment provider (`actuate dev`) now returns the same bill for a repeated key, as Stripe does.
+  - **sdk, runtime:** `ctx.db.batch([...statements])` runs several parameterised statements in one transaction, all or nothing (`transactionSync` on a Durable Object), and resolves to each statement's rows. If one fails, none is applied, and the error says which one failed. Build statements with `` ctx.db.statement`...${value}` `` or `{ sql, params }`. Statements that control a transaction (`BEGIN`, `COMMIT`, `SAVEPOINT`, ...) and tables starting with `_actuate_` are refused.
+  - **sdk, runtime:** `ctx.db.commitWithStep([...statements])`, inside `ctx.step.do`, queues writes to apply in the same transaction that records the step as completed. A failed or retried attempt applies none of them, and a completed step never applies them again, even when the run is replayed. Use it for writes that must happen exactly once with the step's result. The step can't read the writes or their rows; use `ctx.db.batch` when it needs them.
+  - **runtime:** `Journal` has two new optional methods, `batch` and `commitStep`. A host whose journal lacks them (for example, a hosted platform still on 0.2) rejects `ctx.db.batch` and `commitWithStep` with an error instead of applying writes partly.
+
 ## 0.2.0
 
 ### Patch Changes
