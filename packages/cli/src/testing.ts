@@ -134,7 +134,8 @@ class TestDate extends RealDate {
 /**
  * Start a test of `actuator`. Every capability gets a recording fake unless
  * you replace it; inputs and config are validated with the actuator's schemas,
- * as the platform does.
+ * as the platform does. Unlike the platform and `actuate dev`, it does not redact
+ * `secret()` config values from runs, steps and logs, so tests can assert on real values.
  */
 export function testActuator<A extends Actuator>(actuator: A, options: TestActuatorOptions = {}): ActuatorTest<A> {
   return new ActuatorTest(actuator, options);

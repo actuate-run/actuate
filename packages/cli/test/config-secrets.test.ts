@@ -65,9 +65,9 @@ describe("committedSecretIssue", () => {
       severity: "warning",
       rule: "config-secret",
       message:
-        "actuate.config.json sets the secret fields apiKey, hook.token, and git does not ignore the file, so they would be committed. Set them in the dashboard (Config tab) and leave them out of the file: the platform keeps a stored secret when the file omits it. (Or add actuate.config.json to .gitignore.)",
+        "actuate.config.json sets the secret fields apiKey, hook.token, and git does not ignore the file, so they would be committed. Set them in the dashboard (Config tab) and leave them out of the file: the platform keeps a stored secret when the file omits it. For `actuate dev`, put them in .dev.vars as ACTUATE_CONFIG.",
     });
-    expect(committedSecretIssue(dir, schema, { apiKey: "sk_live_1" })?.message).toMatch(/^actuate\.config\.json sets the secret field apiKey, .* so it would be committed\. Set it in the dashboard \(Config tab\) and leave it out of the file/);
+    expect(committedSecretIssue(dir, schema, { apiKey: "sk_live_1" })?.message).toMatch(/^actuate\.config\.json sets the secret field apiKey, .* so it would be committed\. Set it in the dashboard \(Config tab\) and leave it out of the file.* For `actuate dev`, put it in \.dev\.vars as ACTUATE_CONFIG\.$/);
     writeFileSync(join(dir, ".gitignore"), "actuate.config.json\n");
     expect(committedSecretIssue(dir, schema, { apiKey: "sk_live_1" })).toBeNull();
   });

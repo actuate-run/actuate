@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { defineActuator, secret, z, type Actuator } from "@actuate/sdk";
-import { RunManager, collectSecrets, executePass, mergeSecrets, nodeSqlite, omitSecrets, redactSecrets, secretFields } from "../src/index.js";
+import { RunManager, collectSecrets, executePass, mergeSecrets, nodeSqlite, omitSecrets, redactSecrets, secretFields, secretPaths } from "../src/index.js";
 
 const opts = { io: "input", unrepresentable: "any" } as const;
 
@@ -109,8 +109,25 @@ describe("collectSecrets", () => {
   });
 });
 
-describe("secretFields and omitSecrets", () => {
+describe("secretFields, secretPaths and omitSecrets", () => {
   const json = z.toJSONSchema(configSchema, opts);
+
+  it("lists every secret field the schema declares, set or not", () => {
+    const expected = ["plain", "viaMeta", "optional", "optionalOuter", "defaulted", "nullable", "nested.token", "list[]", "listOuter", "objects[].key", "record.*"];
+    expect(secretPaths(json)).toEqual(expected);
+    expect(secretPaths(configSchema.toJSONSchema(opts))).toEqual(expected);
+    expect(secretPaths(z.toJSONSchema(z.object({ a: z.string(), b: z.array(z.number()) }), opts))).toEqual([]);
+    expect(secretPaths(z.toJSONSchema(z.object({ pair: z.tuple([z.string(), secret(z.string())]) }), opts))).toEqual(["pair[1]"]);
+    expect(secretPaths({ type: "string", writeOnly: true })).toEqual([""]);
+    expect(secretPaths(null)).toEqual([]);
+  });
+
+  it("follows $refs, once through a recursive one", () => {
+    const tree = { $defs: { node: { type: "object", properties: { key: { type: "string", writeOnly: true }, children: { type: "array", items: { $ref: "#/$defs/node" } } } } }, $ref: "#/$defs/node" };
+    expect(secretPaths(tree)).toEqual(["key"]);
+    const Node: z.ZodType = z.lazy(() => z.object({ key: secret(z.string()), children: z.array(Node) }));
+    expect(secretPaths(z.toJSONSchema(z.object({ root: Node }), opts))).toEqual(["root.key"]);
+  });
 
   it("names the secret fields a config sets", () => {
     expect(secretFields(json, config)).toEqual([

@@ -16,7 +16,7 @@ Bind `ActuatorObject` as a SQLite-backed Durable Object named `ACTUATOR`, set `A
 
 `ctx.notifyOwner` messages go to `createRuntime(actuator, { notifyOwner: (env) => notifier })`, an `OwnerNotifier` you write (email, chat); without one they are written to the run's log. `actuate dev` prints them (`consoleOwnerNotifier`). Hosts that call `executePass` themselves pass it as `owner`.
 
-Config fields marked with `secret()` (JSON Schema `"writeOnly": true`) never show in what the runtime serves: each value becomes `[secret]` in logs, errors, run records and step outputs, while replays still get the real value. Hosts that build their own `RunManager` pass `secrets: () => collectSecrets(configJsonSchema, config)`; `redactSecrets`, `secretFields` and `omitSecrets` work on plain JSON Schema too.
+Config fields marked with `secret()` (JSON Schema `"writeOnly": true`) never show in what the runtime serves: each value becomes `[secret]` in logs, errors, run records and step outputs, while replays still get the real value. Hosts that build their own `RunManager` pass `secrets: () => collectSecrets(configJsonSchema, config)`; `redactSecrets`, `secretFields`, `secretPaths` and `omitSecrets` work on plain JSON Schema too.
 
 For tests and Node hosts, `nodeSqlite` runs the engine on `node:sqlite`, and `meteredNodeSqlite` adds an estimate of the rows read and written that Durable Objects would bill. `checkActuatorSql` refuses the SQL the hosted platform refuses (recursive queries, PRAGMA, ATTACH, generator functions). To test an actuator, use `@actuate/cli/testing`, which builds on them.
 

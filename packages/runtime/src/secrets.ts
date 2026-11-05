@@ -143,6 +143,49 @@ export function secretFields(configSchema: unknown, config: unknown): string[] {
 }
 
 /**
+ * Every secret field the schema declares, set or not, in schema order: object keys joined with dots, `[]` for
+ * "each element of an array" (`[i]` for a tuple position), `*` for "each value of a record"
+ * (`additionalProperties` or `patternProperties`). For example `apiKey`, `slack.botToken`, `tokens[]`,
+ * `webhooks[].secret`, `keys.*`. A secret at the top level is `""`. Keys are not escaped. Fields reached through
+ * a recursive `$ref` are listed once, at their shallowest path.
+ *
+ * {@link secretFields} names fields holding a value with the same notation, but with each array element's
+ * position (`tokens[0]`) and each record key (`keys.eu`) filled in.
+ */
+export function secretPaths(configSchema: unknown): string[] {
+  const found: string[] = [];
+  const join = (path: string, key: string) => (path ? `${path}.${key}` : key);
+  const walk = (nodes: readonly unknown[], path: string, depth: number, seen: ReadonlySet<Schema>): void => {
+    const schemas = expand(configSchema, nodes).filter((s) => !seen.has(s));
+    if (!schemas.length || depth > 32) return;
+    if (schemas.some((s) => s.writeOnly === true)) {
+      if (!found.includes(path)) found.push(path);
+      return;
+    }
+    const inside = new Set([...seen, ...schemas]);
+    const keys = new Map<string, unknown[]>();
+    const records: unknown[] = [];
+    const tuple = new Map<number, unknown[]>();
+    const items: unknown[] = [];
+    for (const s of schemas) {
+      if (isObject(s.properties)) for (const [key, sub] of Object.entries(s.properties)) keys.set(key, [...(keys.get(key) ?? []), sub]);
+      if (isObject(s.patternProperties)) records.push(...Object.values(s.patternProperties));
+      if (isObject(s.additionalProperties)) records.push(s.additionalProperties);
+      const positional = Array.isArray(s.prefixItems) ? s.prefixItems : Array.isArray(s.items) ? s.items : [];
+      positional.forEach((sub, i) => tuple.set(i, [...(tuple.get(i) ?? []), sub]));
+      if (isObject(s.items)) items.push(s.items);
+      if (Array.isArray(s.items) && isObject(s.additionalItems)) items.push(s.additionalItems);
+    }
+    for (const [key, subs] of keys) walk(subs, join(path, key), depth + 1, inside);
+    if (records.length) walk(records, join(path, "*"), depth + 1, inside);
+    for (const [i, subs] of tuple) walk(subs, `${path}[${i}]`, depth + 1, inside);
+    if (items.length) walk(items, `${path}[]`, depth + 1, inside);
+  };
+  walk([configSchema], "", 0, new Set());
+  return found;
+}
+
+/**
  * A copy of `config` without its secret fields: secret object properties are removed, secret array
  * elements are dropped, and so are objects left empty by that. For comparing two configs while ignoring secrets (a stored config shows them masked).
  */

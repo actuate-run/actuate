@@ -32,7 +32,7 @@ export function committedSecretIssue(cwd: string, configSchema: unknown, config:
     message:
       `actuate.config.json sets the secret field${one ? "" : "s"} ${fields.join(", ")}, and git does not ignore the file, so ${one ? "it" : "they"} would be committed. ` +
       `Set ${one ? "it" : "them"} in the dashboard (Config tab) and leave ${one ? "it" : "them"} out of the file: the platform keeps a stored secret when the file omits it. ` +
-      `(Or add actuate.config.json to .gitignore.)`,
+      `For \`actuate dev\`, put ${one ? "it" : "them"} in .dev.vars as ACTUATE_CONFIG.`,
   };
 }
 

@@ -103,7 +103,8 @@ Before you call a change done:
    counts against the monthly deploy budget, failed ones included.
 
 Mark API keys and tokens in the config schema with \`secret(z.string())\` and set their values in the
-dashboard (Config tab), not in \`actuate.config.json\`, which is committed.
+dashboard (Config tab), not in \`actuate.config.json\`, which is committed. For \`actuate dev\`, put them
+in \`.dev.vars\` (git-ignored) as \`ACTUATE_CONFIG={"apiKey":"..."}\`; it is merged over the file.
 
 \`npx actuate <command> --help\` explains each command; \`--json\` gives machine-readable output.
 Guide: https://actuate.run/docs/guides/best-practices/
