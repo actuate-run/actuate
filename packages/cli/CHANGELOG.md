@@ -1,5 +1,41 @@
 # @actuate/cli
 
+## 0.4.0
+
+### Minor Changes
+
+- ebf7434: Secret config fields.
+
+  - **sdk:** new `secret(schema)` marks a config field as secret (`apiKey: secret(z.string())`; the same as `.meta({ writeOnly: true })`, so its JSON Schema gets `"writeOnly": true`). It works on fields inside nested objects and arrays, and with `.optional()`, `.nullable()` and `.default()`.
+  - **runtime:** the values of secret fields become `[secret]` in run logs, run and step errors (as they are written), and in everything the runtime serves: `POST /run`, `GET /runs`, `GET /runs/:id` (output, steps, logs), the approval queue and approval pages, and approval messages sent to an approver. Stored step results keep the real value, so replays still see it. Numbers are redacted too (as their digits); values shorter than 6 characters and booleans are not. A secret is also caught JSON-escaped (once or twice) and URL- or form-encoded; base64 and other encodings are not. Overlapping secrets are replaced as one span. Self-hosted and under `actuate dev`, this works from the config schema and `ACTUATE_CONFIG` with nothing to set up.
+  - **runtime:** new `collectSecrets(configJsonSchema, config)`, `redactSecrets(value, secrets)`, `secretFields(configJsonSchema, config)`, `secretPaths(configJsonSchema)`, `omitSecrets(configJsonSchema, config)` and `mergeSecrets(...lists)`, which work on plain JSON Schema. `secretPaths` lists every secret field the schema declares, set or not: keys joined with dots, `[]` for each array element, `*` for each record value (`apiKey`, `slack.botToken`, `webhooks[].secret`, `keys.*`). `RunManager` takes a `secrets: () => readonly string[]` option and applies the redaction itself; its new `redact(value)` method applies it to anything else. Known limits: reads are redacted with the secrets configured now, so output stored before a key rotation shows the old key, and `/tables` (the actuator's own data) is not redacted.
+  - **runtime:** a malformed `ACTUATE_CONFIG` is reported as "not valid JSON" with its line and column, never with the parser's message (which quotes the text around the error). An error a config schema's transform or refine throws is redacted with the raw config's secrets; when a custom `config(env)` throws, or the schema has no JSON Schema, only the error's name is given (the full error goes to the worker's logs). These messages are served on `GET /` and become every run's error, so agent tokens can read them. New `describeJsonError(err, text)`. The CLI reports a malformed `actuate.config.json` the same way.
+  - **cli:** when the deployed version already runs the same code, `actuate deploy` compares `actuate.config.json` with the deployed configuration without the secret fields (the platform shows them as `null`), and always sends a file that mentions a secret field (a value, or `""` / `[]` / `null` to clear it). A file that leaves a secret out never clears it. When it updates only the configuration, it prints the platform's warnings too (such as secrets dropped from a list whose length changed), and includes them in `--json` output.
+
+  `ctx.notifyOwner`: message the actuator's owner.
+
+  - **sdk:** new `ctx.notifyOwner(text, { subject })` on every actuator, no capability to declare. On the hosted platform it emails the account (and the account's alert channel, when one is set up); under `actuate dev` it prints the message in the terminal. Call it inside `ctx.step.do`: each message gets an idempotency key derived from the step's, `<runId>:<step>:notifyOwner:<n>`, where `n` counts that step attempt's `notifyOwner` calls from 0, so a retried step does not send it twice. `text` is 1 to 4,000 characters and `subject` one line of at most 200. It resolves to `{ sent, reason? }`: a message the notifier refuses (a daily cap reached) resolves to `{ sent: false, reason }`, with the reason logged as a `warn` line, instead of throwing. New types `NotifyOwnerOptions`, `NotifyOwnerResult`, `OwnerNotification` and `OwnerNotifier`. **Type change:** `notifyOwner` is a new required member of `BaseContext`, so code that builds a `BaseContext` itself (a hand-rolled test context) must add it. Known limit, as for provider calls' keys: the per-attempt counter is kept with the running step, which steps run concurrently would share.
+  - **runtime:** `executePass` takes an `owner` notifier, and `createRuntime` a `notifyOwner: (env) => OwnerNotifier` option (secret config values are redacted before it sees a message). Without one, the message is written to the run's log as an `info` line and the call resolves to `{ sent: false, reason }`. New `consoleOwnerNotifier()`, which `actuate dev` uses.
+  - **cli:** `@actuate/cli/testing` records messages in `t.ownerNotifications`.
+  - **cli:** `actuate check` reports `ctx.notifyOwner()` outside `ctx.step.do` as an error (`no-notify-outside-step`).
+
+  Committed secrets.
+
+  - **cli:** `actuate check`, `actuate deploy` (and `check --platform`, `deploy --dry-run`) and, once at startup, `actuate dev` warn when `actuate.config.json` sets a value for a secret field and git would commit the file (inside a git work tree, not ignored). The warning names the fields and says to set them in the dashboard (Config tab) and leave them out of the file (the platform keeps a stored secret when the file omits it), and, for `actuate dev`, to put them in `.dev.vars` as `ACTUATE_CONFIG`. It is a warning, never an error, and it is in `--json` output too (rule `config-secret`). Outside a git repository, or without git, nothing is said.
+  - **cli:** `actuate dev` takes local secrets from the git-ignored `.dev.vars`: an `ACTUATE_CONFIG` there (a JSON object) is deep-merged over `actuate.config.json` (objects merge, anything else from `.dev.vars` wins), and the banner says the config came from both. Invalid JSON there stops `actuate dev` with a clear error (its position, not its text); an empty `ACTUATE_CONFIG=` is ignored. Without it, nothing changes. A merged config that fails validation is reported with both sources named. The committed-secret warning suggests it.
+  - **cli:** `actuate dev` hands every value from `.env`, `.dev.vars` and the config to wrangler as a secret (a generated `.actuate/.dev.vars`), so wrangler's startup banner shows them as `(hidden)` instead of printing them.
+  - **cli:** the deploy checks refuse actuator names starting with `actuate_`, which the hosted platform keeps for its built-in MCP tools (`actuate_get_run`, `actuate_list_runs`, `actuate_cancel_run`). Self-hosted actuators may still use them; `defineActuator` is unchanged.
+  - **cli:** `@actuate/cli/testing` does not redact secret config values, so tests can assert on the real ones.
+  - **create-actuate:** the starter's `AGENTS.md` says to mark API keys with `secret()` and set them in the dashboard.
+
+### Patch Changes
+
+- Updated dependencies [ebf7434]
+  - @actuate/sdk@0.4.0
+  - @actuate/runtime@0.4.0
+  - create-actuate@0.4.0
+  - @actuate/providers@0.4.0
+
 ## 0.3.0
 
 ### Minor Changes
