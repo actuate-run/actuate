@@ -1,8 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
-import { z, type Actuator, type Json, type Providers } from "@actuate/sdk";
+import { z, type Actuator, type Json, type OwnerNotifier, type Providers } from "@actuate/sdk";
 import { RunManager, type ApprovalRequest, type RunManagerOptions, type RunStatus } from "./manager.js";
 import { executePass } from "./pass.js";
 import { createHttpProvider } from "./providers.js";
+import { describeJsonError } from "./json-error.js";
+import { collectSecrets, mergeSecrets, redactSecrets } from "./secrets.js";
 import { durableObjectSql } from "./sql.js";
 import { approvalPage, toCsv } from "./http-util.js";
 
@@ -43,6 +45,12 @@ export interface RuntimeOptions<E extends RuntimeEnv = RuntimeEnv> {
    * `@actuate/providers` provides `parseProviderWebhookFromEnv` for this.
    */
   providerWebhook?: (kind: string, request: Request, env: E) => Promise<ProviderWebhookOutcome>;
+  /**
+   * Deliver `ctx.notifyOwner` messages (email, chat). Without one, a message goes to the run's log and the
+   * call resolves to `{ sent: false }`. `actuate dev` prints them. Secret config values are redacted before
+   * the notifier sees the text.
+   */
+  notifyOwner?: (env: E) => OwnerNotifier | undefined;
   /** Runtime guards passed to the RunManager (wait/retry limits, pass admission, event caps, max passes). */
   guards?: Pick<RunManagerOptions, "passLimits" | "admitPass" | "maxBufferedEvents" | "maxEventBytes" | "maxPasses" | "maxLogLinesPerPass">;
 }
@@ -124,6 +132,15 @@ export interface Runtime<E extends RuntimeEnv> {
   ActuatorObject: new (state: DurableObjectState, env: E) => ActuatorObjectInstance;
 }
 
+/** The config's JSON Schema (input side), or undefined when this schema has none to give. */
+function configJsonSchema(schema: z.ZodType): unknown {
+  try {
+    return z.toJSONSchema(schema, { io: "input", unrepresentable: "any" });
+  } catch {
+    return undefined;
+  }
+}
+
 type ProviderWebhookEvent = { event: string; payload: Json };
 /** What a provider webhook handler returns: events to deliver, none, or a plain-text handshake reply. */
 export type ProviderWebhookOutcome = ProviderWebhookEvent | ProviderWebhookEvent[] | { reply: string } | null;
@@ -137,6 +154,10 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
     private providers: Partial<Providers> = {};
     private config: unknown;
     private configError: string | null = null;
+    /** Values of the config's secret (writeOnly) fields, kept out of logs, errors and every run read. */
+    private secrets: string[] = [];
+    /** Built on first use; null when none is configured. */
+    private owner: OwnerNotifier | null | undefined;
 
     constructor(state: DurableObjectState, env: E) {
       super(state, env);
@@ -151,6 +172,7 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
         this.manager = new RunManager({
           ...options.guards,
           sql: durableObjectSql(state.storage),
+          secrets: () => this.secrets,
           approvalSecret: secret,
           approvalUrl: () => {
             if (!this.publicUrl) console.warn("[actuate] ACTUATE_PUBLIC_URL is not set, so approval links are relative. Set it to this actuator's origin.");
@@ -159,7 +181,7 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
           invoke: (request, journal) =>
             this.configError
               ? Promise.resolve({ status: "failed", error: { name: "ConfigError", message: this.configError } })
-              : executePass(actuator, request, { journal, config: this.config, providers: this.getProviders() }),
+              : executePass(actuator, request, { journal, config: this.config, providers: this.getProviders(), ...this.getOwner() }),
           notifyApproval: (req) => this.notifyApproval(req),
           scheduleWake: async (at) => {
             if (at === null) await state.storage.deleteAlarm();
@@ -169,14 +191,39 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
       });
     }
 
+    /**
+     * Parse and validate the config. configError is served on GET / (to run tokens too) and becomes every run's
+     * error, so it never carries a secret: the parser's message is left out (it quotes the text around the
+     * error), thrown messages are redacted with the raw config's secrets, and when those can't be known
+     * (a custom config(env) threw, or the schema has no JSON Schema) only the error's name is given.
+     */
     private loadConfig(): void {
+      const thrown = (what: string, err: unknown): string => {
+        console.error(`[actuate] ${what} threw:`, err);
+        return `Invalid configuration: ${what} threw ${err instanceof Error ? err.name : typeof err}. The error is in the worker's logs.`;
+      };
+      let raw: unknown;
       try {
-        const raw = options.config ? options.config(this.env) : JSON.parse(this.env.ACTUATE_CONFIG ?? "{}");
-        const parsed = configSchema.safeParse(raw);
-        if (parsed.success) this.config = parsed.data;
-        else this.configError = `Invalid configuration: ${parsed.error.message}`;
+        raw = options.config ? options.config(this.env) : JSON.parse(this.env.ACTUATE_CONFIG ?? "{}");
       } catch (err) {
-        this.configError = `Invalid ACTUATE_CONFIG: ${err instanceof Error ? err.message : String(err)}`;
+        if (options.config && !(err instanceof SyntaxError)) this.configError = thrown("config(env)", err);
+        else this.configError = `Invalid ACTUATE_CONFIG: it ${describeJsonError(err, options.config ? undefined : this.env.ACTUATE_CONFIG)}.`;
+        return;
+      }
+      const jsonSchema = configJsonSchema(configSchema);
+      // Secrets from the raw config first: an invalid config, or one whose transform throws, still holds them.
+      this.secrets = jsonSchema === undefined ? [] : collectSecrets(jsonSchema, raw);
+      try {
+        const parsed = configSchema.safeParse(raw);
+        if (parsed.success) {
+          this.config = parsed.data;
+          if (jsonSchema !== undefined) this.secrets = mergeSecrets(this.secrets, collectSecrets(jsonSchema, parsed.data));
+        } else this.configError = redactSecrets(`Invalid configuration: ${parsed.error.message}`, this.secrets);
+      } catch (err) {
+        this.configError =
+          jsonSchema === undefined
+            ? thrown("the config schema", err)
+            : redactSecrets(`Invalid configuration: ${err instanceof Error ? err.message : String(err)}`, this.secrets);
       }
     }
 
@@ -188,6 +235,18 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
         }
       }
       return this.providers;
+    }
+
+    /** The owner notifier, with secrets redacted from what it is given. */
+    private getOwner(): { owner?: OwnerNotifier } {
+      if (this.owner === undefined) {
+        const inner = options.notifyOwner?.(this.env);
+        const redact = (text: string) => redactSecrets(text, this.secrets);
+        this.owner = inner
+          ? { notify: (m) => inner.notify({ ...m, text: redact(m.text), ...(m.subject !== undefined ? { subject: redact(m.subject) } : {}) }) }
+          : null;
+      }
+      return this.owner ? { owner: this.owner } : {};
     }
 
     private async notifyApproval(req: ApprovalRequest): Promise<void> {
@@ -413,7 +472,7 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
         }
         return json({ error: "not found" }, 404);
       } catch (err) {
-        return json({ error: err instanceof Error ? err.message : String(err) }, 500);
+        return json({ error: m.redact(err instanceof Error ? err.message : String(err)) }, 500);
       }
     }
 

@@ -32,6 +32,7 @@ import {
   type LlmRequest,
   type LlmResponse,
   type MessagingSendOptions,
+  type OwnerNotification,
   type PaymentEvent,
   type Providers,
   type RefundRequest,
@@ -133,7 +134,8 @@ class TestDate extends RealDate {
 /**
  * Start a test of `actuator`. Every capability gets a recording fake unless
  * you replace it; inputs and config are validated with the actuator's schemas,
- * as the platform does.
+ * as the platform does. Unlike the platform and `actuate dev`, it does not redact
+ * `secret()` config values from runs, steps and logs, so tests can assert on real values.
  */
 export function testActuator<A extends Actuator>(actuator: A, options: TestActuatorOptions = {}): ActuatorTest<A> {
   return new ActuatorTest(actuator, options);
@@ -163,6 +165,8 @@ export class ActuatorTest<A extends Actuator = Actuator> {
   readonly llmReplies: string[];
   /** Requests made through `ctx.http` (clones, so you can read their bodies). */
   readonly requests: Request[] = [];
+  /** Messages sent through `ctx.notifyOwner` (each reported sent). */
+  readonly ownerNotifications: OwnerNotification[] = [];
   /** Approval and input requests as the runtime sent them, links included (see {@link followLink}). */
   readonly approvals: TestApprovalRequest[] = [];
   readonly manager: RunManager;
@@ -205,7 +209,7 @@ export class ActuatorTest<A extends Actuator = Actuator> {
       consoleLogs: options.logs ?? false,
       notifyApproval: async (request) => void this.approvals.push({ ...request, message: request.message ?? "" }),
       ...(this.plan ? planGuards(PLANS[this.plan]) : {}),
-      invoke: (request, journal) => executePass(guarded, request, { journal, config, providers }),
+      invoke: (request, journal) => executePass(guarded, request, { journal, config, providers, owner: { notify: async (m) => (this.ownerNotifications.push(m), { sent: true }) } }),
     });
     openHarnesses++;
     if (options.fakeDate !== false) globalThis.Date = TestDate as DateConstructor;

@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { describeJsonError, omitSecrets, secretFields } from "@actuate/runtime";
 import type { Actuator } from "@actuate/sdk";
 import { CliError, describePlan, resolvePlan, type ResolvedPlan } from "./account.js";
 import { ApiError, api, readCredentials, type Credentials } from "./api.js";
 import { checkSource, formatDiagnostic, type Diagnostic } from "./check.js";
+import { committedSecretIssue } from "./config-secrets.js";
 import { bundleActuator, describeActuator, loadActuator, type ActuatorMetadata } from "./load.js";
 import { platformChecks, type AccountFacts, type PlatformIssue } from "./platform-checks.js";
 
@@ -30,10 +32,12 @@ export interface DeployResponse {
 export function readConfigFile(cwd: string): { value: unknown } | { error: string } | undefined {
   const path = join(cwd, "actuate.config.json");
   if (!existsSync(path)) return undefined;
+  const text = readFileSync(path, "utf8");
   try {
-    return { value: JSON.parse(readFileSync(path, "utf8")) };
+    return { value: JSON.parse(text) };
   } catch (err) {
-    return { error: `actuate.config.json is not valid JSON: ${(err as Error).message}` };
+    // Never the parser's message: it quotes the text around the error, which may be part of a secret (and CI logs keep it).
+    return { error: `actuate.config.json ${describeJsonError(err, text)}` };
   }
 }
 
@@ -123,6 +127,17 @@ function canonical(value: unknown): string {
   );
 }
 
+/**
+ * Whether the file's configuration differs from the deployed one. The platform shows secret fields as `null`,
+ * so they are compared without them. A file that mentions a secret field at all (a value, `""` or `[]` to clear
+ * it, even `null`) is always sent, since there is no way to tell whether it changed; one that leaves every
+ * secret out is sent only for other changes, and the platform keeps the stored secrets.
+ */
+export function configChanged(configSchema: unknown, deployed: unknown, file: unknown): boolean {
+  if (secretFields(configSchema, file, { includeEmpty: true }).length) return true;
+  return canonical(omitSecrets(configSchema, deployed)) !== canonical(omitSecrets(configSchema, file));
+}
+
 export interface DeployChecks {
   prepared: Prepared;
   resolved: ResolvedPlan;
@@ -157,6 +172,10 @@ export async function deployChecks(
     ...(prepared.config ? { config: prepared.config } : {}),
     account: account.facts,
   });
+  // Read even with --no-config: the file is committed whether or not this deploy sends it.
+  const configFile = prepared.config ?? readConfigFile(cwd);
+  const committed = configFile && "value" in configFile ? committedSecretIssue(cwd, request.metadata.configSchema, configFile.value) : null;
+  if (committed) issues.push(committed);
   log(`Bundled ${request.metadata.name}: ${(bytes / 1024).toFixed(1)} KiB, sha256 ${request.codeHash.slice(0, 12)}`);
   log(
     `Deploy checks for the ${describePlan(resolved)}.${!creds ? " The provider, actuator-count and deploy-budget checks need a login (`actuate login`)." : opts.offline ? " Offline: the provider, actuator-count and deploy-budget checks were skipped." : ""}`,
@@ -225,15 +244,22 @@ export async function deploy(file: string, cwd: string, opts: DeployOptions): Pr
   if (deployed?.exists && deployed.codeHash === request.codeHash && !opts.force) {
     const name = encodeURIComponent(request.metadata.name);
     let action: "none" | "config" = "none";
+    // The platform may warn about the saved configuration (e.g. secrets dropped from a list whose length changed).
+    let warnings: string[] = [];
     if (request.config !== undefined) {
       const current = await api<{ config: unknown }>(creds!, `/v1/actuators/${name}/config`).catch(() => null);
-      if (!current || canonical(current.config) !== canonical(request.config)) {
-        await api(creds!, `/v1/actuators/${name}/config`, { method: "PUT", body: JSON.stringify({ config: request.config }) });
+      if (!current || configChanged(request.metadata.configSchema, current.config, request.config)) {
+        const saved = await api<{ warnings?: string[] } | null>(creds!, `/v1/actuators/${name}/config`, { method: "PUT", body: JSON.stringify({ config: request.config }) });
+        warnings = saved?.warnings ?? [];
         action = "config";
       }
     }
-    if (opts.json) out(JSON.stringify({ ok: true, ...summary, deployedNow: false, configUpdated: action === "config", version: deployed.version }, null, 2));
-    else if (action === "config") out(`\n✓ ${request.metadata.name} v${deployed.version} already runs this code: updated its configuration only (no deploy used).`);
+    if (opts.json) {
+      out(JSON.stringify({ ok: true, ...summary, deployedNow: false, configUpdated: action === "config", version: deployed.version, warnings }, null, 2));
+      return 0;
+    }
+    for (const w of warnings) out(`warn  ${w}`);
+    if (action === "config") out(`\n✓ ${request.metadata.name} v${deployed.version} already runs this code: updated its configuration only (no deploy used).`);
     else out(`\n✓ Nothing to deploy: ${request.metadata.name} v${deployed.version} already runs this code${request.config !== undefined ? " and configuration" : ""}. Pass --force to deploy anyway.`);
     return 0;
   }

@@ -11,6 +11,7 @@ import {
   type StepRow,
 } from "./journal.js";
 import { approvalEventKey } from "./pass.js";
+import { redactSecrets } from "./secrets.js";
 import { applySchema, type SqlDriver } from "./sql.js";
 import { signApproval, verifyApproval } from "./tokens.js";
 
@@ -96,6 +97,17 @@ export interface RunManagerOptions {
   maxBufferedEvents?: number;
   /** Largest event payload accepted, bytes of JSON. Default 64 KiB. */
   maxEventBytes?: number;
+  /**
+   * The values of the actuator's secret config fields (`collectSecrets(configJsonSchema, config)`), asked for
+   * whenever something is written or read. Each becomes `[secret]` in log lines, run and step errors (when
+   * written), and in everything the read methods return: `getRun`, `listRuns`, `getSteps`, `getLogs`, the
+   * approval queue and link pages, and the run `start` returns. Stored step outputs and run outputs stay as
+   * they were, so replay returns the real values (`journal()` reads them raw).
+   *
+   * Known limits: reads are redacted with the secrets configured now, so output stored before a secret was
+   * rotated shows the old value; user tables (`readTable`) are the actuator's own data and are not redacted.
+   */
+  secrets?: () => readonly string[];
 }
 
 /** Who made a human decision, and through what. */
@@ -247,7 +259,7 @@ export class RunManager {
     } else if (outcome.status === "failed") {
       this.sql.exec(
         `UPDATE _actuate_runs SET status = 'FAILED', error_json = ?, wake_at = NULL, passes = ?, updated_at = ? WHERE run_id = ?`,
-        [toJson(outcome.error), passes, now, runId],
+        [toJson(this.redact(outcome.error)), passes, now, runId],
       );
       this.bufferLog(runId, "error", outcome.error.message);
     } else {
@@ -376,7 +388,7 @@ export class RunManager {
       [claims.r, claims.s],
     )[0];
     if (!row) return null;
-    const data = fromJson<Record<string, unknown>>(row.output_json as string) ?? {};
+    const data = this.redact(fromJson<Record<string, unknown>>(row.output_json as string) ?? {});
     if (row.status === "WAITING_INPUT" && claims.d === 2) {
       return { kind: "input", step: claims.s, prompt: String(data.prompt ?? ""), initial: (data.initial as string | null) ?? null, maxLength: Number(data.maxLength ?? 4_000) };
     }
@@ -508,13 +520,15 @@ export class RunManager {
   }
 
   private writeStep(runId: string, row: StepRow): void {
+    // The error is shown as written (and thrown again on replay); the output stays raw for replay.
+    const error = row.error === null ? null : this.redact(row.error);
     this.sql.exec(
       `INSERT INTO _actuate_steps (run_id, step_name, status, output_json, wake_at, event, attempts, error, seq, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (run_id, step_name) DO UPDATE SET status = excluded.status, output_json = excluded.output_json,
          wake_at = excluded.wake_at, event = excluded.event, attempts = excluded.attempts, error = excluded.error,
          updated_at = excluded.updated_at`,
-      [runId, row.step_name, row.status, row.output_json, row.wake_at, row.event, row.attempts, row.error, ++this.seq + this.now() * 1000, this.now()],
+      [runId, row.step_name, row.status, row.output_json, row.wake_at, row.event, row.attempts, error, ++this.seq + this.now() * 1000, this.now()],
     );
   }
 
@@ -532,11 +546,13 @@ export class RunManager {
 
   private readonly logBuffers = new Map<string, LogRecord[]>();
 
-  /** Lines are held per run and written as one row when the pass settles. */
+  /** Lines are held per run and written as one row when the pass settles. Secrets are redacted before anything is cut short. */
   private bufferLog(runId: string, level: LogLevel, message: string, data?: Json): void {
     let lines = this.logBuffers.get(runId);
     if (!lines) this.logBuffers.set(runId, (lines = []));
     const max = this.options.maxLogLinesPerPass ?? 100;
+    message = this.redact(String(message));
+    if (data !== undefined) data = this.redact(fromJson(toJson(data)));
     if (lines.length < max) {
       let encoded = data === undefined ? null : toJson(data);
       if (encoded && encoded.length > 4096) encoded = toJson({ truncated: encoded.slice(0, 4000) });
@@ -610,7 +626,8 @@ export class RunManager {
       kind,
       ...links,
       expiresAt: opts.expiresAt,
-      ...(opts.message ? { message: opts.message } : {}),
+      // The approver may not be the owner: they see the message, not the secrets in it.
+      ...(opts.message ? { message: this.redact(opts.message) } : {}),
       ...(opts.notify ? { notify: opts.notify } : {}),
     };
     // Never log the links: run logs are readable by anything holding a run token (e.g. the agent being gated).
@@ -629,9 +646,15 @@ export class RunManager {
 
   // ---------------------------------------------------------------- reads
 
+  /** `value` with the actuator's secret config values replaced by `[secret]` (see {@link RunManagerOptions.secrets}). */
+  redact<T>(value: T): T {
+    const secrets = this.options.secrets?.();
+    return secrets?.length ? redactSecrets(value, secrets) : value;
+  }
+
   getRun(runId: string): RunRecord | null {
     const row = this.sql.exec(`SELECT * FROM _actuate_runs WHERE run_id = ?`, [runId])[0];
-    return row ? toRunRecord(row) : null;
+    return row ? this.redact(toRunRecord(row)) : null;
   }
 
   /**
@@ -650,11 +673,12 @@ export class RunManager {
         ORDER BY run_id DESC LIMIT ?`,
       [byId ? (opts.before as string) : Number(opts.before ?? Number.MAX_SAFE_INTEGER), opts.status ?? null, opts.status ?? null, limit],
     );
-    return rows.map(toRunRecord);
+    return this.redact(rows.map(toRunRecord));
   }
 
+  /** Step outputs as shown to people (redacted). Replay reads the raw rows through `journal()`. */
   getSteps(runId: string): StepRecord[] {
-    return this.sql.exec(`SELECT * FROM _actuate_steps WHERE run_id = ? ORDER BY seq`, [runId]).map((r) => ({
+    const steps = this.sql.exec(`SELECT * FROM _actuate_steps WHERE run_id = ? ORDER BY seq`, [runId]).map((r) => ({
       name: String(r.step_name),
       status: r.status as StepRow["status"],
       output: fromJson((r.output_json as string | null) ?? null),
@@ -664,12 +688,14 @@ export class RunManager {
       error: (r.error as string | null) ?? null,
       updatedAt: Number(r.updated_at),
     }));
+    return this.redact(steps);
   }
 
   getLogs(runId: string, limit = 500): LogRecord[] {
     const rows = this.sql.exec(`SELECT lines_json FROM _actuate_logs WHERE run_id = ? ORDER BY pass`, [runId]);
     const persisted = rows.flatMap((r) => fromJson<LogRecord[]>(r.lines_json as string));
-    return [...persisted, ...(this.logBuffers.get(runId) ?? [])].slice(0, limit);
+    // Lines are redacted when written; again here, for lines written before a secret was configured.
+    return this.redact([...persisted, ...(this.logBuffers.get(runId) ?? [])].slice(0, limit));
   }
 
   /** Steps waiting for a human decision, oldest first: the approval queue. */
@@ -684,7 +710,7 @@ export class RunManager {
     expiresAt: number | null;
     since: number;
   }> {
-    return this.sql
+    const pending = this.sql
       .exec(
         `SELECT run_id, step_name, status, output_json, wake_at, updated_at FROM _actuate_steps WHERE status IN ('WAITING_APPROVAL', 'WAITING_INPUT') ORDER BY updated_at`,
       )
@@ -703,6 +729,7 @@ export class RunManager {
         expiresAt: (r.wake_at as number | null) ?? null,
         since: Number(r.updated_at),
       }));
+    return this.redact(pending);
   }
 
   /** User tables in this actuator's database (excluding runtime, SQLite, Cloudflare and Miniflare internals). */

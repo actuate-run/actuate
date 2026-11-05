@@ -1,4 +1,8 @@
+import { copyFileSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 
 export interface Recorded {
@@ -34,4 +38,22 @@ export async function runCli(args: string[], cwd?: string) {
   const err: string[] = [];
   const code = await main(args, { out: (l) => out.push(l), err: (l) => err.push(l), ...(cwd ? { cwd } : {}) });
   return { code, out: out.join("\n"), err: err.join("\n") };
+}
+
+const secretFixture = fileURLToPath(new URL("./fixtures/secret-project", import.meta.url));
+
+/**
+ * A copy of the secret-project fixture with this actuate.config.json. By default next to the fixture, inside this
+ * repository's git work tree (so @actuate/sdk resolves); `outsideRepo` puts it in the OS temp folder, with
+ * @actuate/sdk linked in. Remove it after.
+ */
+export function secretProject(config: unknown, opts: { outsideRepo?: boolean } = {}): string {
+  const dir = opts.outsideRepo ? mkdtempSync(join(tmpdir(), "actuate-secret-")) : mkdtempSync(join(fileURLToPath(new URL("./fixtures", import.meta.url)), ".tmp-"));
+  copyFileSync(join(secretFixture, "actuator.ts"), join(dir, "actuator.ts"));
+  writeFileSync(join(dir, "actuate.config.json"), JSON.stringify(config));
+  if (opts.outsideRepo) {
+    mkdirSync(join(dir, "node_modules", "@actuate"), { recursive: true });
+    symlinkSync(fileURLToPath(new URL("../../sdk", import.meta.url)), join(dir, "node_modules", "@actuate", "sdk"), "dir");
+  }
+  return dir;
 }

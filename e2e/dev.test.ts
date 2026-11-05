@@ -12,6 +12,8 @@ import { workerBuildOptions } from "../packages/cli/src/load.js";
 const actuator = fileURLToPath(new URL("./fixtures/guarded.ts", import.meta.url));
 
 async function start(plan: "sandbox" | "maker" | null, opts: { refuseCapabilities?: boolean } = {}) {
+  /** What the worker printed: the terminal of `actuate dev`. */
+  const output = { text: "" };
   const out = await build({ ...workerBuildOptions, stdin: { contents: devEntry(actuator, 8787, plan, opts), resolveDir: process.cwd(), loader: "ts" }, write: false });
   const mf = new Miniflare({
     modules: true,
@@ -19,13 +21,14 @@ async function start(plan: "sandbox" | "maker" | null, opts: { refuseCapabilitie
     compatibilityDate: "2025-09-01",
     compatibilityFlags: ["nodejs_compat"],
     durableObjects: { ACTUATOR: { className: "ActuatorObject", useSQLite: true } },
-    bindings: { ACTUATE_DEV: "1" },
+    bindings: { ACTUATE_DEV: "1", ACTUATE_CONFIG: JSON.stringify({ apiKey: "sk_dev_secret_value" }) },
+    handleRuntimeStdio: (stdout) => stdout.on("data", (chunk: Buffer) => void (output.text += chunk.toString())),
   });
   const call = async (path: string, body?: unknown) => {
     const res = await mf.dispatchFetch(`http://localhost${path}`, body === undefined ? {} : { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" } });
     return res.json<any>();
   };
-  return { mf, call };
+  return { mf, call, output };
 }
 
 describe("actuate dev with the platform's guards (Sandbox)", () => {
@@ -86,6 +89,22 @@ describe("actuate dev --no-guards", () => {
     dev = await start(null);
   }, 60_000);
   afterAll(() => dev?.mf.dispose());
+
+  it("redacts secret config values from what it shows, as the platform does", async () => {
+    const run = await dev.call("/run", { mode: "leak" });
+    expect(run).toMatchObject({ status: "COMPLETED", output: "[secret]" });
+    const read = await dev.call(`/runs/${run.runId}`);
+    expect(read.logs.map((l: { message: string }) => l.message)).toContain("key [secret]");
+    expect(JSON.stringify([run, read, await dev.call("/runs")])).not.toContain("sk_dev_secret_value");
+  });
+
+  it("prints ctx.notifyOwner messages in the terminal, secrets redacted, and reports them sent", async () => {
+    const run = await dev.call("/run", { mode: "notify" });
+    expect(run).toMatchObject({ status: "COMPLETED", output: { sent: true } });
+    for (let i = 0; i < 50 && !dev.output.text.includes(run.runId); i++) await new Promise((r) => setTimeout(r, 50));
+    expect(dev.output.text).toContain(`📣  [owner notification: From dev]\nRun ${run.runId} with [secret]\n`);
+    expect(dev.output.text).not.toContain("sk_dev_secret_value");
+  });
 
   it("allows what the guards refuse, and still meters rows", async () => {
     expect(await dev.call("/run", { mode: "pragma" })).toMatchObject({ status: "COMPLETED", output: 2 });

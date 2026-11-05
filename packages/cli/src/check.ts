@@ -18,7 +18,7 @@ const WRITE_SQL = /^\s*(INSERT|UPDATE|DELETE|REPLACE)\b/i;
  *
  * Errors: `fetch`, provider calls (`ctx.payment.*` etc.), `Date.now()`,
  * `new Date()`, `Math.random()` and `crypto.randomUUID()` outside a step.
- * `ctx.db.commitWithStep()` outside a step.
+ * `ctx.db.commitWithStep()` and `ctx.notifyOwner()` outside a step.
  * Warnings: literal INSERT/UPDATE/DELETE through `ctx.db` outside a step, including
  * the entries of a `ctx.db.batch([...])`. A statement built with `ctx.db.statement`
  * isn't flagged on its own: building one has no effect until it is run.
@@ -57,6 +57,8 @@ export function checkSource(fileName: string, source: string): Diagnostic[] {
             report(node, "error", "no-provider-outside-step", `${ctxName}.${chain[1]}.${chain[2]}() must be called inside ctx.step.do.`);
           } else if (dotted === "Date.now" || dotted === "Math.random" || dotted === "crypto.randomUUID" || dotted === "performance.now") {
             report(node, "error", "no-nondeterminism-outside-step", `${dotted}() gives a different value on each replay. Compute it inside ctx.step.do.`);
+          } else if (chain[0] === ctxName && chain[1] === "notifyOwner" && chain.length === 2) {
+            report(node, "error", "no-notify-outside-step", `${ctxName}.notifyOwner() sends a message, so it must be called inside ctx.step.do; otherwise it repeats on every replay.`);
           } else if (chain[0] === ctxName && chain[1] === "db" && chain[2] === "commitWithStep" && chain.length === 3) {
             report(node, "error", "no-commit-outside-step", `${ctxName}.db.commitWithStep() queues writes for the step that is running, so it must be called inside ctx.step.do.`);
           } else if (chain[0] === ctxName && chain[1] === "db" && chain[2] === "batch" && chain.length === 3) {

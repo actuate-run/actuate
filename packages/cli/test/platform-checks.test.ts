@@ -91,6 +91,20 @@ describe("platform deploy checks", () => {
     expect(check(def, { config: { error: "actuate.config.json is not valid JSON: x" } })).toEqual(["error:config:actuate.config.json is not valid JSON: x"]);
   });
 
+  it("names every source of a merged config that fails validation", () => {
+    const def = { ...base, config: z.object({ greeting: z.string() }) };
+    expect(check(def, { config: { value: { greeting: 3 } }, configSource: "actuate.config.json with ACTUATE_CONFIG in .dev.vars" })).toEqual([
+      "error:config:Invalid config in actuate.config.json with ACTUATE_CONFIG in .dev.vars:\n  greeting: Invalid input: expected string, received number",
+    ]);
+  });
+
+  it("refuses names starting with actuate_, which the platform keeps for its own tools", () => {
+    expect(check({ ...base, name: "actuate_helper" })).toEqual([
+      'error:name:Actuator names starting with "actuate_" are reserved for Actuate\'s built-in tools (actuate_get_run, actuate_list_runs, actuate_cancel_run). Rename it.',
+    ]);
+    expect(check({ ...base, name: "actuated_helper" })).toEqual([]);
+  });
+
   it("checks the account: providers, actuator count, deploys left", () => {
     const def = { ...base, capabilities: ["messaging", "payment"] };
     const maker = { plan: PLANS.maker };

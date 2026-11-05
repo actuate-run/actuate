@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { fakePayment } from "../src/index.js";
+import { consoleOwnerNotifier, fakePayment } from "../src/index.js";
+
+describe("consoleOwnerNotifier (actuate dev)", () => {
+  it("prints the message where the developer sees it, and reports it sent", async () => {
+    const lines: string[] = [];
+    const owner = consoleOwnerNotifier((l) => lines.push(l));
+    const base = { runId: "run_1", actuator: "a", idempotencyKey: "run_1:s:notifyOwner:0" };
+    expect(await owner.notify({ ...base, text: "3 refunds are waiting", subject: "Refunds" })).toEqual({ sent: true });
+    expect(await owner.notify({ ...base, text: "No subject" })).toEqual({ sent: true });
+    expect(lines).toEqual(["\n📣  [owner notification: Refunds]\n3 refunds are waiting\n", "\n📣  [owner notification]\nNo subject\n"]);
+  });
+});
 
 describe("fakePayment (actuate dev)", () => {
   it("creates bills paid through the local events route", async () => {

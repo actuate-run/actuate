@@ -221,7 +221,9 @@ Alongside the tests, actuator.ts's deploy checks run locally (no network, not in
     name: "check",
     usage: "actuate check [file] [--platform] [--plan <plan>] [--offline] [--json]",
     summary: "Lint for replay safety; with --platform, also run the platform's deploy checks",
-    description: `Replay safety: side effects and non-determinism outside ctx.step.do (fetch, provider calls, Date.now(), new Date(), Math.random(), crypto.randomUUID(); writes through ctx.db as warnings).
+    description: `Replay safety: side effects and non-determinism outside ctx.step.do (fetch, provider calls, ctx.notifyOwner(), Date.now(), new Date(), Math.random(), crypto.randomUUID(); writes through ctx.db as warnings).
+
+Also warns when actuate.config.json sets a secret config field (secret() in the schema) and git would commit the file: set secrets in the dashboard (Config tab) instead.
 
 --platform also bundles the actuator and runs the hosted platform's deploy checks locally, so a deploy that would be refused (and still count against your deploy budget) stops here: bundle size, cron count and frequency for the plan, the cron input, http.allow, regexes in the input schema, capabilities on the plan, actuate.config.json against the config schema; logged in, also providers set up, actuator count and deploys left this month. They mirror the platform's rules; the platform has the final say.`,
     options: {
@@ -242,6 +244,12 @@ Alongside the tests, actuator.ts's deploy checks run locally (no network, not in
         throw new CliError(`${file} not found. Run this in your project folder, or pass the actuator file.`);
       }
       const diagnostics = checkSource(file, source);
+      // --platform reports it with the deploy checks.
+      if (!values.platform && values.plan === undefined && !values.offline) {
+        const { committedSecretDiagnostic } = await import("./config-secrets.js");
+        const committed = await committedSecretDiagnostic(cwd, file);
+        if (committed) diagnostics.push(committed);
+      }
       let errors = diagnostics.filter((d) => d.severity === "error").length;
       let warnings = diagnostics.length - errors;
       // --plan only means something for the deploy checks, so it implies --platform.

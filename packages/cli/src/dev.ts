@@ -4,6 +4,8 @@ import { join, resolve } from "node:path";
 import { context } from "esbuild";
 import { CliError, describePlan, planHint, type ResolvedPlan } from "./account.js";
 import { checkSource, formatDiagnostic } from "./check.js";
+import { describeJsonError } from "@actuate/runtime";
+import { committedSecretIssue } from "./config-secrets.js";
 import { readConfigFile, formatIssue } from "./deploy.js";
 import { bundleActuator, cliResolve, describeActuator, loadActuator, ownModule, packageDir, workerBuildOptions } from "./load.js";
 import type { PlanId } from "./plans.js";
@@ -33,6 +35,95 @@ export function parseEnvFile(text: string): Record<string, string> {
   return vars;
 }
 
+export interface DevConfig {
+  /** The configuration as the deploy checks see it; undefined when there is none. */
+  config?: { value: unknown } | { error: string };
+  /** What ACTUATE_CONFIG becomes; undefined leaves whatever .env or .dev.vars set. */
+  text?: string;
+  /** Where it came from, in order of precedence (lowest first). */
+  sources: string[];
+}
+
+const DEV_VARS_SOURCE = "ACTUATE_CONFIG in .dev.vars";
+
+/** Objects merge key by key; anything else from `over` replaces `base`. */
+export function mergeConfig(base: unknown, over: unknown): unknown {
+  const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+  if (!isObject(base) || !isObject(over)) return over;
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(over)) {
+    // defineProperty: a "__proto__" key from JSON stays a plain key instead of changing the prototype.
+    Object.defineProperty(out, key, { value: Object.hasOwn(base, key) ? mergeConfig(base[key], value) : value, enumerable: true, writable: true, configurable: true });
+  }
+  return out;
+}
+
+/**
+ * The configuration `actuate dev` runs with: actuate.config.json, with ACTUATE_CONFIG from the git-ignored
+ * .dev.vars (a JSON object) deep-merged over it, so local secrets stay out of the committed file. Without
+ * ACTUATE_CONFIG in .dev.vars, the file alone, as before.
+ */
+export function devConfig(cwd: string): DevConfig {
+  const file = readConfigFile(cwd);
+  const devVars = join(cwd, ".dev.vars");
+  const set = existsSync(devVars) ? parseEnvFile(readFileSync(devVars, "utf8")).ACTUATE_CONFIG : undefined;
+  // An empty ACTUATE_CONFIG= is a placeholder, not a config.
+  const local = set?.trim() ? set : undefined;
+  if (local === undefined) {
+    return file ? { config: file, text: readFileSync(join(cwd, "actuate.config.json"), "utf8"), sources: ["actuate.config.json"] } : { sources: [] };
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(local);
+  } catch (err) {
+    // Never the parser's message: it quotes the text around the error, which may be part of a secret.
+    throw new CliError(`ACTUATE_CONFIG in .dev.vars ${describeJsonError(err, local)}. Write the object on one line: ACTUATE_CONFIG={"apiKey":"sk_test_..."}`);
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new CliError(`ACTUATE_CONFIG in .dev.vars must be a JSON object, like {"apiKey":"sk_test_..."}; it is merged over actuate.config.json.`);
+  }
+  if (file && "error" in file) throw new CliError(`${file.error}. Fix it: ACTUATE_CONFIG in .dev.vars is merged over it.`);
+  const merged = file ? mergeConfig(file.value, value) : value;
+  return { config: { value: merged }, text: JSON.stringify(merged), sources: file ? ["actuate.config.json", DEV_VARS_SOURCE] : [DEV_VARS_SOURCE] };
+}
+
+/** The configuration's sources, as the deploy checks name them in an error. */
+export function configSourceName(sources: readonly string[]): string {
+  return sources.length ? sources.join(" with ") : "actuate.config.json";
+}
+
+/**
+ * The variables from .env, .dev.vars and the config, as a .dev.vars file for wrangler next to the generated
+ * wrangler.json. Wrangler loads that file as secrets and prints them as "(hidden)"; "vars" in wrangler.json
+ * it prints in full, config secrets and provider tokens included. Each value is quoted so wrangler's dotenv
+ * parser reads it back unchanged: single quotes, else backticks, else double quotes (which it would expand
+ * \n in, so only when there is no backslash). A JSON ACTUATE_CONFIG is rewritten on one line with \u0027 and
+ * \u0060 for quotes, which means the same JSON.
+ */
+export function wranglerSecrets(vars: Record<string, string>): string {
+  const lines: string[] = [];
+  for (const [key, raw] of Object.entries(vars)) {
+    let value = raw;
+    if (key === "ACTUATE_CONFIG") {
+      try {
+        value = JSON.stringify(JSON.parse(raw)).replace(/'/g, "\\u0027").replace(/`/g, "\\u0060");
+      } catch {
+        // Not JSON: passed as written; the runtime reports it.
+      }
+    }
+    const quote = !value.includes("'") ? "'" : !value.includes("`") ? "`" : !value.includes('"') && !value.includes("\\") ? '"' : null;
+    if (!quote) throw new CliError(`${key} in .env or .dev.vars has every kind of quote (' \` "), so actuate dev can't pass it to wrangler. Remove one kind.`);
+    lines.push(`${key}=${quote}${value}${quote}`);
+  }
+  return lines.length ? `${lines.join("\n")}\n` : "";
+}
+
+/** The banner line saying where the configuration came from, when .dev.vars contributed to it. */
+export function configBannerLine(sources: readonly string[]): string | null {
+  if (!sources.includes(DEV_VARS_SOURCE)) return null;
+  return sources.length > 1 ? `actuate.config.json, with ${DEV_VARS_SOURCE} merged over it` : DEV_VARS_SOURCE;
+}
+
 export function wranglerConfig(meta: { name: string; cron: string[] }, vars: Record<string, string>): object {
   return {
     $schema: "https://unpkg.com/wrangler/config-schema.json",
@@ -51,7 +142,7 @@ export function wranglerConfig(meta: { name: string; cron: string[] }, vars: Rec
 /** The worker `actuate dev` runs. `plan` picks the platform guards; null turns them off. */
 export function devEntry(actuatorPath: string, port: number, plan: PlanId | null = null, opts: { refuseCapabilities?: boolean } = {}): string {
   return `import { createDevRuntime } from ${JSON.stringify(ownModule("dev-runtime"))};
-import { devProviders } from ${JSON.stringify(cliResolve("@actuate/runtime"))};
+import { consoleOwnerNotifier, devProviders } from ${JSON.stringify(cliResolve("@actuate/runtime"))};
 import { providersFromEnv, parseProviderWebhookFromEnv } from ${JSON.stringify(cliResolve("@actuate/providers"))};
 import actuator from ${JSON.stringify(actuatorPath)};
 
@@ -64,6 +155,8 @@ const runtime = createDevRuntime(actuator, {
     return { ...devProviders(base), ...providersFromEnv(env, base) };
   },
   providerWebhook: (kind, request, env) => parseProviderWebhookFromEnv(env, kind, request),
+  // ctx.notifyOwner prints here; the hosted platform emails the account.
+  notifyOwner: () => consoleOwnerNotifier(),
 });
 export default runtime.worker;
 export const ActuatorObject = runtime.ActuatorObject;
@@ -81,11 +174,16 @@ export async function dev(options: DevOptions): Promise<void> {
   const actuator = await loadActuator(file, join(outDir, "tmp"));
   const meta = describeActuator(actuator);
   // The deploy checks, as warnings: better to hear about them now than at deploy time.
-  const config = readConfigFile(options.cwd);
+  const configured = devConfig(options.cwd);
+  const config = configured.config;
   const guardsOn = options.guards !== false;
   const bundleBytes = Buffer.byteLength(await bundleActuator(file));
   const defaulted = options.plan.source === "default";
-  const issues = platformChecks({ metadata: meta, actuator, plan: options.plan.plan, planDefaulted: defaulted, bundleBytes, ...(config ? { config } : {}) });
+  const issues = platformChecks({ metadata: meta, actuator, plan: options.plan.plan, planDefaulted: defaulted, bundleBytes, ...(config ? { config, configSource: configSourceName(configured.sources) } : {}) });
+  // The committed file only (not what .dev.vars adds), as actuate check and deploy see it.
+  const committedFile = readConfigFile(options.cwd);
+  const committed = committedFile && "value" in committedFile ? committedSecretIssue(options.cwd, meta.configSchema, committedFile.value) : null;
+  if (committed) issues.push(committed);
   const missing = meta.capabilities.filter((c) => !options.plan.plan.capabilities.includes(c as never));
   for (const i of issues) if (!(missing.length && i.rule === "plan-capability" && i.severity !== "warning")) console.log(`deploy check  ${formatIssue(i)}`);
   // Capabilities the plan lacks are refused only for a plan someone chose: a guessed Sandbox mustn't break a fresh template.
@@ -103,12 +201,14 @@ export async function dev(options: DevOptions): Promise<void> {
     const p = join(options.cwd, envFile);
     if (existsSync(p)) Object.assign(vars, parseEnvFile(readFileSync(p, "utf8")));
   }
-  const configFile = join(options.cwd, "actuate.config.json");
-  if (existsSync(configFile)) vars.ACTUATE_CONFIG = readFileSync(configFile, "utf8");
-  vars.ACTUATE_DEV = "1"; // local only: admin routes and webhooks work without secrets
+  if (configured.text !== undefined) vars.ACTUATE_CONFIG = configured.text;
+  delete vars.ACTUATE_DEV;
 
   writeFileSync(join(outDir, "entry.ts"), devEntry(file, options.port, guardsOn ? options.plan.plan.id : null, { refuseCapabilities }));
-  writeFileSync(join(outDir, "wrangler.json"), JSON.stringify(wranglerConfig(meta, vars), null, 2));
+  // Everything from .env, .dev.vars and the config goes to wrangler as a secret, so its startup banner shows "(hidden)".
+  writeFileSync(join(outDir, ".dev.vars"), wranglerSecrets(vars), { mode: 0o600 });
+  // Local only: admin routes and webhooks work without secrets.
+  writeFileSync(join(outDir, "wrangler.json"), JSON.stringify(wranglerConfig(meta, { ACTUATE_DEV: "1" }), null, 2));
 
   const ctx = await context({
     ...workerBuildOptions,
@@ -139,7 +239,7 @@ export async function dev(options: DevOptions): Promise<void> {
   Post an event:   npx actuate event <key> '{}' ${local}
   Tables:          curl localhost:${options.port}/tables
   Platform guards: ${guards}
-  ${meta.capabilities.filter((c) => c !== "http").length ? "Providers not set in .dev.vars print to this console (see `actuate providers`)." : ""}
+${configBannerLine(configured.sources) ? `  Config:          ${configBannerLine(configured.sources)}\n` : ""}  ${meta.capabilities.filter((c) => c !== "http").length ? "Providers not set in .dev.vars print to this console (see `actuate providers`)." : ""}
 `);
 
   const wrangler = join(packageDir("wrangler"), "bin", "wrangler.js");

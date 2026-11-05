@@ -1,13 +1,14 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { deploy, prepareDeploy } from "../src/deploy.js";
-import { fakeServer, runCli } from "./helpers.js";
+import { configChanged, deploy, prepareDeploy } from "../src/deploy.js";
+import { fakeServer, runCli, secretProject } from "./helpers.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/project", import.meta.url));
 const quiet = () => {};
+
 
 const me = (deploys = 3, plan = "maker") => ({ email: "a@b.test", plan, usage: { deploys } });
 const deployed = { id: "act_1", name: "fixture_greeter", version: 4, urls: { api: "a", webhook: "w", mcp: "m", openapi: "o", dashboard: "d" } };
@@ -101,6 +102,16 @@ describe("actuate deploy", () => {
     } finally {
       await changed.close();
     }
+    const warn = "Secrets in a list whose length changed are not kept (webhooks): enter them again.";
+    const warned = await fakeServer({ ...routes({ greeting: "Hello" }), "PUT /v1/actuators/fixture_greeter/config": { ok: true, warnings: [warn] } });
+    login(warned.url);
+    try {
+      expect((await runCli(["deploy"], fixture)).out).toContain(`warn  ${warn}`);
+      const json = await runCli(["deploy", "--json"], fixture);
+      expect(JSON.parse(json.out)).toMatchObject({ configUpdated: true, warnings: [warn] });
+    } finally {
+      await warned.close();
+    }
     const same = await fakeServer(routes({ greeting: "Hi" }));
     login(same.url);
     try {
@@ -109,6 +120,63 @@ describe("actuate deploy", () => {
     } finally {
       await same.close();
     }
+  });
+
+  it("compares the configuration without its secret fields, and sends a secret the file holds", async () => {
+    const project = secretProject({ greeting: "Hi" });
+    try {
+      const { codeHash } = await prepareDeploy("actuator.ts", project, true, quiet);
+      const routes = (config: unknown) => ({
+        "GET /v1/me": me(),
+        "GET /v1/providers": [],
+        "GET /v1/actuators/fixture_secret": { version: 2, versions: [{ version: 2, code_hash: codeHash }] },
+        "GET /v1/actuators/fixture_secret/config": { config },
+        "PUT /v1/actuators/fixture_secret/config": { ok: true },
+      });
+      // The platform shows stored secrets as null: that is not a change.
+      const masked = await fakeServer(routes({ greeting: "Hi", apiKey: null, webhook: { token: null } }));
+      login(masked.url);
+      try {
+        expect((await runCli(["deploy"], project)).out).toContain("Nothing to deploy: fixture_secret v2 already runs this code and configuration");
+        expect(masked.requests.some((r) => r.method === "PUT")).toBe(false);
+      } finally {
+        await masked.close();
+      }
+      // A change elsewhere is sent, with the secrets left out as the file leaves them out (the platform keeps them).
+      const changed = await fakeServer(routes({ greeting: "Hello", apiKey: null }));
+      login(changed.url);
+      try {
+        expect((await runCli(["deploy"], project)).out).toContain("updated its configuration only");
+        expect(changed.requests.find((r) => r.method === "PUT")?.body).toEqual({ config: { greeting: "Hi" } });
+      } finally {
+        await changed.close();
+      }
+      // A secret in the file can't be compared with a masked one: it is always sent.
+      writeFileSync(join(project, "actuate.config.json"), JSON.stringify({ greeting: "Hi", webhook: { token: "whk_file_token" } }));
+      const withSecret = await fakeServer(routes({ greeting: "Hi", apiKey: null, webhook: { token: null } }));
+      login(withSecret.url);
+      try {
+        expect((await runCli(["deploy"], project)).code).toBe(0);
+        expect(withSecret.requests.find((r) => r.method === "PUT")?.body).toEqual({ config: { greeting: "Hi", webhook: { token: "whk_file_token" } } });
+      } finally {
+        await withSecret.close();
+      }
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("configChanged ignores secret fields on both sides", () => {
+    const schema = { type: "object", properties: { a: { type: "string" }, k: { type: "string", writeOnly: true } } };
+    expect(configChanged(schema, { a: "x", k: null }, { a: "x" })).toBe(false);
+    expect(configChanged(schema, { a: "x", k: null }, { a: "y" })).toBe(true);
+    // A secret the file mentions is always sent, even to clear it; one it leaves out never is.
+    expect(configChanged(schema, { a: "x", k: null }, { a: "x", k: "" })).toBe(true);
+    expect(configChanged(schema, { a: "x", k: null }, { a: "x", k: null })).toBe(true);
+    const list = { type: "object", properties: { tokens: { type: "array", items: { type: "string", writeOnly: true } } } };
+    expect(configChanged(list, { tokens: [null, null] }, { tokens: [] })).toBe(true);
+    expect(configChanged(list, { tokens: [null, null] }, {})).toBe(false);
+    expect(configChanged(schema, { a: "x", k: null }, { a: "x", k: "new-key" })).toBe(true);
   });
 
   it("--force deploys anyway, and account lookups that fail only skip their checks", async () => {

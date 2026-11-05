@@ -8,6 +8,7 @@ import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 let mf: Miniflare;
+let script: string;
 const base = "http://actuate.test";
 
 async function call(path: string, init?: RequestInit & { json?: unknown }) {
@@ -46,13 +47,14 @@ beforeAll(async () => {
     mainFields: ["module", "main"],
     write: false,
   });
+  script = out.outputFiles[0]!.text;
   mf = new Miniflare({
     modules: true,
-    script: out.outputFiles[0]!.text,
+    script,
     compatibilityDate: "2025-09-01",
     compatibilityFlags: ["nodejs_compat"],
     durableObjects: { ACTUATOR: { className: "ActuatorObject", useSQLite: true } },
-    bindings: { ACTUATE_CONFIG: JSON.stringify({ greeting: "Hello" }), ACTUATE_TOKEN: "admin", ACTUATE_RUN_TOKEN: "agent", ACTUATE_WEBHOOK_SECRET: "whs_test" },
+    bindings: { ACTUATE_CONFIG: JSON.stringify({ greeting: "Hello", apiKey: "sk_e2e_secret_value" }), ACTUATE_TOKEN: "admin", ACTUATE_RUN_TOKEN: "agent", ACTUATE_WEBHOOK_SECRET: "whs_test" },
   });
 }, 60_000);
 
@@ -193,6 +195,34 @@ describe("self-hosted runtime on workerd", () => {
     expect((await call(`/runs/${started.body.runId}`, { headers: auth })).body.output).toEqual({ status: "Because" });
   });
 
+  it("keeps secret config values out of every run read, while the run itself sees the real value", async () => {
+    const secret = "sk_e2e_secret_value";
+    const done = await call("/run", { headers: auth, json: { name: "Sam", mode: "leak" } });
+    expect(done.body).toMatchObject({ status: "COMPLETED", output: { key: "[secret]", same: true } });
+    const failed = await call("/run", { headers: agentAuth, json: { name: "fail", mode: "leak" } });
+    expect(failed.body).toMatchObject({ status: "FAILED", error: { message: "refused [secret]" } });
+
+    const reads = await Promise.all([
+      call(`/runs/${done.body.runId}`, { headers: auth }),
+      call(`/runs/${done.body.runId}`, { headers: agentAuth }),
+      call(`/runs/${failed.body.runId}`, { headers: auth }),
+      call("/runs", { headers: auth }),
+    ]);
+    const run = reads[0]!.body;
+    expect(run.steps.find((s: { name: string }) => s.name === "read-key").output).toBe("[secret]");
+    expect(run.logs.map((l: { message: string }) => l.message)).toContain("key is [secret]");
+    for (const read of [done, failed, ...reads]) expect(JSON.stringify(read.body)).not.toContain(secret);
+    // The config's JSON Schema marks the field, so other tools can tell it is secret.
+    expect((await call("/", { headers: auth })).body.config.properties.apiKey).toMatchObject({ writeOnly: true });
+  });
+
+  it("hands ctx.notifyOwner messages to the notifier createRuntime was given, secrets redacted", async () => {
+    const res = await call("/run", { headers: auth, json: { name: "Ana", mode: "notify" } });
+    expect(res.body).toMatchObject({ status: "COMPLETED", output: { sent: false, reason: "Heads up / redacted / keyed" } });
+    const run = await call(`/runs/${res.body.runId}`, { headers: auth });
+    expect(run.body.logs).toMatchObject([{ level: "warn", message: "Owner notification not sent: Heads up / redacted / keyed" }]);
+  });
+
   it("accepts webhooks by secret or signature, and dedupes signed replays by signature", async () => {
     const body = JSON.stringify({ name: "Hook", mode: "sleep" });
     const post = (headers: Record<string, string>, b = body) =>
@@ -212,5 +242,92 @@ describe("self-hosted runtime on workerd", () => {
     expect(replay.status).toBe(200);
     expect(((await replay.json()) as { runId: string }).runId).toBe(runId);
     expect((await post({ "x-hub-signature-256": `sha256=${mac}` }, body + " ")).status).toBe(401);
+  });
+});
+
+describe("a malformed ACTUATE_CONFIG", () => {
+  it("is reported by position, never by quoting the text around the error", async () => {
+    const bad = new Miniflare({
+      modules: true,
+      script,
+      compatibilityDate: "2025-09-01",
+      compatibilityFlags: ["nodejs_compat"],
+      durableObjects: { ACTUATOR: { className: "ActuatorObject", useSQLite: true } },
+      bindings: { ACTUATE_CONFIG: '{"apiKey": sk_live_PARTIAL_SECRET}', ACTUATE_TOKEN: "admin", ACTUATE_RUN_TOKEN: "agent" },
+    });
+    try {
+      const get = async (path: string, init: RequestInit = {}) => (await bad.dispatchFetch(`${base}${path}`, init as never)).json<any>();
+      const info = await get("/", { headers: agentAuth });
+      expect(info.configError).toMatch(/^Invalid ACTUATE_CONFIG: it is not valid JSON( \(line 1, column \d+\))?\.$/);
+      const run = await get("/run", { method: "POST", body: JSON.stringify({ name: "A", mode: "sleep" }), headers: { ...agentAuth, "content-type": "application/json" } });
+      expect(run).toMatchObject({ status: "FAILED", error: { message: info.configError } });
+      expect(JSON.stringify([info, run, await get("/runs", { headers: auth })])).not.toContain("sk_live");
+    } finally {
+      await bad.dispose();
+    }
+  });
+});
+
+describe("a config that throws while loading", () => {
+  async function serve(className: string) {
+    const out = await build({
+      entryPoints: [fileURLToPath(new URL("./fixtures/config-errors-entry.ts", import.meta.url))],
+      bundle: true,
+      format: "esm",
+      platform: "neutral",
+      target: "es2022",
+      external: ["cloudflare:workers"],
+      conditions: ["workerd", "worker", "import"],
+      mainFields: ["module", "main"],
+      write: false,
+    });
+    return new Miniflare({
+      modules: true,
+      script: out.outputFiles[0]!.text,
+      compatibilityDate: "2025-09-01",
+      compatibilityFlags: ["nodejs_compat"],
+      durableObjects: { ACTUATOR: { className, useSQLite: true } },
+      bindings: { ACTUATE_CONFIG: JSON.stringify({ apiKey: "sk_live_RAW_CONFIG_SECRET" }), ACTUATE_TOKEN: "admin", ACTUATE_RUN_TOKEN: "agent" },
+    });
+  }
+  const reads = async (mf: Miniflare, describe = true) => {
+    const get = async (path: string, init: RequestInit = {}) => (await mf.dispatchFetch(`${base}${path}`, init as never)).json<any>();
+    const run = await get("/run", { method: "POST", body: "{}", headers: { ...agentAuth, "content-type": "application/json" } });
+    return { run, info: describe ? await get("/", { headers: agentAuth }) : null };
+  };
+
+  it("redacts a schema transform's error with the secrets of the raw config", async () => {
+    const mf = await serve("TransformObject");
+    try {
+      const { run, info } = await reads(mf);
+      expect(info.configError).toBe("Invalid configuration: cannot use [secret]");
+      expect(run).toMatchObject({ status: "FAILED", error: { message: "Invalid configuration: cannot use [secret]" } });
+    } finally {
+      await mf.dispose();
+    }
+  });
+
+  it("does not echo what a custom config(env) threw", async () => {
+    const mf = await serve("CustomConfigObject");
+    try {
+      const { run, info } = await reads(mf);
+      expect(info.configError).toBe("Invalid configuration: config(env) threw TypeError. The error is in the worker's logs.");
+      expect(run.error.message).toBe(info.configError);
+      expect(JSON.stringify([run, info])).not.toContain("sk_live");
+    } finally {
+      await mf.dispose();
+    }
+  });
+
+  it("does not echo what an unreadable schema threw", async () => {
+    const mf = await serve("UnreadableObject");
+    try {
+      // GET / can't describe this schema either; the run says why the config failed.
+      const { run } = await reads(mf, false);
+      expect(run).toMatchObject({ status: "FAILED", error: { message: "Invalid configuration: the config schema threw RangeError. The error is in the worker's logs." } });
+      expect(JSON.stringify(run)).not.toContain("sk_live");
+    } finally {
+      await mf.dispose();
+    }
   });
 });

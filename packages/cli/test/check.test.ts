@@ -79,6 +79,16 @@ describe("replay-safety linter", () => {
     ).toEqual(["warning:db-write-outside-step", "warning:db-write-outside-step", "error:no-commit-outside-step"]);
   });
 
+  it("knows ctx.notifyOwner", () => {
+    expect(
+      rules(
+        wrap(`
+      await ctx.notifyOwner("outside");
+      await ctx.step.do("ok", () => ctx.notifyOwner("inside", { subject: "s" }));`),
+      ),
+    ).toEqual(["error:no-notify-outside-step"]);
+  });
+
   it("reports line and column", () => {
     const [d] = checkSource("a.ts", wrap(`await fetch("x");`));
     expect(d).toMatchObject({ line: 6, column: 7 });
