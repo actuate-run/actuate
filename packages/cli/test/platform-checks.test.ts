@@ -26,10 +26,12 @@ describe("platform deploy checks", () => {
       plain: z.string().default("no"),
       nested: z.object({ token: secret(z.string()) }).default({ token: "abc" }),
       unset: secret(z.string().optional()),
+      // A secret object with a default: its short field is reported once, at the field.
+      hook: secret(z.object({ id: z.string(), token: z.string() })).default({ id: "h", token: "sk_test_123456" }),
     });
     const issues = check({ ...base, config } as never).filter((i) => i.includes(":secret-default-not-redacted:"));
     const paths = issues.map((i) => /Secret field "([^"]+)"/.exec(i)![1]).sort();
-    expect(paths).toEqual(["flag", "nested.token", "pin", "shortNumber"]);
+    expect(paths).toEqual(["flag", "hook.id", "nested.token", "pin", "shortNumber"]);
     expect(issues[0]).toMatch(/^warning:secret-default-not-redacted:Secret field ".+" has a default that is never redacted \(booleans and values shorter than 6 characters are not\)\. Remove the default, or set the value in the dashboard instead\.$/);
     expect(check({ ...base, config: z.object({ key: secret(z.string()), on: z.boolean().default(true) }) } as never)).toEqual([]);
   });

@@ -75,7 +75,9 @@ export function unredactedSecretDefaults(configSchema: unknown): string[] {
     const nextSeen = typeof raw.$ref === "string" ? new Set(seen).add(raw.$ref) : seen;
     const isSecret = secret || node.writeOnly === true;
     const fallback = "default" in node ? node.default : inherited;
-    if (isSecret && fallback !== undefined && unredacted(fallback)) found.add(path);
+    // Report each value once, where it sits: an object with declared properties is checked through them.
+    const checkedBelow = isNode(fallback) && isNode(node.properties);
+    if (isSecret && fallback !== undefined && !checkedBelow && unredacted(fallback)) found.add(path);
     for (const key of ["anyOf", "oneOf", "allOf"]) {
       const list = node[key];
       if (Array.isArray(list)) for (const sub of list) walk(sub, path, isSecret, fallback, nextSeen);
