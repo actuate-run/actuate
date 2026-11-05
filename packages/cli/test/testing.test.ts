@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
-import { defineActuator, z, type Actuator } from "@actuate/sdk";
+import { defineActuator, secret, z, type Actuator } from "@actuate/sdk";
 import { TEST_START, testActuator, type ActuatorTest, type TestActuatorOptions } from "../src/testing.js";
 
 const open: Array<() => void> = [];
@@ -232,6 +232,52 @@ describe("testActuator", () => {
     expect((await t.cron()).output).toEqual({ trigger: { kind: "cron", cron: "0 9 * * *" }, day: "today" });
     const strict = make(defineActuator({ name: "strict", description: "t", input: z.object({ id: z.string() }), run: () => 1 }));
     await expect(strict.cron("0 * * * *")).rejects.toThrow(/Cron runs start with the input \{\}/);
+  });
+
+  it("redacts secret config values only with redactSecrets, and replays still see the real value", async () => {
+    const act = defineActuator({
+      name: "keyed",
+      description: "test",
+      config: z.object({ apiKey: secret(z.string()) }),
+      input: z.object({}),
+      async run(ctx, _input, config) {
+        const used = await ctx.step.do("use", () => `key=${config.apiKey}`);
+        await ctx.step.sleep("pause", "1 minute");
+        ctx.log.info(`used ${used}`);
+        await ctx.step.do("tell", () => ctx.notifyOwner(`your key is ${config.apiKey}`));
+        // After the sleep this is a replay: the stored step value must still be the real one.
+        return { used, same: used === `key=${config.apiKey}` };
+      },
+    });
+    const key = "sk_test_9f8e7d6c";
+    const red = make(act, { config: { apiKey: key }, redactSecrets: true });
+    const run = await red.start({});
+    await red.advance("1 minute");
+    const done = red.run(run.runId);
+    expect(done.output).toEqual({ used: "key=[secret]", same: true });
+    expect(JSON.stringify(red.steps(run.runId))).not.toContain(key);
+    expect(JSON.stringify(red.logs(run.runId))).not.toContain(key);
+    expect(red.ownerNotifications[0]!.text).toBe("your key is [secret]");
+
+    const plain = make(act, { config: { apiKey: key } });
+    const raw = await plain.start({});
+    await plain.advance("1 minute");
+    expect(plain.run(raw.runId).output).toEqual({ used: `key=${key}`, same: true });
+    expect(plain.ownerNotifications[0]!.text).toBe(`your key is ${key}`);
+  });
+
+  it("types the agent that started a run on ctx.trigger, without a cast", async () => {
+    const act = defineActuator({
+      name: "who",
+      description: "test",
+      input: z.object({}),
+      // No cast: `agent` is declared on Trigger.
+      run: (ctx) => ({ agent: ctx.trigger.agent?.name ?? null }),
+    });
+    const t = make(act);
+    const byAgent = await t.start({}, { trigger: { kind: "mcp", agent: { id: "tok_1", name: "support-bot" } } });
+    expect(byAgent.output).toEqual({ agent: "support-bot" });
+    expect((await t.start({})).output).toEqual({ agent: null });
   });
 
   it("leaves an optional capability undefined when its provider is removed", async () => {

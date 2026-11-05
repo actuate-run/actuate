@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
-import { secretFields } from "@actuate/runtime";
+import { MIN_SECRET_LENGTH, secretFields } from "@actuate/runtime";
 import type { Diagnostic } from "./check.js";
 import type { PlatformIssue } from "./platform-checks.js";
 
@@ -34,6 +34,72 @@ export function committedSecretIssue(cwd: string, configSchema: unknown, config:
       `Set ${one ? "it" : "them"} in the dashboard (Config tab) and leave ${one ? "it" : "them"} out of the file: the platform keeps a stored secret when the file omits it. ` +
       `For \`actuate dev\`, put ${one ? "it" : "them"} in .dev.vars as ACTUATE_CONFIG.`,
   };
+}
+
+export const SECRET_DEFAULT_RULE = "secret-default-not-redacted";
+
+type Node = Record<string, unknown>;
+const isNode = (v: unknown): v is Node => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** True for a default value redaction would leave in clear: a boolean, or a string or number shorter than MIN_SECRET_LENGTH. */
+function unredacted(value: unknown): boolean {
+  if (typeof value === "boolean") return true;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "bigint") return String(value).length < MIN_SECRET_LENGTH;
+  if (Array.isArray(value)) return value.some(unredacted);
+  if (isNode(value)) return Object.values(value).some(unredacted);
+  return false;
+}
+
+/**
+ * Paths of secret (`writeOnly`) config fields whose schema default would never be redacted: booleans, and strings or
+ * numbers shorter than MIN_SECRET_LENGTH. A default on a non-secret parent counts for the secret children it sets.
+ * Paths use the runtime's notation (`a.b`, `list[]`, `keys.*`).
+ */
+export function unredactedSecretDefaults(configSchema: unknown): string[] {
+  const root = isNode(configSchema) ? configSchema : {};
+  const found = new Set<string>();
+  const resolve = (node: Node, seen: Set<string>): Node | null => {
+    const ref = node.$ref;
+    if (typeof ref !== "string") return node;
+    if (!ref.startsWith("#/") || seen.has(ref)) return null;
+    let target: unknown = root;
+    for (const part of ref.slice(2).split("/")) target = isNode(target) ? target[part.replace(/~1/g, "/").replace(/~0/g, "~")] : undefined;
+    return isNode(target) ? { ...target, ...Object.fromEntries(Object.entries(node).filter(([k]) => k !== "$ref")) } : null;
+  };
+  const join = (path: string, key: string) => (path ? `${path}.${key}` : key);
+  // `inherited`: a default some ancestor set for this node's position, so a parent's default reaches its secret children.
+  const walk = (raw: unknown, path: string, secret: boolean, inherited: unknown, seen: Set<string>): void => {
+    if (!isNode(raw)) return;
+    const node = resolve(raw, seen);
+    if (!node) return;
+    const nextSeen = typeof raw.$ref === "string" ? new Set(seen).add(raw.$ref) : seen;
+    const isSecret = secret || node.writeOnly === true;
+    const fallback = "default" in node ? node.default : inherited;
+    if (isSecret && fallback !== undefined && unredacted(fallback)) found.add(path);
+    for (const key of ["anyOf", "oneOf", "allOf"]) {
+      const list = node[key];
+      if (Array.isArray(list)) for (const sub of list) walk(sub, path, isSecret, fallback, nextSeen);
+    }
+    const props = node.properties;
+    if (isNode(props)) {
+      for (const [k, sub] of Object.entries(props)) walk(sub, join(path, k), isSecret, isNode(fallback) ? fallback[k] : undefined, nextSeen);
+    }
+    if (node.items !== undefined && !Array.isArray(node.items)) walk(node.items, `${path}[]`, isSecret, undefined, nextSeen);
+    if (isNode(node.additionalProperties)) walk(node.additionalProperties, join(path, "*"), isSecret, undefined, nextSeen);
+  };
+  walk(root, "", false, undefined, new Set());
+  return [...found];
+}
+
+/** Warnings for secret fields whose schema default would show in clear (see {@link unredactedSecretDefaults}). */
+export function unredactedSecretDefaultIssues(configSchema: unknown): PlatformIssue[] {
+  return unredactedSecretDefaults(configSchema).map((path) => ({
+    severity: "warning" as const,
+    rule: SECRET_DEFAULT_RULE,
+    message:
+      `Secret field "${path || "(the whole config)"}" has a default that is never redacted (booleans and values shorter than ${MIN_SECRET_LENGTH} characters are not). ` +
+      `Remove the default, or set the value in the dashboard instead.`,
+  }));
 }
 
 /** Whether a config holds any value at all (not only `{}`, `null`s and `""`s). */

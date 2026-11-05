@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defineActuator, z } from "@actuate/sdk";
+import { defineActuator, secret, z } from "@actuate/sdk";
 import { describeActuator } from "../src/load.js";
 import { httpAllowProblems, platformChecks, regexProblems } from "../src/platform-checks.js";
 import { PLANS, planFromAccount } from "../src/plans.js";
@@ -16,6 +16,24 @@ const check = (def: Parameters<typeof defineActuator>[0], extra: Partial<Paramet
 };
 
 describe("platform deploy checks", () => {
+  it("warns about secret defaults that redaction can't hide", () => {
+    const config = z.object({
+      flag: secret(z.boolean().default(false)),
+      pin: secret(z.string().default("12345")),
+      shortNumber: secret(z.number().default(42)),
+      longKey: secret(z.string().default("sk_test_123456")),
+      longNumber: secret(z.number().default(123456)),
+      plain: z.string().default("no"),
+      nested: z.object({ token: secret(z.string()) }).default({ token: "abc" }),
+      unset: secret(z.string().optional()),
+    });
+    const issues = check({ ...base, config } as never).filter((i) => i.includes(":secret-default-not-redacted:"));
+    const paths = issues.map((i) => /Secret field "([^"]+)"/.exec(i)![1]).sort();
+    expect(paths).toEqual(["flag", "nested.token", "pin", "shortNumber"]);
+    expect(issues[0]).toMatch(/^warning:secret-default-not-redacted:Secret field ".+" has a default that is never redacted \(booleans and values shorter than 6 characters are not\)\. Remove the default, or set the value in the dashboard instead\.$/);
+    expect(check({ ...base, config: z.object({ key: secret(z.string()), on: z.boolean().default(true) }) } as never)).toEqual([]);
+  });
+
   it("passes a plain actuator on every plan", () => {
     for (const plan of Object.values(PLANS)) expect(check(base, { plan })).toEqual([]);
   });
