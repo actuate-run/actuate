@@ -260,7 +260,8 @@ export interface BaseContext {
    * Call it inside `ctx.step.do`, like provider calls: a retried step reuses the message's idempotency key,
    * so it is not sent twice. `text` is 1 to 4,000 characters and `subject` one line of at most 200; secret config
    * values in either are redacted. Resolves to `{ sent: false, reason }` instead of throwing when the
-   * message can't go out (no notifier, a daily cap reached); the reason is also logged.
+   * message can't go out: with no notifier (self-hosted without one), the message itself is written to the
+   * run's log as an info line; when the notifier refuses it (a daily cap reached), the reason is logged as a warning.
    */
   notifyOwner(text: string, options?: NotifyOwnerOptions): Promise<NotifyOwnerResult>;
 }

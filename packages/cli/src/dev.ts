@@ -5,6 +5,7 @@ import { context } from "esbuild";
 import { CliError, describePlan, planHint, type ResolvedPlan } from "./account.js";
 import { checkSource, formatDiagnostic } from "./check.js";
 import { describeJsonError } from "@actuate/runtime";
+import { committedSecretIssue } from "./config-secrets.js";
 import { readConfigFile, formatIssue } from "./deploy.js";
 import { bundleActuator, cliResolve, describeActuator, loadActuator, ownModule, packageDir, workerBuildOptions } from "./load.js";
 import type { PlanId } from "./plans.js";
@@ -179,6 +180,10 @@ export async function dev(options: DevOptions): Promise<void> {
   const bundleBytes = Buffer.byteLength(await bundleActuator(file));
   const defaulted = options.plan.source === "default";
   const issues = platformChecks({ metadata: meta, actuator, plan: options.plan.plan, planDefaulted: defaulted, bundleBytes, ...(config ? { config, configSource: configSourceName(configured.sources) } : {}) });
+  // The committed file only (not what .dev.vars adds), as actuate check and deploy see it.
+  const committedFile = readConfigFile(options.cwd);
+  const committed = committedFile && "value" in committedFile ? committedSecretIssue(options.cwd, meta.configSchema, committedFile.value) : null;
+  if (committed) issues.push(committed);
   const missing = meta.capabilities.filter((c) => !options.plan.plan.capabilities.includes(c as never));
   for (const i of issues) if (!(missing.length && i.rule === "plan-capability" && i.severity !== "warning")) console.log(`deploy check  ${formatIssue(i)}`);
   // Capabilities the plan lacks are refused only for a plan someone chose: a guessed Sandbox mustn't break a fresh template.

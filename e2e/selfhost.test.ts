@@ -267,3 +267,67 @@ describe("a malformed ACTUATE_CONFIG", () => {
     }
   });
 });
+
+describe("a config that throws while loading", () => {
+  async function serve(className: string) {
+    const out = await build({
+      entryPoints: [fileURLToPath(new URL("./fixtures/config-errors-entry.ts", import.meta.url))],
+      bundle: true,
+      format: "esm",
+      platform: "neutral",
+      target: "es2022",
+      external: ["cloudflare:workers"],
+      conditions: ["workerd", "worker", "import"],
+      mainFields: ["module", "main"],
+      write: false,
+    });
+    return new Miniflare({
+      modules: true,
+      script: out.outputFiles[0]!.text,
+      compatibilityDate: "2025-09-01",
+      compatibilityFlags: ["nodejs_compat"],
+      durableObjects: { ACTUATOR: { className, useSQLite: true } },
+      bindings: { ACTUATE_CONFIG: JSON.stringify({ apiKey: "sk_live_RAW_CONFIG_SECRET" }), ACTUATE_TOKEN: "admin", ACTUATE_RUN_TOKEN: "agent" },
+    });
+  }
+  const reads = async (mf: Miniflare, describe = true) => {
+    const get = async (path: string, init: RequestInit = {}) => (await mf.dispatchFetch(`${base}${path}`, init as never)).json<any>();
+    const run = await get("/run", { method: "POST", body: "{}", headers: { ...agentAuth, "content-type": "application/json" } });
+    return { run, info: describe ? await get("/", { headers: agentAuth }) : null };
+  };
+
+  it("redacts a schema transform's error with the secrets of the raw config", async () => {
+    const mf = await serve("TransformObject");
+    try {
+      const { run, info } = await reads(mf);
+      expect(info.configError).toBe("Invalid configuration: cannot use [secret]");
+      expect(run).toMatchObject({ status: "FAILED", error: { message: "Invalid configuration: cannot use [secret]" } });
+    } finally {
+      await mf.dispose();
+    }
+  });
+
+  it("does not echo what a custom config(env) threw", async () => {
+    const mf = await serve("CustomConfigObject");
+    try {
+      const { run, info } = await reads(mf);
+      expect(info.configError).toBe("Invalid configuration: config(env) threw TypeError. The error is in the worker's logs.");
+      expect(run.error.message).toBe(info.configError);
+      expect(JSON.stringify([run, info])).not.toContain("sk_live");
+    } finally {
+      await mf.dispose();
+    }
+  });
+
+  it("does not echo what an unreadable schema threw", async () => {
+    const mf = await serve("UnreadableObject");
+    try {
+      // GET / can't describe this schema either; the run says why the config failed.
+      const { run } = await reads(mf, false);
+      expect(run).toMatchObject({ status: "FAILED", error: { message: "Invalid configuration: the config schema threw RangeError. The error is in the worker's logs." } });
+      expect(JSON.stringify(run)).not.toContain("sk_live");
+    } finally {
+      await mf.dispose();
+    }
+  });
+});

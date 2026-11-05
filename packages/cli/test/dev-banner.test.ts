@@ -77,5 +77,8 @@ describe("actuate dev's startup banner", () => {
     expect(out).toContain('env.ACTUATE_CONFIG ("(hidden)")');
     expect(out).toContain('env.TELEGRAM_BOT_TOKEN ("(hidden)")');
     for (const secret of ["sk_live_FILE", "whk_DEVVARS", "tg_TOKEN_SECRET"]) expect(out).not.toContain(secret);
+    // The file sets a secret and git would commit it: said once, at startup, as check and deploy say it.
+    expect(out.match(/actuate\.config\.json sets the secret field apiKey, and git does not ignore the file/g)).toHaveLength(1);
+    expect(out).toContain("(config-secret)");
   }, 90_000);
 });

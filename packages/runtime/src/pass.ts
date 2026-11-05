@@ -70,7 +70,7 @@ export interface PassDependencies {
   /** Configured providers. Declared capabilities missing here throw on use. */
   providers?: Partial<Providers>;
   /**
-   * Delivers `ctx.notifyOwner` messages. Without one, a message is written to the run's log and
+   * Delivers `ctx.notifyOwner` messages. Without one, a message is written to the run's log as an info line and
    * `ctx.notifyOwner` resolves to `{ sent: false, reason }`. On the hosted platform, an RPC stub.
    */
   owner?: OwnerNotifier;
@@ -459,9 +459,10 @@ class Pass {
   /**
    * `ctx.notifyOwner`. Checked here, before the notifier sees anything: inside a step (or it would repeat on
    * every replay), and within the length limits. The message's idempotency key is derived like a keyed
-   * provider call's (`<step key>:notifyOwner:<n>`), counted when the call is made. Like provider calls, the
-   * count is per pass, not per step: steps run concurrently (Promise.all) share it, so with retries their
-   * keys are only stable when the steps make their calls in the same order.
+   * provider call's (`<step key>:notifyOwner:<n>`), counted when the call is made. `n` counts this step
+   * attempt's notifyOwner calls from 0 (the count restarts with each attempt, so a retry gives the same call
+   * the same key). Like provider calls' counts, it is kept with the step that is running, which steps run
+   * concurrently would share.
    */
   readonly notifyOwner = async (text: string, options: NotifyOwnerOptions = {}): Promise<NotifyOwnerResult> => {
     if (this.inStep === null) {

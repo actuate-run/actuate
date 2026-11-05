@@ -132,15 +132,13 @@ export interface Runtime<E extends RuntimeEnv> {
   ActuatorObject: new (state: DurableObjectState, env: E) => ActuatorObjectInstance;
 }
 
-/** The values of the config's secret fields, from its JSON Schema (`writeOnly`), raw and parsed. */
-function configSecrets(schema: z.ZodType, raw: unknown, parsed: unknown): string[] {
-  let jsonSchema: unknown;
+/** The config's JSON Schema (input side), or undefined when this schema has none to give. */
+function configJsonSchema(schema: z.ZodType): unknown {
   try {
-    jsonSchema = z.toJSONSchema(schema, { io: "input", unrepresentable: "any" });
+    return z.toJSONSchema(schema, { io: "input", unrepresentable: "any" });
   } catch {
-    return [];
+    return undefined;
   }
-  return mergeSecrets(collectSecrets(jsonSchema, raw), parsed === undefined ? [] : collectSecrets(jsonSchema, parsed));
 }
 
 type ProviderWebhookEvent = { event: string; payload: Json };
@@ -193,28 +191,39 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
       });
     }
 
+    /**
+     * Parse and validate the config. configError is served on GET / (to run tokens too) and becomes every run's
+     * error, so it never carries a secret: the parser's message is left out (it quotes the text around the
+     * error), thrown messages are redacted with the raw config's secrets, and when those can't be known
+     * (a custom config(env) threw, or the schema has no JSON Schema) only the error's name is given.
+     */
     private loadConfig(): void {
+      const thrown = (what: string, err: unknown): string => {
+        console.error(`[actuate] ${what} threw:`, err);
+        return `Invalid configuration: ${what} threw ${err instanceof Error ? err.name : typeof err}. The error is in the worker's logs.`;
+      };
       let raw: unknown;
       try {
         raw = options.config ? options.config(this.env) : JSON.parse(this.env.ACTUATE_CONFIG ?? "{}");
       } catch (err) {
-        // Never the parser's message: it quotes the text around the error, which may be part of a secret.
-        // configError is served on GET / (to run tokens too) and becomes every run's error.
-        const text = options.config ? undefined : this.env.ACTUATE_CONFIG;
-        this.configError =
-          err instanceof SyntaxError || !options.config
-            ? `Invalid ACTUATE_CONFIG: it ${describeJsonError(err, text)}.`
-            : `Invalid ACTUATE_CONFIG: ${err instanceof Error ? err.message : String(err)}`;
+        if (options.config && !(err instanceof SyntaxError)) this.configError = thrown("config(env)", err);
+        else this.configError = `Invalid ACTUATE_CONFIG: it ${describeJsonError(err, options.config ? undefined : this.env.ACTUATE_CONFIG)}.`;
         return;
       }
+      const jsonSchema = configJsonSchema(configSchema);
+      // Secrets from the raw config first: an invalid config, or one whose transform throws, still holds them.
+      this.secrets = jsonSchema === undefined ? [] : collectSecrets(jsonSchema, raw);
       try {
         const parsed = configSchema.safeParse(raw);
-        // Secrets from the raw config too: an invalid config, or one a transform changes, still holds them.
-        this.secrets = configSecrets(configSchema, raw, parsed.success ? parsed.data : undefined);
-        if (parsed.success) this.config = parsed.data;
-        else this.configError = redactSecrets(`Invalid configuration: ${parsed.error.message}`, this.secrets);
+        if (parsed.success) {
+          this.config = parsed.data;
+          if (jsonSchema !== undefined) this.secrets = mergeSecrets(this.secrets, collectSecrets(jsonSchema, parsed.data));
+        } else this.configError = redactSecrets(`Invalid configuration: ${parsed.error.message}`, this.secrets);
       } catch (err) {
-        this.configError = `Invalid ACTUATE_CONFIG: ${err instanceof Error ? err.message : String(err)}`;
+        this.configError =
+          jsonSchema === undefined
+            ? thrown("the config schema", err)
+            : redactSecrets(`Invalid configuration: ${err instanceof Error ? err.message : String(err)}`, this.secrets);
       }
     }
 
