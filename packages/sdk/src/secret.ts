@@ -14,8 +14,10 @@ import type { z } from "zod";
  *
  * The same as `schema.meta({ writeOnly: true })`: the field's JSON Schema gets `"writeOnly": true`, which is
  * what the runtime and the platform look for. Use it on the field itself (also inside nested objects and
- * arrays); it survives `.optional()`, `.nullable()` and `.default()`. Values shorter than 6 characters are
- * not redacted.
+ * arrays); it survives `.optional()`, `.nullable()` and `.default()`. Strings, and numbers as their digits,
+ * are redacted; values shorter than 6 characters and booleans are not, nor are encodings the runtime doesn't
+ * know (base64 of a secret, say). Redaction uses the secrets configured now: output stored before a key was
+ * changed shows the old key.
  */
 export function secret<T extends z.ZodType>(schema: T): T {
   // The schema's own `meta`, not a registry imported here: on the platform the actuator's bundled zod writes its JSON Schema.

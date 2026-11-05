@@ -8,6 +8,7 @@ import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 let mf: Miniflare;
+let script: string;
 const base = "http://actuate.test";
 
 async function call(path: string, init?: RequestInit & { json?: unknown }) {
@@ -46,9 +47,10 @@ beforeAll(async () => {
     mainFields: ["module", "main"],
     write: false,
   });
+  script = out.outputFiles[0]!.text;
   mf = new Miniflare({
     modules: true,
-    script: out.outputFiles[0]!.text,
+    script,
     compatibilityDate: "2025-09-01",
     compatibilityFlags: ["nodejs_compat"],
     durableObjects: { ACTUATOR: { className: "ActuatorObject", useSQLite: true } },
@@ -240,5 +242,28 @@ describe("self-hosted runtime on workerd", () => {
     expect(replay.status).toBe(200);
     expect(((await replay.json()) as { runId: string }).runId).toBe(runId);
     expect((await post({ "x-hub-signature-256": `sha256=${mac}` }, body + " ")).status).toBe(401);
+  });
+});
+
+describe("a malformed ACTUATE_CONFIG", () => {
+  it("is reported by position, never by quoting the text around the error", async () => {
+    const bad = new Miniflare({
+      modules: true,
+      script,
+      compatibilityDate: "2025-09-01",
+      compatibilityFlags: ["nodejs_compat"],
+      durableObjects: { ACTUATOR: { className: "ActuatorObject", useSQLite: true } },
+      bindings: { ACTUATE_CONFIG: '{"apiKey": sk_live_PARTIAL_SECRET}', ACTUATE_TOKEN: "admin", ACTUATE_RUN_TOKEN: "agent" },
+    });
+    try {
+      const get = async (path: string, init: RequestInit = {}) => (await bad.dispatchFetch(`${base}${path}`, init as never)).json<any>();
+      const info = await get("/", { headers: agentAuth });
+      expect(info.configError).toMatch(/^Invalid ACTUATE_CONFIG: it is not valid JSON( \(line 1, column \d+\))?\.$/);
+      const run = await get("/run", { method: "POST", body: JSON.stringify({ name: "A", mode: "sleep" }), headers: { ...agentAuth, "content-type": "application/json" } });
+      expect(run).toMatchObject({ status: "FAILED", error: { message: info.configError } });
+      expect(JSON.stringify([info, run, await get("/runs", { headers: auth })])).not.toContain("sk_live");
+    } finally {
+      await bad.dispose();
+    }
   });
 });

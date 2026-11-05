@@ -94,6 +94,8 @@ describe("ctx.notifyOwner", () => {
     [{ text: "   " }, "ctx.notifyOwner() needs the message text."],
     [{ text: "x".repeat(4_001) }, "ctx.notifyOwner(): the text is 4001 characters; at most 4,000 are allowed."],
     [{ text: "ok", subject: "s".repeat(201) }, "ctx.notifyOwner(): the subject is 201 characters; at most 200 are allowed."],
+    [{ text: "ok", subject: "Hi\r\nBcc: someone@example.com" }, "ctx.notifyOwner(): the subject must be one line, without control characters."],
+    [{ text: "ok", subject: "tab\there" }, "ctx.notifyOwner(): the subject must be one line, without control characters."],
   ])("refuses %j before the notifier sees it", async (input, message) => {
     const r = recorder();
     const act = notifying(async (ctx, i) => ctx.step.do("tell", () => ctx.notifyOwner(i.text!, i.subject === undefined ? undefined : { subject: i.subject })));

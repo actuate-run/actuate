@@ -206,7 +206,7 @@ export const NOTIFY_OWNER_MAX_TEXT = 4_000;
 export const NOTIFY_OWNER_MAX_SUBJECT = 200;
 
 export interface NotifyOwnerOptions {
-  /** Subject line, at most 200 characters. The hosted platform's default: `<actuator>: message from your actuator`. */
+  /** Subject line: one line (no line breaks or other control characters), at most 200 characters. The hosted platform's default: `<actuator>: message from your actuator`. */
   subject?: string;
 }
 
@@ -222,7 +222,7 @@ export interface NotifyOwnerResult {
 export interface OwnerNotification {
   /** 1 to 4,000 characters. */
   text: string;
-  /** At most 200 characters. */
+  /** At most 200 characters, one line (no control characters). */
   subject?: string;
   runId: string;
   actuator: string;
@@ -258,7 +258,7 @@ export interface BaseContext {
    * (use `ctx.messaging`). No capability to declare.
    *
    * Call it inside `ctx.step.do`, like provider calls: a retried step reuses the message's idempotency key,
-   * so it is not sent twice. `text` is 1 to 4,000 characters and `subject` at most 200; secret config
+   * so it is not sent twice. `text` is 1 to 4,000 characters and `subject` one line of at most 200; secret config
    * values in either are redacted. Resolves to `{ sent: false, reason }` instead of throwing when the
    * message can't go out (no notifier, a daily cap reached); the reason is also logged.
    */

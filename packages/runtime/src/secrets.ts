@@ -83,6 +83,8 @@ function walkSecrets(root: unknown, value: unknown, onSecret: (path: Path, value
     if (!schemas.length || depth > 64) return;
     if (schemas.some((s) => s.writeOnly === true)) return onSecret(path, v);
     if (Array.isArray(v)) {
+      // An empty array of secrets is still a secret field, holding nothing.
+      if (v.length === 0 && expand(root, schemas.flatMap((s) => itemSchemas(s, 0))).some((s) => s.writeOnly === true)) return onSecret(path, v);
       v.forEach((item, i) => {
         const subs = schemas.flatMap((s) => itemSchemas(s, i));
         if (subs.length) walk(subs, item, [...path, i], depth + 1);
@@ -97,15 +99,18 @@ function walkSecrets(root: unknown, value: unknown, onSecret: (path: Path, value
   walk([root], value, [], 0);
 }
 
+/** Strings, plus finite numbers and bigints as their decimal string (they show that way in logs and text). Booleans are not secrets. */
 function stringsIn(value: unknown, out: string[], depth = 0): void {
   if (typeof value === "string") out.push(value);
+  else if (typeof value === "number" && Number.isFinite(value)) out.push(String(value));
+  else if (typeof value === "bigint") out.push(value.toString());
   else if (depth < 64 && Array.isArray(value)) for (const v of value) stringsIn(v, out, depth + 1);
   else if (depth < 64 && isObject(value)) for (const v of Object.values(value)) stringsIn(v, out, depth + 1);
 }
 
 /**
  * The values of a config's secret fields: every string under a field whose JSON Schema has
- * `"writeOnly": true`, found through nested objects, arrays (`items`, `prefixItems`), records
+ * `"writeOnly": true` (and every finite number or bigint, as its decimal string; not booleans), found through nested objects, arrays (`items`, `prefixItems`), records
  * (`additionalProperties`), local `$ref`s and `anyOf` / `oneOf` / `allOf`. Values shorter than
  * {@link MIN_SECRET_LENGTH} are left out. Deduplicated, longest first, ready for {@link redactSecrets}.
  *
@@ -130,12 +135,13 @@ const hasValue = (v: unknown): boolean =>
 /**
  * Where a config sets a secret field: one path per `writeOnly` field holding a value (not `null`, not `""`),
  * in document order. Object keys are joined with dots and array positions written `[i]`: `apiKey`,
- * `slack.botToken`, `webhooks[1].secret`. Values of any length count.
+ * `slack.botToken`, `webhooks[1].secret`. Values of any length count. With `includeEmpty`, every secret field
+ * the config mentions counts, whatever it holds (`null`, `""`, an empty array of secrets: `tokens`).
  */
-export function secretFields(configSchema: unknown, config: unknown): string[] {
+export function secretFields(configSchema: unknown, config: unknown, options: { includeEmpty?: boolean } = {}): string[] {
   const found: string[] = [];
   walkSecrets(configSchema, config, (path, value) => {
-    if (!hasValue(value)) return;
+    if (!options.includeEmpty && !hasValue(value)) return;
     const name = path.reduce<string>((acc, part) => (typeof part === "number" ? `${acc}[${part}]` : acc ? `${acc}.${part}` : part), "");
     if (!found.includes(name)) found.push(name);
   });
@@ -187,7 +193,7 @@ export function secretPaths(configSchema: unknown): string[] {
 
 /**
  * A copy of `config` without its secret fields: secret object properties are removed, secret array
- * elements are dropped, and so are objects left empty by that. For comparing two configs while ignoring secrets (a stored config shows them masked).
+ * elements are dropped, and so are objects and arrays left empty by that. For comparing two configs while ignoring secrets (a stored config shows them masked).
  */
 export function omitSecrets<T>(configSchema: unknown, config: T): T {
   const omit = (nodes: readonly unknown[], v: unknown, depth: number): { keep: boolean; value: unknown } => {
@@ -196,12 +202,14 @@ export function omitSecrets<T>(configSchema: unknown, config: T): T {
     if (schemas.some((s) => s.writeOnly === true)) return { keep: false, value: undefined };
     if (Array.isArray(v)) {
       const out: unknown[] = [];
+      let removed = false;
       v.forEach((item, i) => {
         const subs = schemas.flatMap((s) => itemSchemas(s, i));
         const r = subs.length ? omit(subs, item, depth + 1) : { keep: true, value: item };
         if (r.keep) out.push(r.value);
+        else removed = true;
       });
-      return { keep: true, value: out };
+      return { keep: !removed || out.length > 0, value: out };
     }
     if (isObject(v)) {
       const out: Record<string, unknown> = {};
@@ -221,31 +229,55 @@ export function omitSecrets<T>(configSchema: unknown, config: T): T {
   return omit([configSchema], config, 0).value as T;
 }
 
+/** The forms a secret can take inside a longer string: as is, JSON-escaped (once or twice), URL- or form-encoded. */
+function encodedForms(secret: string): string[] {
+  const json = JSON.stringify(secret).slice(1, -1);
+  const uri = encodeURIComponent(secret);
+  const lower = uri.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase());
+  return [secret, json, JSON.stringify(json).slice(1, -1), uri, lower, uri.replace(/%20/g, "+"), lower.replace(/%20/g, "+")];
+}
+
 /**
  * A deep copy of `value` in which every occurrence of a secret, inside any string (object keys too),
- * becomes {@link SECRET_PLACEHOLDER}. Also catches a secret as it appears JSON-escaped or URL-encoded inside
- * a longer string (an error quoting a request body or a URL). Never changes `value`; with no secrets it is
- * returned as is. Arrays and plain objects are copied; other objects (class instances) are returned as they are.
+ * becomes {@link SECRET_PLACEHOLDER}, and every number or bigint equal to a secret becomes that string. Also
+ * catches a secret JSON-escaped (once or twice) or URL- or form-encoded (either case of percent-escape)
+ * inside a longer string; base64 and other encodings are not caught. Overlapping secrets are replaced as
+ * one span, so no fragment is left. Never changes `value`; with no secrets it is returned as is. Arrays and
+ * plain objects are copied; other objects (class instances) are returned as they are.
  */
 export function redactSecrets<T>(value: T, secrets: readonly string[]): T {
   if (!secrets.length) return value;
   const forms = new Set<string>();
   for (const secret of secrets) {
     if (typeof secret !== "string" || secret === "") continue;
-    forms.add(secret);
-    forms.add(JSON.stringify(secret).slice(1, -1));
-    forms.add(encodeURIComponent(secret));
+    for (const form of encodedForms(secret)) forms.add(form);
   }
-  // Longest first, so a secret that contains another is replaced whole.
-  const ordered = [...forms].sort((a, b) => b.length - a.length);
-  if (!ordered.length) return value;
+  if (!forms.size) return value;
+  const exact = new Set(secrets);
   const text = (s: string): string => {
-    let out = s;
-    for (const form of ordered) if (out.includes(form)) out = out.split(form).join(SECRET_PLACEHOLDER);
-    return out;
+    // Every match of every form in the original string, merged where they overlap or touch, replaced once.
+    const spans: Array<[number, number]> = [];
+    for (const form of forms) {
+      for (let at = s.indexOf(form); at !== -1; at = s.indexOf(form, at + 1)) spans.push([at, at + form.length]);
+    }
+    if (!spans.length) return s;
+    spans.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+    let out = "";
+    let cursor = 0;
+    let [start, end] = spans[0]!;
+    for (const [from, to] of spans.slice(1)) {
+      if (from <= end) end = Math.max(end, to);
+      else {
+        out += s.slice(cursor, start) + SECRET_PLACEHOLDER;
+        cursor = end;
+        [start, end] = [from, to];
+      }
+    }
+    return out + s.slice(cursor, start) + SECRET_PLACEHOLDER + s.slice(end);
   };
   const copy = (v: unknown, depth: number): unknown => {
     if (typeof v === "string") return text(v);
+    if ((typeof v === "number" || typeof v === "bigint") && exact.has(String(v))) return SECRET_PLACEHOLDER;
     // Far deeper than any JSON a run produces (or a cycle): fail closed rather than show it unredacted.
     if (depth > 256 && typeof v === "object" && v !== null) return SECRET_PLACEHOLDER;
     if (Array.isArray(v)) return v.map((item) => copy(item, depth + 1));

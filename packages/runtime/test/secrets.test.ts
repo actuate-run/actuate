@@ -89,9 +89,9 @@ describe("collectSecrets", () => {
     expect(ordered).not.toContain("visible-label");
   });
 
-  it("ignores values shorter than 6 characters, non-strings, nulls and missing fields", () => {
-    const schema = z.toJSONSchema(z.object({ a: secret(z.string()), b: secret(z.number()), c: secret(z.string()).nullable(), d: secret(z.string()).optional() }), opts);
-    expect(collectSecrets(schema, { a: "abcde", b: 1234567, c: null })).toEqual([]);
+  it("ignores values shorter than 6 characters, booleans, nulls and missing fields", () => {
+    const schema = z.toJSONSchema(z.object({ a: secret(z.string()), b: secret(z.number()), c: secret(z.string()).nullable(), d: secret(z.string()).optional(), e: secret(z.boolean()) }), opts);
+    expect(collectSecrets(schema, { a: "abcde", b: 12345, c: null, e: true })).toEqual([]);
     expect(collectSecrets(schema, { a: "abcdef" })).toEqual(["abcdef"]);
     expect(collectSecrets(schema, { a: "same-value", d: "same-value" })).toEqual(["same-value"]);
   });
@@ -151,7 +151,6 @@ describe("secretFields, secretPaths and omitSecrets", () => {
   it("drops secret fields and keeps the rest", () => {
     expect(omitSecrets(json, config)).toEqual({
       nested: { name: "not-a-secret" },
-      list: [],
       objects: [{ label: "visible-label" }],
       normal: "visible-value",
     });
@@ -164,6 +163,43 @@ describe("secretFields, secretPaths and omitSecrets", () => {
       omitSecrets(json, { plain: "plain-secret", nested: { token: "t0k3n-value", name: "not-a-secret" }, normal: "visible-value" }),
     );
     expect(config.plain).toBe("plain-secret");
+  });
+});
+
+describe("review fixes", () => {
+  it("collects secret numbers and bigints as their decimal string, when long enough", () => {
+    const schema = z.toJSONSchema(z.object({ pin: secret(z.number()), short: secret(z.number()), flag: secret(z.boolean()), big: secret(z.bigint()) }), opts);
+    expect(collectSecrets(schema, { pin: 98765432, short: 12345, flag: true, big: 12345678901234567890n }).sort()).toEqual(["12345678901234567890", "98765432"]);
+    expect(collectSecrets(schema, { pin: Number.POSITIVE_INFINITY })).toEqual([]);
+  });
+
+  it("redacts a number equal to a secret, and the digits inside strings", () => {
+    expect(redactSecrets({ pin: 98765432, other: 98765433, text: "pin 98765432" }, ["98765432"])).toEqual({ pin: "[secret]", other: 98765433, text: "pin [secret]" });
+    expect(redactSecrets({ big: 12345678901234567890n }, ["12345678901234567890"])).toEqual({ big: "[secret]" });
+  });
+
+  it("leaves no fragments of overlapping secrets, and never corrupts its own placeholder", () => {
+    expect(redactSecrets("xx abcdefghij yy", ["abcdefgh", "cdefghij"])).toBe("xx [secret] yy");
+    expect(redactSecrets("abcdefghabcdefgh", ["abcdefgh"])).toBe("[secret]");
+    expect(redactSecrets("my secret is secret!", ["secret"])).toBe("my [secret] is [secret]!");
+    expect(redactSecrets({ secret: 2 }, ["secret"])).toEqual({ "[secret]": 2 });
+  });
+
+  it("catches lowercase percent-escapes, form encoding and doubly JSON-escaped forms", () => {
+    const secret = 'pa ss/wo+rd&x="1"';
+    expect(redactSecrets("q=pa%20ss%2fwo%2brd%26x%3d%221%22", [secret])).toBe("q=[secret]");
+    expect(redactSecrets("q=pa+ss%2Fwo%2Brd%26x%3D%221%22&n=1", [secret])).toBe("q=[secret]&n=1");
+    expect(redactSecrets("q=pa+ss%2fwo%2brd%26x%3d%221%22", [secret])).toBe("q=[secret]");
+    const nested = JSON.stringify({ body: JSON.stringify({ key: secret }) });
+    expect(redactSecrets(nested, [secret])).toBe('{"body":"{\\"key\\":\\"[secret]\\"}"}');
+  });
+
+  it("secretFields with includeEmpty reports secret keys present with any value", () => {
+    const schema = z.toJSONSchema(z.object({ apiKey: secret(z.string()).optional(), tokens: z.array(secret(z.string())).optional(), greeting: z.string() }), opts);
+    expect(secretFields(schema, { apiKey: "", tokens: [], greeting: "x" })).toEqual([]);
+    expect(secretFields(schema, { apiKey: "", tokens: [], greeting: "x" }, { includeEmpty: true })).toEqual(["apiKey", "tokens"]);
+    expect(secretFields(schema, { apiKey: null }, { includeEmpty: true })).toEqual(["apiKey"]);
+    expect(secretFields(schema, { greeting: "x" }, { includeEmpty: true })).toEqual([]);
   });
 });
 

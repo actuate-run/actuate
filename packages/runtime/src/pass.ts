@@ -459,7 +459,9 @@ class Pass {
   /**
    * `ctx.notifyOwner`. Checked here, before the notifier sees anything: inside a step (or it would repeat on
    * every replay), and within the length limits. The message's idempotency key is derived like a keyed
-   * provider call's (`<step key>:notifyOwner:<n>`), counted when the call is made.
+   * provider call's (`<step key>:notifyOwner:<n>`), counted when the call is made. Like provider calls, the
+   * count is per pass, not per step: steps run concurrently (Promise.all) share it, so with retries their
+   * keys are only stable when the steps make their calls in the same order.
    */
   readonly notifyOwner = async (text: string, options: NotifyOwnerOptions = {}): Promise<NotifyOwnerResult> => {
     if (this.inStep === null) {
@@ -471,6 +473,10 @@ class Pass {
     }
     const subject = options?.subject;
     if (subject !== undefined && typeof subject !== "string") throw new ActuatorError("ctx.notifyOwner(): subject must be a string.");
+    // A line break in a subject could add mail headers; it is one line of plain text.
+    if (subject !== undefined && /[\u0000-\u001f\u007f]/.test(subject)) {
+      throw new ActuatorError("ctx.notifyOwner(): the subject must be one line, without control characters.");
+    }
     if (subject !== undefined && subject.length > NOTIFY_OWNER_MAX_SUBJECT) {
       throw new ActuatorError(`ctx.notifyOwner(): the subject is ${subject.length} characters; at most ${NOTIFY_OWNER_MAX_SUBJECT} are allowed.`);
     }

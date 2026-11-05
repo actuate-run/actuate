@@ -103,6 +103,9 @@ export interface RunManagerOptions {
    * written), and in everything the read methods return: `getRun`, `listRuns`, `getSteps`, `getLogs`, the
    * approval queue and link pages, and the run `start` returns. Stored step outputs and run outputs stay as
    * they were, so replay returns the real values (`journal()` reads them raw).
+   *
+   * Known limits: reads are redacted with the secrets configured now, so output stored before a secret was
+   * rotated shows the old value; user tables (`readTable`) are the actuator's own data and are not redacted.
    */
   secrets?: () => readonly string[];
 }

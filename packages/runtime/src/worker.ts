@@ -3,6 +3,7 @@ import { z, type Actuator, type Json, type OwnerNotifier, type Providers } from 
 import { RunManager, type ApprovalRequest, type RunManagerOptions, type RunStatus } from "./manager.js";
 import { executePass } from "./pass.js";
 import { createHttpProvider } from "./providers.js";
+import { describeJsonError } from "./json-error.js";
 import { collectSecrets, mergeSecrets, redactSecrets } from "./secrets.js";
 import { durableObjectSql } from "./sql.js";
 import { approvalPage, toCsv } from "./http-util.js";
@@ -193,8 +194,20 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
     }
 
     private loadConfig(): void {
+      let raw: unknown;
       try {
-        const raw = options.config ? options.config(this.env) : JSON.parse(this.env.ACTUATE_CONFIG ?? "{}");
+        raw = options.config ? options.config(this.env) : JSON.parse(this.env.ACTUATE_CONFIG ?? "{}");
+      } catch (err) {
+        // Never the parser's message: it quotes the text around the error, which may be part of a secret.
+        // configError is served on GET / (to run tokens too) and becomes every run's error.
+        const text = options.config ? undefined : this.env.ACTUATE_CONFIG;
+        this.configError =
+          err instanceof SyntaxError || !options.config
+            ? `Invalid ACTUATE_CONFIG: it ${describeJsonError(err, text)}.`
+            : `Invalid ACTUATE_CONFIG: ${err instanceof Error ? err.message : String(err)}`;
+        return;
+      }
+      try {
         const parsed = configSchema.safeParse(raw);
         // Secrets from the raw config too: an invalid config, or one a transform changes, still holds them.
         this.secrets = configSecrets(configSchema, raw, parsed.success ? parsed.data : undefined);
