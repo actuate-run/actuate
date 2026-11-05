@@ -1,4 +1,4 @@
-import type { Bill, CreateBillRequest, HttpProvider, MessageReceipt, MessagingProvider, PaymentProvider, Providers } from "@actuate/sdk";
+import type { Bill, CreateBillRequest, HttpProvider, MessageReceipt, MessagingProvider, OwnerNotifier, PaymentProvider, Providers } from "@actuate/sdk";
 
 /**
  * Check a hostname against an allow-list. Entries are exact hostnames or
@@ -50,6 +50,16 @@ export function consoleMessaging(log: (line: string) => void = console.log): Mes
       const id = `dev-msg-${++n}`;
       log(`\n📨  [dev messaging → ${to}${options?.channel ? ` via ${options.channel}` : ""}]\n${text}\n`);
       return { id, channel: options?.channel ?? "console" };
+    },
+  };
+}
+
+/** Prints `ctx.notifyOwner` messages to the console and reports them sent. Used by `actuate dev`. */
+export function consoleOwnerNotifier(log: (line: string) => void = console.log): OwnerNotifier {
+  return {
+    async notify(message) {
+      log(`\n📣  [owner notification${message.subject ? `: ${message.subject}` : ""}]\n${message.text}\n`);
+      return { sent: true };
     },
   };
 }

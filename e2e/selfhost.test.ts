@@ -214,6 +214,13 @@ describe("self-hosted runtime on workerd", () => {
     expect((await call("/", { headers: auth })).body.config.properties.apiKey).toMatchObject({ writeOnly: true });
   });
 
+  it("hands ctx.notifyOwner messages to the notifier createRuntime was given, secrets redacted", async () => {
+    const res = await call("/run", { headers: auth, json: { name: "Ana", mode: "notify" } });
+    expect(res.body).toMatchObject({ status: "COMPLETED", output: { sent: false, reason: "Heads up / redacted / keyed" } });
+    const run = await call(`/runs/${res.body.runId}`, { headers: auth });
+    expect(run.body.logs).toMatchObject([{ level: "warn", message: "Owner notification not sent: Heads up / redacted / keyed" }]);
+  });
+
   it("accepts webhooks by secret or signature, and dedupes signed replays by signature", async () => {
     const body = JSON.stringify({ name: "Hook", mode: "sleep" });
     const post = (headers: Record<string, string>, b = body) =>

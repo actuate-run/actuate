@@ -4,7 +4,7 @@ export default defineActuator({
   name: "e2e_booking",
   description: "End-to-end fixture: saves a booking, waits for payment or an approval, sleeps briefly.",
   config: z.object({ greeting: z.string().default("Hi"), apiKey: secret(z.string()).optional() }),
-  input: z.object({ name: z.string(), mode: z.enum(["payment", "approval", "sleep", "ask", "leak"]) }),
+  input: z.object({ name: z.string(), mode: z.enum(["payment", "approval", "sleep", "ask", "leak", "notify"]) }),
   capabilities: ["messaging"],
   async run(ctx, input, config) {
     await ctx.db.migrate(["CREATE TABLE bookings (id TEXT PRIMARY KEY, name TEXT, status TEXT)"]);
@@ -16,6 +16,9 @@ export default defineActuator({
       const key = await ctx.step.do("read-key", () => config.apiKey ?? null);
       if (input.name === "fail") throw new Error(`refused ${key}`);
       return { key, same: key === config.apiKey };
+    }
+    if (input.mode === "notify") {
+      return ctx.step.do("tell", () => ctx.notifyOwner(`${input.name} used ${config.apiKey}`, { subject: "Heads up" }));
     }
     if (input.mode === "sleep") {
       await ctx.step.sleep("1 second");

@@ -1,5 +1,7 @@
 import {
   ActuatorError,
+  NOTIFY_OWNER_MAX_SUBJECT,
+  NOTIFY_OWNER_MAX_TEXT,
   NonRetryableError,
   SuspendSignal,
   isSuspendSignal,
@@ -13,6 +15,9 @@ import {
   type Duration,
   type Json,
   type Logger,
+  type NotifyOwnerOptions,
+  type NotifyOwnerResult,
+  type OwnerNotifier,
   type Providers,
   type Row,
   type SqlValue,
@@ -64,7 +69,14 @@ export interface PassDependencies {
   config: unknown;
   /** Configured providers. Declared capabilities missing here throw on use. */
   providers?: Partial<Providers>;
+  /**
+   * Delivers `ctx.notifyOwner` messages. Without one, a message is written to the run's log and
+   * `ctx.notifyOwner` resolves to `{ sent: false, reason }`. On the hosted platform, an RPC stub.
+   */
+  owner?: OwnerNotifier;
 }
+
+const NO_OWNER_NOTIFIER = "No owner notifier is configured; the message was logged.";
 
 /**
  * Execute one pass of a run: call `run` from the top, replaying completed
@@ -75,7 +87,7 @@ export async function executePass(
   request: PassRequest,
   deps: PassDependencies,
 ): Promise<PassOutcome> {
-  const pass = new Pass(actuator, request, deps.journal, await deps.journal.loadSteps());
+  const pass = new Pass(actuator, request, deps.journal, await deps.journal.loadSteps(), deps.owner);
   const ctx: BaseContext & Partial<Providers> = {
     runId: request.runId,
     actuator: actuator.name,
@@ -83,6 +95,7 @@ export async function executePass(
     step: pass.step,
     db: pass.db,
     log: pass.log,
+    notifyOwner: pass.notifyOwner,
   };
   for (const cap of actuator.capabilities ?? []) {
     Object.defineProperty(ctx, cap, { value: pass.guardProvider(cap, deps.providers?.[cap]), enumerable: true });
@@ -128,6 +141,7 @@ class Pass {
     private readonly request: PassRequest,
     private readonly journal: Journal,
     rows: StepRow[],
+    private readonly owner?: OwnerNotifier,
   ) {
     for (const row of rows) this.rows.set(row.step_name, row);
     this.now = request.now ?? Date.now;
@@ -440,6 +454,44 @@ class Pass {
     info: (message, data) => void this.journal.log("info", message, data),
     warn: (message, data) => void this.journal.log("warn", message, data),
     error: (message, data) => void this.journal.log("error", message, data),
+  };
+
+  /**
+   * `ctx.notifyOwner`. Checked here, before the notifier sees anything: inside a step (or it would repeat on
+   * every replay), and within the length limits. The message's idempotency key is derived like a keyed
+   * provider call's (`<step key>:notifyOwner:<n>`), counted when the call is made.
+   */
+  readonly notifyOwner = async (text: string, options: NotifyOwnerOptions = {}): Promise<NotifyOwnerResult> => {
+    if (this.inStep === null) {
+      throw new ActuatorError("ctx.notifyOwner() must be called inside ctx.step.do(...); otherwise it repeats on every replay.");
+    }
+    if (typeof text !== "string" || text.trim() === "") throw new ActuatorError("ctx.notifyOwner() needs the message text.");
+    if (text.length > NOTIFY_OWNER_MAX_TEXT) {
+      throw new ActuatorError(`ctx.notifyOwner(): the text is ${text.length} characters; at most ${NOTIFY_OWNER_MAX_TEXT.toLocaleString("en")} are allowed.`);
+    }
+    const subject = options?.subject;
+    if (subject !== undefined && typeof subject !== "string") throw new ActuatorError("ctx.notifyOwner(): subject must be a string.");
+    if (subject !== undefined && subject.length > NOTIFY_OWNER_MAX_SUBJECT) {
+      throw new ActuatorError(`ctx.notifyOwner(): the subject is ${subject.length} characters; at most ${NOTIFY_OWNER_MAX_SUBJECT} are allowed.`);
+    }
+    const n = this.keyedCalls.get("notifyOwner") ?? 0;
+    this.keyedCalls.set("notifyOwner", n + 1);
+    const idempotencyKey = await fitKey(`${this.stepKey}:notifyOwner:${n}`);
+    if (!this.owner) {
+      await this.journal.log("info", `Owner notification: ${subject ? `${subject}: ` : ""}${text}`);
+      return { sent: false, reason: NO_OWNER_NOTIFIER };
+    }
+    const result = await this.owner.notify({
+      text,
+      ...(subject ? { subject } : {}),
+      runId: this.request.runId,
+      actuator: this.actuator.name,
+      idempotencyKey,
+    });
+    const sent = result?.sent === true;
+    const reason = typeof result?.reason === "string" && result.reason ? result.reason : undefined;
+    if (!sent) await this.journal.log("warn", `Owner notification not sent: ${reason ?? "the notifier gave no reason"}`);
+    return { sent, ...(reason ? { reason } : {}) };
   };
 
   /**

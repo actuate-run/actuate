@@ -200,6 +200,49 @@ export interface Trigger {
   cron?: string;
 }
 
+/** Longest `ctx.notifyOwner` text, characters. */
+export const NOTIFY_OWNER_MAX_TEXT = 4_000;
+/** Longest `ctx.notifyOwner` subject, characters. */
+export const NOTIFY_OWNER_MAX_SUBJECT = 200;
+
+export interface NotifyOwnerOptions {
+  /** Subject line, at most 200 characters. The hosted platform's default: `<actuator>: message from your actuator`. */
+  subject?: string;
+}
+
+/** What became of a `ctx.notifyOwner` message. */
+export interface NotifyOwnerResult {
+  /** Whether the message went out. */
+  sent: boolean;
+  /** Why not, when it didn't: no notifier configured, a daily cap reached, ... */
+  reason?: string;
+}
+
+/** One `ctx.notifyOwner` message, as the runtime hands it to an {@link OwnerNotifier}. */
+export interface OwnerNotification {
+  /** 1 to 4,000 characters. */
+  text: string;
+  /** At most 200 characters. */
+  subject?: string;
+  runId: string;
+  actuator: string;
+  /**
+   * `<step idempotency key>:notifyOwner:<n>`, `n` counting this step attempt's `notifyOwner` calls from 0, as for
+   * provider calls (see {@link StepInfo.idempotencyKey}): the same on every retry of the step, so a notifier
+   * that deduplicates on it never sends one message twice.
+   */
+  idempotencyKey: string;
+}
+
+/**
+ * Delivers `ctx.notifyOwner` messages: the hosted platform emails the account (and its alert channel);
+ * `actuate dev` prints them. Return `{ sent: false, reason }` for a delivery limit (a daily cap) rather than
+ * throwing: the runtime logs the reason and the step carries on. Throw only for a failure worth retrying the step for.
+ */
+export interface OwnerNotifier {
+  notify(message: OwnerNotification): Promise<NotifyOwnerResult>;
+}
+
 export interface BaseContext {
   /** Unique per run. Reused across every replay of the run. */
   runId: string;
@@ -208,6 +251,18 @@ export interface BaseContext {
   step: Step;
   db: Db;
   log: Logger;
+  /**
+   * Send the actuator's owner a short message: on the hosted platform, an email to the account (and the
+   * account's alert channel, when one is set up); under `actuate dev`, a line in the terminal. For things a
+   * person should hear about ("3 refunds are waiting longer than a day"), not for messaging customers
+   * (use `ctx.messaging`). No capability to declare.
+   *
+   * Call it inside `ctx.step.do`, like provider calls: a retried step reuses the message's idempotency key,
+   * so it is not sent twice. `text` is 1 to 4,000 characters and `subject` at most 200; secret config
+   * values in either are redacted. Resolves to `{ sent: false, reason }` instead of throwing when the
+   * message can't go out (no notifier, a daily cap reached); the reason is also logged.
+   */
+  notifyOwner(text: string, options?: NotifyOwnerOptions): Promise<NotifyOwnerResult>;
 }
 
 /** The context passed to `run`: base context, a client per declared capability, and optional ones that may be absent. */

@@ -51,7 +51,7 @@ export function wranglerConfig(meta: { name: string; cron: string[] }, vars: Rec
 /** The worker `actuate dev` runs. `plan` picks the platform guards; null turns them off. */
 export function devEntry(actuatorPath: string, port: number, plan: PlanId | null = null, opts: { refuseCapabilities?: boolean } = {}): string {
   return `import { createDevRuntime } from ${JSON.stringify(ownModule("dev-runtime"))};
-import { devProviders } from ${JSON.stringify(cliResolve("@actuate/runtime"))};
+import { consoleOwnerNotifier, devProviders } from ${JSON.stringify(cliResolve("@actuate/runtime"))};
 import { providersFromEnv, parseProviderWebhookFromEnv } from ${JSON.stringify(cliResolve("@actuate/providers"))};
 import actuator from ${JSON.stringify(actuatorPath)};
 
@@ -64,6 +64,8 @@ const runtime = createDevRuntime(actuator, {
     return { ...devProviders(base), ...providersFromEnv(env, base) };
   },
   providerWebhook: (kind, request, env) => parseProviderWebhookFromEnv(env, kind, request),
+  // ctx.notifyOwner prints here; the hosted platform emails the account.
+  notifyOwner: () => consoleOwnerNotifier(),
 });
 export default runtime.worker;
 export const ActuatorObject = runtime.ActuatorObject;

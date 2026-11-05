@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { z, type Actuator, type Json, type Providers } from "@actuate/sdk";
+import { z, type Actuator, type Json, type OwnerNotifier, type Providers } from "@actuate/sdk";
 import { RunManager, type ApprovalRequest, type RunManagerOptions, type RunStatus } from "./manager.js";
 import { executePass } from "./pass.js";
 import { createHttpProvider } from "./providers.js";
@@ -44,6 +44,12 @@ export interface RuntimeOptions<E extends RuntimeEnv = RuntimeEnv> {
    * `@actuate/providers` provides `parseProviderWebhookFromEnv` for this.
    */
   providerWebhook?: (kind: string, request: Request, env: E) => Promise<ProviderWebhookOutcome>;
+  /**
+   * Deliver `ctx.notifyOwner` messages (email, chat). Without one, a message goes to the run's log and the
+   * call resolves to `{ sent: false }`. `actuate dev` prints them. Secret config values are redacted before
+   * the notifier sees the text.
+   */
+  notifyOwner?: (env: E) => OwnerNotifier | undefined;
   /** Runtime guards passed to the RunManager (wait/retry limits, pass admission, event caps, max passes). */
   guards?: Pick<RunManagerOptions, "passLimits" | "admitPass" | "maxBufferedEvents" | "maxEventBytes" | "maxPasses" | "maxLogLinesPerPass">;
 }
@@ -151,6 +157,8 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
     private configError: string | null = null;
     /** Values of the config's secret (writeOnly) fields, kept out of logs, errors and every run read. */
     private secrets: string[] = [];
+    /** Built on first use; null when none is configured. */
+    private owner: OwnerNotifier | null | undefined;
 
     constructor(state: DurableObjectState, env: E) {
       super(state, env);
@@ -174,7 +182,7 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
           invoke: (request, journal) =>
             this.configError
               ? Promise.resolve({ status: "failed", error: { name: "ConfigError", message: this.configError } })
-              : executePass(actuator, request, { journal, config: this.config, providers: this.getProviders() }),
+              : executePass(actuator, request, { journal, config: this.config, providers: this.getProviders(), ...this.getOwner() }),
           notifyApproval: (req) => this.notifyApproval(req),
           scheduleWake: async (at) => {
             if (at === null) await state.storage.deleteAlarm();
@@ -205,6 +213,18 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
         }
       }
       return this.providers;
+    }
+
+    /** The owner notifier, with secrets redacted from what it is given. */
+    private getOwner(): { owner?: OwnerNotifier } {
+      if (this.owner === undefined) {
+        const inner = options.notifyOwner?.(this.env);
+        const redact = (text: string) => redactSecrets(text, this.secrets);
+        this.owner = inner
+          ? { notify: (m) => inner.notify({ ...m, text: redact(m.text), ...(m.subject !== undefined ? { subject: redact(m.subject) } : {}) }) }
+          : null;
+      }
+      return this.owner ? { owner: this.owner } : {};
     }
 
     private async notifyApproval(req: ApprovalRequest): Promise<void> {

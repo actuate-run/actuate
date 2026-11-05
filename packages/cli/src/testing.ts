@@ -32,6 +32,7 @@ import {
   type LlmRequest,
   type LlmResponse,
   type MessagingSendOptions,
+  type OwnerNotification,
   type PaymentEvent,
   type Providers,
   type RefundRequest,
@@ -163,6 +164,8 @@ export class ActuatorTest<A extends Actuator = Actuator> {
   readonly llmReplies: string[];
   /** Requests made through `ctx.http` (clones, so you can read their bodies). */
   readonly requests: Request[] = [];
+  /** Messages sent through `ctx.notifyOwner` (each reported sent). */
+  readonly ownerNotifications: OwnerNotification[] = [];
   /** Approval and input requests as the runtime sent them, links included (see {@link followLink}). */
   readonly approvals: TestApprovalRequest[] = [];
   readonly manager: RunManager;
@@ -205,7 +208,7 @@ export class ActuatorTest<A extends Actuator = Actuator> {
       consoleLogs: options.logs ?? false,
       notifyApproval: async (request) => void this.approvals.push({ ...request, message: request.message ?? "" }),
       ...(this.plan ? planGuards(PLANS[this.plan]) : {}),
-      invoke: (request, journal) => executePass(guarded, request, { journal, config, providers }),
+      invoke: (request, journal) => executePass(guarded, request, { journal, config, providers, owner: { notify: async (m) => (this.ownerNotifications.push(m), { sent: true }) } }),
     });
     openHarnesses++;
     if (options.fakeDate !== false) globalThis.Date = TestDate as DateConstructor;

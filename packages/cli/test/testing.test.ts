@@ -70,6 +70,19 @@ describe("testActuator", () => {
     expectTypeOf(t.run<{ custom: true }>(run.runId).output).toEqualTypeOf<{ custom: true } | null>();
   });
 
+  it("records ctx.notifyOwner messages", async () => {
+    const act = defineActuator({
+      name: "teller",
+      description: "test",
+      input: z.object({}),
+      run: (ctx) => ctx.step.do("tell", () => ctx.notifyOwner("Look at this", { subject: "FYI" })),
+    });
+    const t = make(act);
+    const run = await t.start();
+    expect(run.output).toEqual({ sent: true });
+    expect(t.ownerNotifications).toEqual([{ text: "Look at this", subject: "FYI", runId: run.runId, actuator: "teller", idempotencyKey: `${run.runId}:tell:notifyOwner:0` }]);
+  });
+
   it("follows a signed link and reports a refusal instead of throwing", async () => {
     const t = make(refund);
     const run = await t.start(order);

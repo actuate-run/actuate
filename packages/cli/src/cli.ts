@@ -221,7 +221,7 @@ Alongside the tests, actuator.ts's deploy checks run locally (no network, not in
     name: "check",
     usage: "actuate check [file] [--platform] [--plan <plan>] [--offline] [--json]",
     summary: "Lint for replay safety; with --platform, also run the platform's deploy checks",
-    description: `Replay safety: side effects and non-determinism outside ctx.step.do (fetch, provider calls, Date.now(), new Date(), Math.random(), crypto.randomUUID(); writes through ctx.db as warnings).
+    description: `Replay safety: side effects and non-determinism outside ctx.step.do (fetch, provider calls, ctx.notifyOwner(), Date.now(), new Date(), Math.random(), crypto.randomUUID(); writes through ctx.db as warnings).
 
 --platform also bundles the actuator and runs the hosted platform's deploy checks locally, so a deploy that would be refused (and still count against your deploy budget) stops here: bundle size, cron count and frequency for the plan, the cron input, http.allow, regexes in the input schema, capabilities on the plan, actuate.config.json against the config schema; logged in, also providers set up, actuator count and deploys left this month. They mirror the platform's rules; the platform has the final say.`,
     options: {
