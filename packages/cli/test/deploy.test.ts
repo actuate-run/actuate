@@ -1,22 +1,14 @@
-import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { configChanged, deploy, prepareDeploy } from "../src/deploy.js";
-import { fakeServer, runCli } from "./helpers.js";
+import { fakeServer, runCli, secretProject } from "./helpers.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/project", import.meta.url));
 const quiet = () => {};
-const secretFixture = fileURLToPath(new URL("./fixtures/secret-project", import.meta.url));
 
-/** A copy of the secret-project fixture with this actuate.config.json, next to it (so @actuate/sdk resolves). Remove it after. */
-export function secretProject(config: unknown): string {
-  const dir = mkdtempSync(join(fileURLToPath(new URL("./fixtures", import.meta.url)), ".tmp-"));
-  copyFileSync(join(secretFixture, "actuator.ts"), join(dir, "actuator.ts"));
-  writeFileSync(join(dir, "actuate.config.json"), JSON.stringify(config));
-  return dir;
-}
 
 const me = (deploys = 3, plan = "maker") => ({ email: "a@b.test", plan, usage: { deploys } });
 const deployed = { id: "act_1", name: "fixture_greeter", version: 4, urls: { api: "a", webhook: "w", mcp: "m", openapi: "o", dashboard: "d" } };

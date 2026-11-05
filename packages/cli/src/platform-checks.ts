@@ -52,6 +52,7 @@ export const PLATFORM_RULES: ReadonlyArray<{ rule: string; checks: string; needs
   { rule: "input-regex", checks: "no regex in the input schema with nested quantifiers such as (a+)+" },
   { rule: "plan-capability", checks: "every required capability is on the plan (optional ones get a warning)", needs: "plan" },
   { rule: "config", checks: "actuate.config.json is JSON and matches the config schema" },
+  { rule: "config-secret", checks: "actuate.config.json sets no secret field while git would commit it (warning; local only)" },
   { rule: "provider-missing", checks: "a provider is set up for every required capability", needs: "login" },
   { rule: "actuator-limit", checks: "a new actuator fits the plan's actuator count", needs: "login" },
   { rule: "deploy-budget", checks: "deploy attempts left this month", needs: "login" },

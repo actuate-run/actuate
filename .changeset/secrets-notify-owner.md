@@ -2,6 +2,7 @@
 "@actuate/sdk": minor
 "@actuate/runtime": minor
 "@actuate/cli": minor
+"create-actuate": minor
 ---
 
 Secret config fields.
@@ -17,3 +18,8 @@ Secret config fields.
 - **runtime:** `executePass` takes an `owner` notifier, and `createRuntime` a `notifyOwner: (env) => OwnerNotifier` option (secret config values are redacted before it sees a message). Without one, the message is written to the run's log and the call resolves to `{ sent: false }`. New `consoleOwnerNotifier()`, which `actuate dev` uses.
 - **cli:** `@actuate/cli/testing` records messages in `t.ownerNotifications`.
 - **cli:** `actuate check` reports `ctx.notifyOwner()` outside `ctx.step.do` as an error (`no-notify-outside-step`).
+
+Committed secrets.
+
+- **cli:** `actuate check` and `actuate deploy` (and `check --platform`, `deploy --dry-run`) warn when `actuate.config.json` sets a value for a secret field and git would commit the file (inside a git work tree, not ignored). The warning names the fields and says to set them in the dashboard (Config tab) and leave them out of the file; the platform keeps a stored secret when the file omits it. It is a warning, never an error, and it is in `--json` output too (rule `config-secret`). Outside a git repository, or without git, nothing is said.
+- **create-actuate:** the starter's `AGENTS.md` says to mark API keys with `secret()` and set them in the dashboard.

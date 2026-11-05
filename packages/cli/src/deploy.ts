@@ -6,6 +6,7 @@ import type { Actuator } from "@actuate/sdk";
 import { CliError, describePlan, resolvePlan, type ResolvedPlan } from "./account.js";
 import { ApiError, api, readCredentials, type Credentials } from "./api.js";
 import { checkSource, formatDiagnostic, type Diagnostic } from "./check.js";
+import { committedSecretIssue } from "./config-secrets.js";
 import { bundleActuator, describeActuator, loadActuator, type ActuatorMetadata } from "./load.js";
 import { platformChecks, type AccountFacts, type PlatformIssue } from "./platform-checks.js";
 
@@ -168,6 +169,10 @@ export async function deployChecks(
     ...(prepared.config ? { config: prepared.config } : {}),
     account: account.facts,
   });
+  // Read even with --no-config: the file is committed whether or not this deploy sends it.
+  const configFile = prepared.config ?? readConfigFile(cwd);
+  const committed = configFile && "value" in configFile ? committedSecretIssue(cwd, request.metadata.configSchema, configFile.value) : null;
+  if (committed) issues.push(committed);
   log(`Bundled ${request.metadata.name}: ${(bytes / 1024).toFixed(1)} KiB, sha256 ${request.codeHash.slice(0, 12)}`);
   log(
     `Deploy checks for the ${describePlan(resolved)}.${!creds ? " The provider, actuator-count and deploy-budget checks need a login (`actuate login`)." : opts.offline ? " Offline: the provider, actuator-count and deploy-budget checks were skipped." : ""}`,
