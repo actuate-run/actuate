@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { committedSecretIssue, gitWouldCommit } from "../src/config-secrets.js";
+import { committedSecretDiagnostic, committedSecretIssue, gitWouldCommit } from "../src/config-secrets.js";
 import { deploy } from "../src/deploy.js";
 import { runCli, secretProject } from "./helpers.js";
 
@@ -111,6 +111,19 @@ describe("actuate check and deploy", () => {
     const lines: string[] = [];
     expect(await deploy("actuator.ts", dir, { config: false, dryRun: true, plan: "maker", log: (l) => lines.push(l) })).toBe(0);
     expect(lines.join("\n")).toContain("warn   actuate.config.json sets the secret field apiKey");
+  });
+
+  it("plain check doesn't load the actuator when actuate.config.json holds no values", async () => {
+    inRepo();
+    const dir = project({});
+    writeFileSync(join(dir, "actuator.ts"), 'throw new Error("loaded"); export default 1;');
+    expect(await committedSecretDiagnostic(dir, "actuator.ts", (async () => { throw new Error("must not load"); }) as never)).toBeNull();
+    writeFileSync(join(dir, "actuate.config.json"), JSON.stringify({ greeting: "", apiKey: null }));
+    expect(await committedSecretDiagnostic(dir, "actuator.ts", (async () => { throw new Error("must not load"); }) as never)).toBeNull();
+    let loaded = false;
+    writeFileSync(join(dir, "actuate.config.json"), JSON.stringify({ greeting: "Hi" }));
+    await committedSecretDiagnostic(dir, "actuator.ts", (async () => { loaded = true; throw new Error("x"); }) as never);
+    expect(loaded).toBe(true);
   });
 
   it("stay silent when the file sets no secret or git ignores it", async () => {

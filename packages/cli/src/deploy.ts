@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { omitSecrets, secretFields } from "@actuate/runtime";
+import { describeJsonError, omitSecrets, secretFields } from "@actuate/runtime";
 import type { Actuator } from "@actuate/sdk";
 import { CliError, describePlan, resolvePlan, type ResolvedPlan } from "./account.js";
 import { ApiError, api, readCredentials, type Credentials } from "./api.js";
@@ -32,10 +32,12 @@ export interface DeployResponse {
 export function readConfigFile(cwd: string): { value: unknown } | { error: string } | undefined {
   const path = join(cwd, "actuate.config.json");
   if (!existsSync(path)) return undefined;
+  const text = readFileSync(path, "utf8");
   try {
-    return { value: JSON.parse(readFileSync(path, "utf8")) };
+    return { value: JSON.parse(text) };
   } catch (err) {
-    return { error: `actuate.config.json is not valid JSON: ${(err as Error).message}` };
+    // Never the parser's message: it quotes the text around the error, which may be part of a secret (and CI logs keep it).
+    return { error: `actuate.config.json ${describeJsonError(err, text)}` };
   }
 }
 
@@ -127,11 +129,12 @@ function canonical(value: unknown): string {
 
 /**
  * Whether the file's configuration differs from the deployed one. The platform shows secret fields as `null`,
- * so they are compared without them; a file that sets a secret is always sent, since there is no way to tell
- * whether its value changed (the platform keeps the stored value when the file leaves the field out).
+ * so they are compared without them. A file that mentions a secret field at all (a value, `""` or `[]` to clear
+ * it, even `null`) is always sent, since there is no way to tell whether it changed; one that leaves every
+ * secret out is sent only for other changes, and the platform keeps the stored secrets.
  */
 export function configChanged(configSchema: unknown, deployed: unknown, file: unknown): boolean {
-  if (secretFields(configSchema, file).length) return true;
+  if (secretFields(configSchema, file, { includeEmpty: true }).length) return true;
   return canonical(omitSecrets(configSchema, deployed)) !== canonical(omitSecrets(configSchema, file));
 }
 

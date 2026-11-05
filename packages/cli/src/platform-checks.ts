@@ -39,13 +39,15 @@ export interface PlatformCheckInput {
   bundleBytes?: number;
   /** actuate.config.json as it would be sent: its value, or why it couldn't be read. Omit when no config is sent. */
   config?: { value: unknown } | { error: string };
+  /** Where `config` came from, for its error message. Default "actuate.config.json". */
+  configSource?: string;
   account?: AccountFacts;
 }
 
 /** Every rule, for `--help` and `--json`: what it checks and what it needs. */
 export const PLATFORM_RULES: ReadonlyArray<{ rule: string; checks: string; needs?: "plan" | "login" }> = [
   { rule: "bundle-size", checks: "the bundle is at most 5 MB" },
-  { rule: "name", checks: "the name is lowercase letters, digits and underscores (at most 64)" },
+  { rule: "name", checks: "the name is lowercase letters, digits and underscores (at most 64), not starting with actuate_" },
   { rule: "cron", checks: "cron syntax, how many schedules, and how often they fire (alone and together)", needs: "plan" },
   { rule: "cron-input", checks: "the input schema accepts {}, the input every cron run gets (warning)" },
   { rule: "http-allow", checks: "http.allow: at most 20 hostnames, no IP addresses, no actuate.run, no wildcard over a shared zone" },
@@ -70,6 +72,10 @@ export function platformChecks(input: PlatformCheckInput): PlatformIssue[] {
     error("bundle-size", `Bundle is larger than 5 MB (${(input.bundleBytes / 1024 / 1024).toFixed(1)} MB).`);
   }
   if (!/^[a-z][a-z0-9_]{0,63}$/.test(m.name)) error("name", `Invalid actuator name "${m.name}"`);
+  // The platform's MCP endpoint has its own tools under this prefix. Self-hosted actuators may still use it.
+  else if (m.name.startsWith("actuate_")) {
+    error("name", `Actuator names starting with "actuate_" are reserved for Actuate's built-in tools (actuate_get_run, actuate_list_runs, actuate_cancel_run). Rename it.`);
+  }
 
   // A malformed expression is refused on every plan, so it is an error even when the plan is only the default.
   // The plan's limits are still checked on the count of all schedules and on the expressions that parse.
@@ -106,7 +112,7 @@ export function platformChecks(input: PlatformCheckInput): PlatformIssue[] {
   if (input.config && "error" in input.config) error("config", input.config.error);
   else if (input.config && input.actuator) {
     const parsed = (input.actuator.config ?? z.object({})).safeParse(input.config.value);
-    if (!parsed.success) error("config", `Invalid config in actuate.config.json:${formatIssues(parsed.error.issues)}`);
+    if (!parsed.success) error("config", `Invalid config in ${input.configSource ?? "actuate.config.json"}:${formatIssues(parsed.error.issues)}`);
   }
 
   const a = input.account;

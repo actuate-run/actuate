@@ -36,19 +36,31 @@ export function committedSecretIssue(cwd: string, configSchema: unknown, config:
   };
 }
 
+/** Whether a config holds any value at all (not only `{}`, `null`s and `""`s). */
+const hasAnyValue = (v: unknown): boolean =>
+  typeof v === "string" ? v !== "" : Array.isArray(v) ? v.some(hasAnyValue) : typeof v === "object" && v !== null ? Object.values(v).some(hasAnyValue) : v !== null && v !== undefined;
+
+/** The actuator's config JSON Schema, by loading the file (top-level code runs). */
+async function loadConfigSchema(cwd: string, file: string): Promise<unknown> {
+  const { describeActuator, loadActuator } = await import("./load.js");
+  return describeActuator(await loadActuator(resolve(cwd, file), join(cwd, ".actuate", "tmp"))).configSchema;
+}
+
 /**
- * The same warning for plain `actuate check`, as a diagnostic on actuate.config.json. Asks git first, and
- * loads the actuator for its config schema only when the file would be committed. Never throws: an actuator
- * that doesn't load is for the other checks to report.
+ * The same warning for plain `actuate check`, as a diagnostic on actuate.config.json. Loads the actuator for its
+ * config schema only when it can matter: the file holds some value and git would commit it. Never throws: an
+ * actuator that doesn't load is for the other checks to report.
  */
-export async function committedSecretDiagnostic(cwd: string, file: string): Promise<Diagnostic | null> {
+export async function committedSecretDiagnostic(
+  cwd: string,
+  file: string,
+  loadSchema: (cwd: string, file: string) => Promise<unknown> = loadConfigSchema,
+): Promise<Diagnostic | null> {
   const { readConfigFile } = await import("./deploy.js");
   const config = readConfigFile(cwd);
-  if (!config || !("value" in config) || !gitWouldCommit(cwd, "actuate.config.json")) return null;
+  if (!config || !("value" in config) || !hasAnyValue(config.value) || !gitWouldCommit(cwd, "actuate.config.json")) return null;
   try {
-    const { describeActuator, loadActuator } = await import("./load.js");
-    const actuator = await loadActuator(resolve(cwd, file), join(cwd, ".actuate", "tmp"));
-    const issue = committedSecretIssue(cwd, describeActuator(actuator).configSchema, config.value);
+    const issue = committedSecretIssue(cwd, await loadSchema(cwd, file), config.value);
     return issue ? { file: "actuate.config.json", line: 1, column: 1, severity: "warning", rule: issue.rule, message: issue.message } : null;
   } catch {
     return null;

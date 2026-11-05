@@ -160,7 +160,12 @@ describe("actuate deploy", () => {
     const schema = { type: "object", properties: { a: { type: "string" }, k: { type: "string", writeOnly: true } } };
     expect(configChanged(schema, { a: "x", k: null }, { a: "x" })).toBe(false);
     expect(configChanged(schema, { a: "x", k: null }, { a: "y" })).toBe(true);
-    expect(configChanged(schema, { a: "x", k: null }, { a: "x", k: "" })).toBe(false);
+    // A secret the file mentions is always sent, even to clear it; one it leaves out never is.
+    expect(configChanged(schema, { a: "x", k: null }, { a: "x", k: "" })).toBe(true);
+    expect(configChanged(schema, { a: "x", k: null }, { a: "x", k: null })).toBe(true);
+    const list = { type: "object", properties: { tokens: { type: "array", items: { type: "string", writeOnly: true } } } };
+    expect(configChanged(list, { tokens: [null, null] }, { tokens: [] })).toBe(true);
+    expect(configChanged(list, { tokens: [null, null] }, {})).toBe(false);
     expect(configChanged(schema, { a: "x", k: null }, { a: "x", k: "new-key" })).toBe(true);
   });
 
