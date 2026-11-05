@@ -102,6 +102,16 @@ describe("actuate deploy", () => {
     } finally {
       await changed.close();
     }
+    const warn = "Secrets in a list whose length changed are not kept (webhooks): enter them again.";
+    const warned = await fakeServer({ ...routes({ greeting: "Hello" }), "PUT /v1/actuators/fixture_greeter/config": { ok: true, warnings: [warn] } });
+    login(warned.url);
+    try {
+      expect((await runCli(["deploy"], fixture)).out).toContain(`warn  ${warn}`);
+      const json = await runCli(["deploy", "--json"], fixture);
+      expect(JSON.parse(json.out)).toMatchObject({ configUpdated: true, warnings: [warn] });
+    } finally {
+      await warned.close();
+    }
     const same = await fakeServer(routes({ greeting: "Hi" }));
     login(same.url);
     try {

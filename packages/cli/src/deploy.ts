@@ -244,15 +244,22 @@ export async function deploy(file: string, cwd: string, opts: DeployOptions): Pr
   if (deployed?.exists && deployed.codeHash === request.codeHash && !opts.force) {
     const name = encodeURIComponent(request.metadata.name);
     let action: "none" | "config" = "none";
+    // The platform may warn about the saved configuration (e.g. secrets dropped from a list whose length changed).
+    let warnings: string[] = [];
     if (request.config !== undefined) {
       const current = await api<{ config: unknown }>(creds!, `/v1/actuators/${name}/config`).catch(() => null);
       if (!current || configChanged(request.metadata.configSchema, current.config, request.config)) {
-        await api(creds!, `/v1/actuators/${name}/config`, { method: "PUT", body: JSON.stringify({ config: request.config }) });
+        const saved = await api<{ warnings?: string[] } | null>(creds!, `/v1/actuators/${name}/config`, { method: "PUT", body: JSON.stringify({ config: request.config }) });
+        warnings = saved?.warnings ?? [];
         action = "config";
       }
     }
-    if (opts.json) out(JSON.stringify({ ok: true, ...summary, deployedNow: false, configUpdated: action === "config", version: deployed.version }, null, 2));
-    else if (action === "config") out(`\n✓ ${request.metadata.name} v${deployed.version} already runs this code: updated its configuration only (no deploy used).`);
+    if (opts.json) {
+      out(JSON.stringify({ ok: true, ...summary, deployedNow: false, configUpdated: action === "config", version: deployed.version, warnings }, null, 2));
+      return 0;
+    }
+    for (const w of warnings) out(`warn  ${w}`);
+    if (action === "config") out(`\n✓ ${request.metadata.name} v${deployed.version} already runs this code: updated its configuration only (no deploy used).`);
     else out(`\n✓ Nothing to deploy: ${request.metadata.name} v${deployed.version} already runs this code${request.config !== undefined ? " and configuration" : ""}. Pass --force to deploy anyway.`);
     return 0;
   }
