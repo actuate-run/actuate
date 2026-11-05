@@ -198,6 +198,11 @@ export interface Trigger {
   kind: TriggerKind;
   /** The cron expression, for cron triggers. */
   cron?: string;
+  /**
+   * The API token or MCP connection that started the run: its ID and name, never the token itself. Set only on the
+   * hosted platform, for runs started with an API token or over MCP; absent for webhooks, cron and the open-source runtime.
+   */
+  agent?: { id: string; name: string };
 }
 
 /** Longest `ctx.notifyOwner` text, characters. */
