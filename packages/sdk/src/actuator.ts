@@ -228,7 +228,11 @@ export interface ActuatorDefinition<
   name: string;
   /** What the actuator does. Becomes the MCP tool description, so write it for a model. */
   description: string;
-  /** Operator settings, set once. Defaults are used for anything not configured. */
+  /**
+   * Operator settings, set once. Defaults are used for anything not configured. Wrap API keys, tokens and
+   * passwords in {@link secret} (`apiKey: secret(z.string())`): their values are redacted from logs, errors
+   * and run records, and the platform never shows them again once set.
+   */
   config?: C;
   /** The payload of one run. Validated before any code runs. */
   input: I;

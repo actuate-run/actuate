@@ -5,6 +5,7 @@ export * from "./providers.js";
 export * from "./sql.js";
 export * from "./tokens.js";
 export * from "./node-sqlite.js";
+export { collectSecrets, redactSecrets, secretFields, omitSecrets, mergeSecrets, SECRET_PLACEHOLDER, MIN_SECRET_LENGTH } from "./secrets.js";
 export { approvalPage, toCsv, type LinkInfo } from "./http-util.js";
 export { tokenizeSql, checkActuatorSql, MAX_SQL_PARAM_BYTES, type SqlToken } from "./sql-guard.js";
 export { meteredNodeSqlite, type StatementCost, type MeteredNodeSqliteOptions } from "./node-sqlite-meter.js";

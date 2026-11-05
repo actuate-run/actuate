@@ -29,6 +29,7 @@ export default defineActuator({
 | `ctx.step.waitForApproval` / `waitForInput` | Resume when a person approves or answers through a signed link |
 | `ctx.db` | The actuator's own SQLite database. `batch([...])` runs statements all-or-nothing; `commitWithStep([...])` applies them with the step's completion |
 | `ctx.messaging`, `ctx.payment`, `ctx.llm`, `ctx.http` | Declared capabilities, backed by your own accounts |
+| `secret(schema)` | Mark a config field as secret (`apiKey: secret(z.string())`): its value is redacted from logs, errors and run records, and the platform never shows it again |
 
 Reference: [SDK API](https://actuate.run/docs/reference/sdk/).
 

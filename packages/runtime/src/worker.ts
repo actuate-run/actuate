@@ -3,6 +3,7 @@ import { z, type Actuator, type Json, type Providers } from "@actuate/sdk";
 import { RunManager, type ApprovalRequest, type RunManagerOptions, type RunStatus } from "./manager.js";
 import { executePass } from "./pass.js";
 import { createHttpProvider } from "./providers.js";
+import { collectSecrets, mergeSecrets, redactSecrets } from "./secrets.js";
 import { durableObjectSql } from "./sql.js";
 import { approvalPage, toCsv } from "./http-util.js";
 
@@ -124,6 +125,17 @@ export interface Runtime<E extends RuntimeEnv> {
   ActuatorObject: new (state: DurableObjectState, env: E) => ActuatorObjectInstance;
 }
 
+/** The values of the config's secret fields, from its JSON Schema (`writeOnly`), raw and parsed. */
+function configSecrets(schema: z.ZodType, raw: unknown, parsed: unknown): string[] {
+  let jsonSchema: unknown;
+  try {
+    jsonSchema = z.toJSONSchema(schema, { io: "input", unrepresentable: "any" });
+  } catch {
+    return [];
+  }
+  return mergeSecrets(collectSecrets(jsonSchema, raw), parsed === undefined ? [] : collectSecrets(jsonSchema, parsed));
+}
+
 type ProviderWebhookEvent = { event: string; payload: Json };
 /** What a provider webhook handler returns: events to deliver, none, or a plain-text handshake reply. */
 export type ProviderWebhookOutcome = ProviderWebhookEvent | ProviderWebhookEvent[] | { reply: string } | null;
@@ -137,6 +149,8 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
     private providers: Partial<Providers> = {};
     private config: unknown;
     private configError: string | null = null;
+    /** Values of the config's secret (writeOnly) fields, kept out of logs, errors and every run read. */
+    private secrets: string[] = [];
 
     constructor(state: DurableObjectState, env: E) {
       super(state, env);
@@ -151,6 +165,7 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
         this.manager = new RunManager({
           ...options.guards,
           sql: durableObjectSql(state.storage),
+          secrets: () => this.secrets,
           approvalSecret: secret,
           approvalUrl: () => {
             if (!this.publicUrl) console.warn("[actuate] ACTUATE_PUBLIC_URL is not set, so approval links are relative. Set it to this actuator's origin.");
@@ -173,8 +188,10 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
       try {
         const raw = options.config ? options.config(this.env) : JSON.parse(this.env.ACTUATE_CONFIG ?? "{}");
         const parsed = configSchema.safeParse(raw);
+        // Secrets from the raw config too: an invalid config, or one a transform changes, still holds them.
+        this.secrets = configSecrets(configSchema, raw, parsed.success ? parsed.data : undefined);
         if (parsed.success) this.config = parsed.data;
-        else this.configError = `Invalid configuration: ${parsed.error.message}`;
+        else this.configError = redactSecrets(`Invalid configuration: ${parsed.error.message}`, this.secrets);
       } catch (err) {
         this.configError = `Invalid ACTUATE_CONFIG: ${err instanceof Error ? err.message : String(err)}`;
       }
@@ -413,7 +430,7 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
         }
         return json({ error: "not found" }, 404);
       } catch (err) {
-        return json({ error: err instanceof Error ? err.message : String(err) }, 500);
+        return json({ error: m.redact(err instanceof Error ? err.message : String(err)) }, 500);
       }
     }
 

@@ -52,7 +52,7 @@ beforeAll(async () => {
     compatibilityDate: "2025-09-01",
     compatibilityFlags: ["nodejs_compat"],
     durableObjects: { ACTUATOR: { className: "ActuatorObject", useSQLite: true } },
-    bindings: { ACTUATE_CONFIG: JSON.stringify({ greeting: "Hello" }), ACTUATE_TOKEN: "admin", ACTUATE_RUN_TOKEN: "agent", ACTUATE_WEBHOOK_SECRET: "whs_test" },
+    bindings: { ACTUATE_CONFIG: JSON.stringify({ greeting: "Hello", apiKey: "sk_e2e_secret_value" }), ACTUATE_TOKEN: "admin", ACTUATE_RUN_TOKEN: "agent", ACTUATE_WEBHOOK_SECRET: "whs_test" },
   });
 }, 60_000);
 
@@ -191,6 +191,27 @@ describe("self-hosted runtime on workerd", () => {
     expect((await call(`/runs/${started.body.runId}/inputs/why`, { json: { text: "x" } })).status).toBe(401);
     expect((await call(`/runs/${started.body.runId}/inputs/why`, { headers: auth, json: { text: "Because" } })).body.ok).toBe(true);
     expect((await call(`/runs/${started.body.runId}`, { headers: auth })).body.output).toEqual({ status: "Because" });
+  });
+
+  it("keeps secret config values out of every run read, while the run itself sees the real value", async () => {
+    const secret = "sk_e2e_secret_value";
+    const done = await call("/run", { headers: auth, json: { name: "Sam", mode: "leak" } });
+    expect(done.body).toMatchObject({ status: "COMPLETED", output: { key: "[secret]", same: true } });
+    const failed = await call("/run", { headers: agentAuth, json: { name: "fail", mode: "leak" } });
+    expect(failed.body).toMatchObject({ status: "FAILED", error: { message: "refused [secret]" } });
+
+    const reads = await Promise.all([
+      call(`/runs/${done.body.runId}`, { headers: auth }),
+      call(`/runs/${done.body.runId}`, { headers: agentAuth }),
+      call(`/runs/${failed.body.runId}`, { headers: auth }),
+      call("/runs", { headers: auth }),
+    ]);
+    const run = reads[0]!.body;
+    expect(run.steps.find((s: { name: string }) => s.name === "read-key").output).toBe("[secret]");
+    expect(run.logs.map((l: { message: string }) => l.message)).toContain("key is [secret]");
+    for (const read of [done, failed, ...reads]) expect(JSON.stringify(read.body)).not.toContain(secret);
+    // The config's JSON Schema marks the field, so other tools can tell it is secret.
+    expect((await call("/", { headers: auth })).body.config.properties.apiKey).toMatchObject({ writeOnly: true });
   });
 
   it("accepts webhooks by secret or signature, and dedupes signed replays by signature", async () => {

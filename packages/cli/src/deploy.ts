@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { omitSecrets, secretFields } from "@actuate/runtime";
 import type { Actuator } from "@actuate/sdk";
 import { CliError, describePlan, resolvePlan, type ResolvedPlan } from "./account.js";
 import { ApiError, api, readCredentials, type Credentials } from "./api.js";
@@ -123,6 +124,16 @@ function canonical(value: unknown): string {
   );
 }
 
+/**
+ * Whether the file's configuration differs from the deployed one. The platform shows secret fields as `null`,
+ * so they are compared without them; a file that sets a secret is always sent, since there is no way to tell
+ * whether its value changed (the platform keeps the stored value when the file leaves the field out).
+ */
+export function configChanged(configSchema: unknown, deployed: unknown, file: unknown): boolean {
+  if (secretFields(configSchema, file).length) return true;
+  return canonical(omitSecrets(configSchema, deployed)) !== canonical(omitSecrets(configSchema, file));
+}
+
 export interface DeployChecks {
   prepared: Prepared;
   resolved: ResolvedPlan;
@@ -227,7 +238,7 @@ export async function deploy(file: string, cwd: string, opts: DeployOptions): Pr
     let action: "none" | "config" = "none";
     if (request.config !== undefined) {
       const current = await api<{ config: unknown }>(creds!, `/v1/actuators/${name}/config`).catch(() => null);
-      if (!current || canonical(current.config) !== canonical(request.config)) {
+      if (!current || configChanged(request.metadata.configSchema, current.config, request.config)) {
         await api(creds!, `/v1/actuators/${name}/config`, { method: "PUT", body: JSON.stringify({ config: request.config }) });
         action = "config";
       }

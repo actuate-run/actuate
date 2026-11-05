@@ -19,7 +19,7 @@ async function start(plan: "sandbox" | "maker" | null, opts: { refuseCapabilitie
     compatibilityDate: "2025-09-01",
     compatibilityFlags: ["nodejs_compat"],
     durableObjects: { ACTUATOR: { className: "ActuatorObject", useSQLite: true } },
-    bindings: { ACTUATE_DEV: "1" },
+    bindings: { ACTUATE_DEV: "1", ACTUATE_CONFIG: JSON.stringify({ apiKey: "sk_dev_secret_value" }) },
   });
   const call = async (path: string, body?: unknown) => {
     const res = await mf.dispatchFetch(`http://localhost${path}`, body === undefined ? {} : { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" } });
@@ -86,6 +86,14 @@ describe("actuate dev --no-guards", () => {
     dev = await start(null);
   }, 60_000);
   afterAll(() => dev?.mf.dispose());
+
+  it("redacts secret config values from what it shows, as the platform does", async () => {
+    const run = await dev.call("/run", { mode: "leak" });
+    expect(run).toMatchObject({ status: "COMPLETED", output: "[secret]" });
+    const read = await dev.call(`/runs/${run.runId}`);
+    expect(read.logs.map((l: { message: string }) => l.message)).toContain("key [secret]");
+    expect(JSON.stringify([run, read, await dev.call("/runs")])).not.toContain("sk_dev_secret_value");
+  });
 
   it("allows what the guards refuse, and still meters rows", async () => {
     expect(await dev.call("/run", { mode: "pragma" })).toMatchObject({ status: "COMPLETED", output: 2 });
