@@ -43,8 +43,10 @@ import {
 } from "@actuate/sdk";
 import {
   RunManager,
+  collectSecrets,
   createHttpProvider,
   executePass,
+  mergeSecrets,
   meteredNodeSqlite,
   type ApprovalRequest,
   type LogRecord,
@@ -90,6 +92,12 @@ export interface TestActuatorOptions {
   fakeDate?: boolean;
   /** Print run logs to the console (default false). */
   logs?: boolean;
+  /**
+   * Redact `secret()` config values as the platform and `actuate dev` do (default false): runs, step outputs, logs,
+   * errors and `ownerNotifications` show `[secret]` instead. Replays still see the real value. Turn it on to assert
+   * that a secret never shows; leave it off to assert on real values.
+   */
+  redactSecrets?: boolean;
 }
 
 export interface SentMessage {
@@ -135,7 +143,8 @@ class TestDate extends RealDate {
  * Start a test of `actuator`. Every capability gets a recording fake unless
  * you replace it; inputs and config are validated with the actuator's schemas,
  * as the platform does. Unlike the platform and `actuate dev`, it does not redact
- * `secret()` config values from runs, steps and logs, so tests can assert on real values.
+ * `secret()` config values from runs, steps and logs unless you pass `redactSecrets: true`,
+ * so tests can assert on real values.
  */
 export function testActuator<A extends Actuator>(actuator: A, options: TestActuatorOptions = {}): ActuatorTest<A> {
   return new ActuatorTest(actuator, options);
@@ -196,6 +205,12 @@ export class ActuatorTest<A extends Actuator = Actuator> {
     const parsed = (actuator.config ?? z.object({})).safeParse(options.config ?? {});
     if (!parsed.success) throw new Error(`testActuator: invalid config:${formatIssues(parsed.error.issues)}`);
     const config = parsed.data;
+    // The same values the platform redacts: secret fields of the config as given, and of the parsed one (defaults).
+    let secrets: readonly string[] = [];
+    if (options.redactSecrets && actuator.config) {
+      const schema = z.toJSONSchema(actuator.config, { io: "input", unrepresentable: "any" });
+      secrets = mergeSecrets(collectSecrets(schema, options.config ?? {}), collectSecrets(schema, config));
+    }
 
     // With the guards off, the wrapper still attributes ctx.db rows to runs for t.usage().
     const guarded = withPlatformGuards(actuator, { usage: this.tracker, enforce: this.plan !== null });
@@ -209,7 +224,14 @@ export class ActuatorTest<A extends Actuator = Actuator> {
       consoleLogs: options.logs ?? false,
       notifyApproval: async (request) => void this.approvals.push({ ...request, message: request.message ?? "" }),
       ...(this.plan ? planGuards(PLANS[this.plan]) : {}),
-      invoke: (request, journal) => executePass(guarded, request, { journal, config, providers, owner: { notify: async (m) => (this.ownerNotifications.push(m), { sent: true }) } }),
+      ...(secrets.length ? { secrets: () => secrets } : {}),
+      invoke: (request, journal) =>
+        executePass(guarded, request, {
+          journal,
+          config,
+          providers,
+          owner: { notify: async (m) => (this.ownerNotifications.push(secrets.length ? this.manager.redact(m) : m), { sent: true }) },
+        }),
     });
     openHarnesses++;
     if (options.fakeDate !== false) globalThis.Date = TestDate as DateConstructor;
