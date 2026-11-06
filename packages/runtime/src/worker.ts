@@ -5,6 +5,7 @@ import { executePass } from "./pass.js";
 import { createHttpProvider } from "./providers.js";
 import { describeJsonError } from "./json-error.js";
 import { collectSecrets, mergeSecrets, redactSecrets } from "./secrets.js";
+import { deriveInputKey } from "./run-key.js";
 import { durableObjectSql } from "./sql.js";
 import { approvalPage, toCsv } from "./http-util.js";
 
@@ -482,10 +483,14 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
       const parsed = actuator.input.safeParse(body);
       if (!parsed.success) return json({ error: "Invalid input", issues: parsed.error.issues }, 400);
       const idempotencyKey = signedKey ?? request.headers.get("idempotency-key") ?? request.headers.get("x-github-delivery") ?? undefined;
+      // Without a key of the caller's own, a run API call gets one from the idempotencyKey input fields, computed
+      // from the body as sent (before zod's defaults and transforms). Webhooks never do.
+      const inputKey = !idempotencyKey && kind === "api" ? await deriveInputKey(actuator.idempotencyKey, body) : undefined;
       const { run, created } = await this.manager.start({
         input: parsed.data as Json,
         trigger: { kind },
         ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(inputKey ? { inputKey } : {}),
       });
       return json(run, created ? 201 : 200);
     }

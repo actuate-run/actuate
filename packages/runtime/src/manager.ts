@@ -11,6 +11,7 @@ import {
   type StepRow,
 } from "./journal.js";
 import { approvalEventKey } from "./pass.js";
+import { INPUT_KEY_COMPLETED_TTL_MS } from "./run-key.js";
 import { redactSecrets } from "./secrets.js";
 import { applySchema, type SqlDriver } from "./sql.js";
 import { signApproval, verifyApproval } from "./tokens.js";
@@ -124,8 +125,16 @@ function whoFields(who: Who): { by?: string; via: Who["via"] } {
 export interface StartRunOptions {
   input: Json;
   trigger: Trigger;
-  /** A retried request with the same key returns the first run instead of starting another. */
+  /** A retried request with the same key returns the first run instead of starting another, whatever that run's status. */
   idempotencyKey?: string;
+  /**
+   * The key derived from the actuator's `idempotencyKey` input fields (`deriveInputKey`). It returns a run with the
+   * same key that is RUNNING or WAITING, or COMPLETED in the last 24 hours; FAILED and CANCELLED runs never match,
+   * and a new run takes the key over from them. Stored apart from `idempotencyKey` and checked after it, so both
+   * can be given (a legacy MCP session's key and the derived one). Leave it out when the caller sent a key of its
+   * own, and for runs that must start anew (an owner's "run again").
+   */
+  inputKey?: string;
   runId?: string;
 }
 
@@ -150,21 +159,39 @@ export class RunManager {
   // ---------------------------------------------------------------- runs
 
   async start(opts: StartRunOptions): Promise<{ run: RunRecord; created: boolean }> {
-    if (opts.idempotencyKey) {
-      const existing = this.sql.exec(`SELECT run_id FROM _actuate_runs WHERE idempotency_key = ?`, [opts.idempotencyKey])[0];
-      if (existing) {
-        const runId = String(existing.run_id);
-        await this.locks.get(runId); // a concurrent duplicate waits for the first pass to settle
-        return { run: this.getRun(runId)!, created: false };
-      }
+    // No await between the lookups and the insert: on a Durable Object nothing else runs in between.
+    const now = this.now();
+    const completedSince = now - INPUT_KEY_COMPLETED_TTL_MS;
+    const existing =
+      (opts.idempotencyKey ? this.sql.exec(`SELECT run_id FROM _actuate_runs WHERE idempotency_key = ?`, [opts.idempotencyKey])[0] : undefined) ??
+      (opts.inputKey
+        ? this.sql.exec(
+            `SELECT run_id FROM _actuate_runs
+              WHERE input_key = ? AND (status IN ('RUNNING','WAITING') OR (status = 'COMPLETED' AND updated_at >= ?))`,
+            [opts.inputKey, completedSince],
+          )[0]
+        : undefined);
+    if (existing) {
+      const runId = String(existing.run_id);
+      await this.locks.get(runId); // a concurrent duplicate waits for the first pass to settle
+      return { run: this.getRun(runId)!, created: false };
     }
     const runId = opts.runId ?? newRunId();
-    const now = this.now();
-    this.sql.exec(
-      `INSERT INTO _actuate_runs (run_id, status, trigger_json, input_json, idempotency_key, created_at, updated_at)
-       VALUES (?, 'RUNNING', ?, ?, ?, ?, ?)`,
-      [runId, toJson(opts.trigger), toJson(opts.input), opts.idempotencyKey ?? null, now, now],
-    );
+    this.sql.transaction(() => {
+      // A derived key held by a run that no longer matches (failed, cancelled, completed over 24 hours ago) passes to the new run.
+      if (opts.inputKey) {
+        this.sql.exec(
+          `UPDATE _actuate_runs SET input_key = NULL
+            WHERE input_key = ? AND (status IN ('FAILED','CANCELLED') OR (status = 'COMPLETED' AND updated_at < ?))`,
+          [opts.inputKey, completedSince],
+        );
+      }
+      this.sql.exec(
+        `INSERT INTO _actuate_runs (run_id, status, trigger_json, input_json, idempotency_key, input_key, created_at, updated_at)
+         VALUES (?, 'RUNNING', ?, ?, ?, ?, ?, ?)`,
+        [runId, toJson(opts.trigger), toJson(opts.input), opts.idempotencyKey ?? null, opts.inputKey ?? null, now, now],
+      );
+    });
     await this.execute(runId);
     return { run: this.getRun(runId)!, created: true };
   }
