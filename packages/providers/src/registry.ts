@@ -2,6 +2,7 @@ import type { ProviderCapability, ProviderDefinition } from "./contract.js";
 import { anthropic } from "./anthropic.js";
 import { billplz } from "./billplz.js";
 import { chip } from "./chip.js";
+import { customWebhook } from "./custom-webhook.js";
 import { discord } from "./discord.js";
 import { google } from "./google.js";
 import { openai } from "./openai.js";
@@ -13,10 +14,11 @@ import { telegram } from "./telegram.js";
 import { toyyibpay } from "./toyyibpay.js";
 import { whatsapp } from "./whatsapp.js";
 
-export { anthropic, billplz, chip, discord, google, openai, openaiCompatible, resend, slack, stripe, telegram, toyyibpay, whatsapp };
+export { anthropic, billplz, chip, customWebhook, discord, google, openai, openaiCompatible, resend, slack, stripe, telegram, toyyibpay, whatsapp };
 export { NotSupportedError, ProviderApiError } from "./util.js";
 export { verifyStripeSignature } from "./stripe.js";
 export { billplzSignature } from "./billplz.js";
+export { signStandardWebhook, verifyStandardWebhook, type StandardWebhookVerification } from "./standard-webhooks.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type AnyProviderDefinition = ProviderDefinition<any, ProviderCapability>;
@@ -28,6 +30,7 @@ export const PROVIDERS = {
   slack,
   discord,
   resend,
+  "custom-webhook": customWebhook,
   stripe,
   toyyibpay,
   billplz,

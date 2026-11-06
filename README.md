@@ -76,7 +76,7 @@ The MCP endpoint is part of the hosted platform, not the open-source runtime. A 
 - **Free waits.** `sleep`, `sleepUntil` and `waitForEvent` hibernate the run. Nothing runs, and nothing is billed, until it wakes.
 - **People in the loop.** `waitForApproval` and `waitForInput` send a signed, single-use link and resume when someone answers.
 - **Its own database.** A SQLite database per actuator, with parameterised queries, migrations, and CSV and `.sql` export.
-- **Your accounts.** Telegram, WhatsApp, Slack, Discord and email; Stripe, Chip, ToyyibPay and Billplz; Anthropic, OpenAI, Google or any OpenAI-compatible API. Credentials are yours and never reach the model.
+- **Your accounts.** Telegram, WhatsApp, Slack, Discord, email, or any URL through a custom webhook; Stripe, Chip, ToyyibPay and Billplz; Anthropic, OpenAI, Google or any OpenAI-compatible API. Credentials are yours and never reach the model.
 - **Schema-checked tools.** Input is validated before anything runs. The hosted platform generates MCP tools and OpenAPI from your Zod schemas.
 - **Replay-safe by lint.** `actuate check` flags network calls, provider calls, clocks and randomness outside a step before you deploy.
 - **Tested before it ships.** `actuate test` runs your tests on the real engine with a clock you control, recording fakes and a rows meter, and `actuate dev` and `actuate check --platform` apply the hosted platform's guards and deploy checks locally.

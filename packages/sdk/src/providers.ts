@@ -4,7 +4,7 @@
  */
 
 export interface MessagingProvider {
-  /** Send a text message. `to` is a phone number, chat ID or email address, depending on the provider. */
+  /** Send a text message. `to` is a phone number, chat ID or email address, depending on the provider (a custom webhook passes it through as is). */
   send(to: string, text: string, options?: MessagingSendOptions): Promise<MessageReceipt>;
 }
 
@@ -15,14 +15,15 @@ export interface MessagingSendOptions {
    * Default "text".
    */
   format?: "text" | "html";
-  /** Which configured channel sends, when several are: "telegram", "whatsapp", "slack", "discord" or "email". Default: the first configured. */
+  /** Which configured channel sends, when several are: "telegram", "whatsapp", "slack", "discord", "custom-webhook" or "email". Default: the first configured. */
   channel?: string;
-  /** Email subject, when the channel is email. */
+  /** Email subject, when the channel is email. A custom webhook sends it too (`subject`, `{{subject}}`, or a Title header). */
   subject?: string;
   /** WhatsApp template name for messages outside the 24-hour service window. */
   template?: { name: string; language: string; variables?: string[] };
   /**
-   * Passed to the provider when it supports deduplication (Resend; Discord with a bot token, for a few minutes).
+   * Passed to the provider when it supports deduplication (Resend; Discord with a bot token, for a few minutes; a custom
+   * webhook derives its message `id` from it, so the receiver can drop a retried send).
    * Inside `ctx.step.do`, defaults to a key derived from the step's idempotency key: see `StepInfo.idempotencyKey`.
    */
   idempotencyKey?: string;
@@ -86,12 +87,15 @@ export interface PaymentEvent {
 
 /**
  * An inbound chat message, delivered as the event `message.<channel>.<from>` when the
- * messaging provider is set up to receive (WhatsApp app secret, Telegram webhook secret token).
+ * messaging provider is set up to receive (WhatsApp app secret, Telegram webhook secret token, custom webhook signing secret).
  * Wait for a reply with `ctx.step.waitForEvent("reply", { event: \`message.whatsapp.${phone}\` })`.
  */
 export interface InboundMessage {
   channel: string;
-  /** Who sent it, in the form `send(to)` accepts: a WhatsApp phone number (digits) or a Telegram chat ID. */
+  /**
+   * Who sent it, in the form `send(to)` accepts: a WhatsApp phone number (digits), a Telegram chat ID, or for a
+   * custom webhook, the `from` its endpoint posted.
+   */
   from: string;
   /** The text, a button's title, or a media caption. Empty for media without a caption. */
   text: string;

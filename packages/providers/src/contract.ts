@@ -34,7 +34,19 @@ export interface ProviderDefinition<C = unknown, K extends ProviderCapability = 
   /** Validate and normalise credentials. Throws with a readable message. */
   parseCredentials(input: unknown): C;
   /** Fields for a credential form; also the source of environment variable names (see `providersFromEnv`). */
-  credentialFields: Array<{ key: string; label: string; secret: boolean; help?: string; optional?: boolean }>;
+  credentialFields: Array<{
+    key: string;
+    label: string;
+    secret: boolean;
+    help?: string;
+    optional?: boolean;
+    /** Render a textarea: the value spans several lines (extra headers, a JSON template). */
+    multiline?: boolean;
+    /** The accepted values, for a select. The first is the default. */
+    options?: readonly string[];
+    /** Offer a "Generate" button: "whsec" makes a Standard Webhooks secret (whsec_ + base64 of 32 random bytes). */
+    generate?: "whsec";
+  }>;
   create(credentials: C, ctx: ProviderContext): Providers[K];
   /**
    * Verify and translate an inbound webhook. Return null for webhooks that are

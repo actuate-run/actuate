@@ -7,7 +7,7 @@ export function channelName(kind: string): string {
 
 /**
  * One `ctx.messaging` over several configured providers. `send(..., { channel })` picks one by
- * channel name ("telegram", "whatsapp", "slack", "discord", "email") or kind ("resend"); without
+ * channel name ("telegram", "whatsapp", "slack", "discord", "custom-webhook", "email") or kind ("resend"); without
  * `channel`, the first (the default) sends.
  */
 export function combineMessaging(entries: Array<{ kind: string; provider: MessagingProvider }>): MessagingProvider {
