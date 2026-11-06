@@ -10,5 +10,5 @@ export { approvalPage, toCsv, type LinkInfo } from "./http-util.js";
 export { describeJsonError } from "./json-error.js";
 export { tokenizeSql, checkActuatorSql, MAX_SQL_PARAM_BYTES, type SqlToken } from "./sql-guard.js";
 export { meteredNodeSqlite, type StatementCost, type MeteredNodeSqliteOptions } from "./node-sqlite-meter.js";
-export { deriveInputKey, derivesInputKey, inputKeyMaterial, INPUT_KEY_PREFIX, INPUT_KEY_COMPLETED_TTL_MS } from "./run-key.js";
+export { deriveInputKey, triggerDerivesInputKey, inputKeyMaterial, INPUT_KEY_PREFIX, INPUT_KEY_COMPLETED_TTL_MS } from "./run-key.js";
 export { mcpToolEntry, type McpToolEntry, type McpToolMetadata, type McpToolAnnotations } from "./mcp-tool.js";

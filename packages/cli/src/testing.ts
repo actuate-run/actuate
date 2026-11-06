@@ -46,7 +46,7 @@ import {
   collectSecrets,
   createHttpProvider,
   deriveInputKey,
-  derivesInputKey,
+  triggerDerivesInputKey,
   executePass,
   mergeSecrets,
   meteredNodeSqlite,
@@ -257,7 +257,7 @@ export class ActuatorTest<A extends Actuator = Actuator> {
     if (!parsed.success) throw new Error(`Invalid input:${formatIssues(parsed.error.issues)}`);
     const trigger = typeof opts.trigger === "string" ? { kind: opts.trigger } : (opts.trigger ?? { kind: "api" as const });
     // From the input as given, before zod's defaults and transforms, as the hosts compute it.
-    const inputKey = !opts.idempotencyKey && derivesInputKey(trigger.kind) ? await deriveInputKey(this.actuator.idempotencyKey, input) : undefined;
+    const inputKey = !opts.idempotencyKey && triggerDerivesInputKey(trigger.kind) ? await deriveInputKey(this.actuator.idempotencyKey, input) : undefined;
     const { run } = await this.manager.start({
       input: parsed.data as Json,
       trigger,

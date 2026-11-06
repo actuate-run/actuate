@@ -102,6 +102,15 @@ describe("platform deploy checks", () => {
     expect(keyed([])).toEqual(["idempotency-key:idempotencyKey lists no fields. List the input fields that identify a request, or leave it out."]);
     expect(idempotencyKeyProblems({ type: "object", properties: { v: { type: "number", const: 3 } }, required: ["v"] }, ["v"])).toEqual([]);
     expect(idempotencyKeyProblems(undefined, undefined)).toEqual([]);
+    // A field with a registered id is a $ref into $defs: followed before the type check.
+    const OrderId = z.string().meta({ id: "OrderId" });
+    const reffed = describeActuator(defineActuator({ ...base, input: z.object({ orderId: OrderId, other: OrderId, items: z.array(z.string()).meta({ id: "Items" }) }), idempotencyKey: ["orderId", "other"] } as never));
+    expect(JSON.stringify(reffed.inputSchema)).toContain('"$ref":"#/$defs/OrderId"');
+    expect(idempotencyKeyProblems(reffed.inputSchema, ["orderId", "other"])).toEqual([]);
+    expect(idempotencyKeyProblems(reffed.inputSchema, ["items"])).toEqual(['idempotencyKey field "items" must be a string, number, integer or boolean.']);
+    expect(idempotencyKeyProblems({ properties: { k: { $ref: "#/definitions/K" } }, definitions: { K: { type: "integer" } }, required: ["k"] }, ["k"])).toEqual([]);
+    expect(idempotencyKeyProblems({ properties: { k: { $ref: "#/$defs/Missing" } }, required: ["k"] }, ["k"])).toHaveLength(1);
+    expect(idempotencyKeyProblems({ properties: { k: { $ref: "https://example.com/k" } }, required: ["k"] }, ["k"])).toHaveLength(1);
     // Without a declaration, the metadata has no idempotencyKey at all (deploys of older actuators are unchanged).
     expect("idempotencyKey" in describeActuator(actuator)).toBe(false);
     expect(describeActuator(defineActuator({ ...base, input, idempotencyKey: ["orderId"] } as never)).idempotencyKey).toEqual(["orderId"]);
@@ -112,10 +121,9 @@ describe("platform deploy checks", () => {
     expect(check(def as never, { plan: PLANS.maker })).toEqual([
       "warning:cron-input:Every cron run starts with the input {}, which the input schema rejects (the idempotencyKey fields are required), so every firing fails. Cron runs never use idempotencyKey: move the schedule to an actuator of its own.",
     ]);
-    // A cron run whose input does parse (here, the key field has a default, which is refused) still never gets the key.
+    // A cron run's input can only parse when a key field isn't required, which is refused on its own.
     const lenient = check({ ...def, input: z.object({ id: z.string().default("daily") }) } as never, { plan: PLANS.maker });
     expect(lenient).toEqual([
-      "warning:cron-input:Cron runs never use idempotencyKey: every firing starts a new run.",
       'error:idempotency-key:idempotencyKey field "id" must be required in the input schema (not optional, no default): the run key is computed from the input as sent.',
     ]);
   });

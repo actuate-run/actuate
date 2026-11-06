@@ -5,7 +5,7 @@ import {
   INPUT_KEY_COMPLETED_TTL_MS,
   RunManager,
   deriveInputKey,
-  derivesInputKey,
+  triggerDerivesInputKey,
   executePass,
   inputKeyMaterial,
   nodeSqlite,
@@ -36,7 +36,7 @@ function harness(actuator: Actuator, opts: { db?: DatabaseSync } = {}) {
       manager.start({
         input: input as never,
         trigger: { kind: "api" },
-        ...(idempotencyKey ? { idempotencyKey } : { inputKey: (await deriveInputKey(actuator.idempotencyKey, input))! }),
+        ...(idempotencyKey ? { idempotencyKey } : { inputKey: await deriveInputKey(actuator.idempotencyKey, input) }),
       }),
   };
 }
@@ -74,6 +74,7 @@ describe("idempotencyKey in defineActuator", () => {
     expect(def(input, ["id", "id"])).toThrow(/lists "id" twice/);
     expect(def(z.string(), ["id"])).toThrow(/needs an object input schema/);
     expect(def(input, ["toString"])).toThrow(/is not a top-level field/);
+    expect(def(input, "id" as never)).toThrow('Actuator "keyed": idempotencyKey must be an array of input field names: idempotencyKey: ["id"].');
   });
 });
 
@@ -93,10 +94,25 @@ describe("deriveInputKey", () => {
     expect(a).toBe(`input:${createHash("sha256").update('["A-1",20]').digest("hex")}`);
   });
 
+  it("gives no key when the input lacks a declared field, so such calls never share one", async () => {
+    expect(await deriveInputKey(["orderId"], {})).toBeUndefined();
+    expect(await deriveInputKey(["orderId"], { orderId: undefined, note: "x" })).toBeUndefined();
+    expect(await deriveInputKey(["orderId", "amount"], { orderId: "A-1" })).toBeUndefined();
+    expect(await deriveInputKey(["orderId"], null)).toBeUndefined();
+    expect(await deriveInputKey(["orderId"], { orderId: "" })).toMatch(/^input:/);
+
+    const loose = defineActuator({ name: "loose", description: "t", input: z.object({ orderId: z.string().optional() }), idempotencyKey: ["orderId"], run: () => 1 });
+    const h = harness(loose);
+    const a = await h.start({});
+    const b = await h.start({ note: "another request" });
+    expect([a.created, b.created]).toEqual([true, true]);
+    expect(a.run.runId).not.toBe(b.run.runId);
+  });
+
   it("is undefined without fields, and applies only to MCP and run API calls", async () => {
     expect(await deriveInputKey(undefined, { a: 1 })).toBeUndefined();
     expect(await deriveInputKey([], { a: 1 })).toBeUndefined();
-    expect(["mcp", "api", "cron", "webhook", "manual"].filter((k) => derivesInputKey(k as never))).toEqual(["mcp", "api"]);
+    expect(["mcp", "api", "cron", "webhook", "manual"].filter((k) => triggerDerivesInputKey(k as never))).toEqual(["mcp", "api"]);
   });
 });
 

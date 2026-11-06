@@ -671,11 +671,11 @@ export class RunManager {
       const result = await this.options.notifyApproval?.(request);
       if (result && result.sent === false) {
         const what = kind === "input" ? "Input link" : "Approval links";
-        await this.writeLog(runId, "warn", `${what} for "${step}" not sent: ${result.reason ?? "no reason given"}`, { step });
+        await this.writeLog(runId, "warn", `${what} for "${step}" not sent: ${withoutLinks(result.reason ?? "no reason given", request)}`, { step });
       }
     } catch (err) {
       await this.writeLog(runId, "error", `Could not deliver approval link for "${step}"`, {
-        error: err instanceof Error ? err.message : String(err),
+        error: withoutLinks(err instanceof Error ? err.message : String(err), request),
       });
     }
   }
@@ -863,6 +863,21 @@ function toRunRecord(row: Row): RunRecord {
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
+}
+
+/**
+ * `text` (a notifier's reason or error) with the request's signed links, their tokens and anything else that
+ * looks like a `token=` link replaced by `[link]`: run logs are readable by anything holding a run token.
+ */
+function withoutLinks(text: string, request: ApprovalRequest): string {
+  let out = String(text);
+  for (const url of [request.approveUrl, request.rejectUrl, request.answerUrl]) {
+    if (!url) continue;
+    out = out.split(url).join("[link]");
+    const token = /[?&]token=([^&#]+)/.exec(url)?.[1];
+    if (token) out = out.split(token).join("[link]").split(encodeURIComponent(token)).join("[link]");
+  }
+  return out.replace(/[^\s"'<>()]*[?&]token=[^\s"'<>()&]*/gi, "[link]");
 }
 
 /** Time-sortable, URL-safe run ID: `run_` + 12 hex chars of ms timestamp + 16 random hex chars. */

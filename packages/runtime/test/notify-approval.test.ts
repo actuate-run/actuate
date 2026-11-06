@@ -43,6 +43,28 @@ describe("approval notices that can't go out", () => {
     expect(h.manager.pendingApprovals()).toHaveLength(2);
   });
 
+  it("never lets a notifier's reason or error carry the links into the log", async () => {
+    let n = 0;
+    const leaky = [
+      async (r: ApprovalRequest) => ({ sent: false, reason: `provider said: bad body ${r.approveUrl ?? r.answerUrl} / ${r.rejectUrl ?? ""}` }),
+      async (r: ApprovalRequest) => ({ sent: false, reason: `token ${new URL(r.answerUrl ?? r.approveUrl!).searchParams.get("token")} refused` }),
+      async (r: ApprovalRequest) => {
+        throw new Error(`POST failed for body: ${JSON.stringify({ url: r.approveUrl ?? r.answerUrl })} (see https://other.test/x?a=1&token=abc)`);
+      },
+    ];
+    for (const notify of leaky) {
+      for (const kind of ["approval", "input"] as const) {
+        const h = harness(ask, notify);
+        const { run } = await h.manager.start({ input: { kind }, trigger: { kind: "api" } });
+        const logs = h.manager.getLogs(run.runId);
+        const text = JSON.stringify(logs);
+        expect(text).not.toMatch(/token=|approve\?/);
+        expect(text).toContain("[link]");
+        expect(logs.at(-1)!.level).toBe(n++ < 4 ? "warn" : "error");
+      }
+    }
+  });
+
   it("logs nothing more when the notice went out", async () => {
     for (const reply of [undefined, { sent: true }]) {
       const h = harness(ask, async () => reply);

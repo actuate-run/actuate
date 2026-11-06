@@ -254,7 +254,7 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
     private async notifyApproval(req: ApprovalRequest): Promise<void | NotifyOwnerResult> {
       const links = req.kind === "input" ? `Answer: ${req.answerUrl}` : `Approve: ${req.approveUrl}\nReject: ${req.rejectUrl}`;
       const message = req.message ?? (req.kind === "input" ? `${actuator.name} needs your input` : `Approval needed: ${actuator.name} / ${req.step}`);
-      const subject = `Approval needed: ${actuator.name}`;
+      const subject = req.kind === "input" ? `Input needed: ${actuator.name}` : `Approval needed: ${actuator.name}`;
       if (req.notify === NOTIFY_OWNER) {
         // Reserved: never a messaging recipient. The message is cut, never the links, to fit a notifyOwner text.
         const room = NOTIFY_OWNER_MAX_TEXT - links.length - 2;

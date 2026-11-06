@@ -350,7 +350,9 @@ export interface ActuatorDefinition<
    * boolean (an enum or literal of those too). The key is `input:` plus the SHA-256 of the fields' values in this
    * order, as the caller sent them: zod defaults, coercion and transforms don't apply, so `"A-1"` and `"a-1"` are
    * different keys. It matches a run with the same values that is still running or waiting, or that completed in
-   * the last 24 hours. A failed or cancelled run never matches, so the same call can be tried again.
+   * the last 24 hours. A failed or cancelled run never matches, so the same call can be tried again. A call
+   * whose input lacks one of the fields gets no derived key (the deploy checks require them, but self-hosted
+   * runs and tests don't check).
    *
    * An idempotency key the caller sends (MCP `_meta["run.actuate/idempotencyKey"]`, the `Idempotency-Key`
    * header) takes its place and works as before: send a new one to force a new run. Cron runs and webhooks
@@ -422,6 +424,7 @@ const isScalarValue = (v: unknown) => typeof v === "string" || typeof v === "num
 /** The checks on `idempotencyKey` that need only the schema. Required-ness is checked at deploy (`actuate check --platform`). */
 function checkIdempotencyKey(name: string, input: unknown, fields: readonly string[]): void {
   const where = `Actuator "${name}": idempotencyKey`;
+  if (typeof fields === "string") throw new ActuatorError(`${where} must be an array of input field names: idempotencyKey: ["${fields}"].`);
   if (!Array.isArray(fields) || fields.length === 0) throw new ActuatorError(`${where} lists no fields. List the input fields that identify a request, e.g. ["orderId"], or leave it out.`);
   const object = unwrap(defOf(input));
   if (object?.type !== "object" || !object.shape) throw new ActuatorError(`${where} needs an object input schema (z.object({ ... })).`);

@@ -50,7 +50,7 @@ export const PLATFORM_RULES: ReadonlyArray<{ rule: string; checks: string; needs
   { rule: "bundle-size", checks: "the bundle is at most 5 MB" },
   { rule: "name", checks: "the name is lowercase letters, digits and underscores (at most 64), not starting with actuate_" },
   { rule: "cron", checks: "cron syntax, how many schedules, and how often they fire (alone and together)", needs: "plan" },
-  { rule: "cron-input", checks: "the input schema accepts {}, the input every cron run gets, and no idempotencyKey is declared alongside cron, since cron runs never use it (warning)" },
+  { rule: "cron-input", checks: "the input schema accepts {}, the input every cron run gets; with idempotencyKey it can't, and cron runs never use the key (warning)" },
   { rule: "idempotency-key", checks: "every idempotencyKey field is a required, top-level string, number, integer or boolean input field" },
   { rule: "http-allow", checks: "http.allow: at most 20 hostnames, no IP addresses, no actuate.run, no wildcard over a shared zone" },
   { rule: "input-regex", checks: "no regex in the input schema with nested quantifiers such as (a+)+" },
@@ -102,8 +102,6 @@ export function platformChecks(input: PlatformCheckInput): PlatformIssue[] {
     warn("cron-input", "Every cron run starts with the input {}, which the input schema rejects (the idempotencyKey fields are required), so every firing fails. Cron runs never use idempotencyKey: move the schedule to an actuator of its own.");
   } else if (cronRejects) {
     warn("cron-input", "Every cron run starts with the input {}, which the input schema rejects, so every firing fails. Make the fields optional or give them defaults.");
-  } else if (m.cron.length && keyed) {
-    warn("cron-input", "Cron runs never use idempotencyKey: every firing starts a new run.");
   }
   for (const problem of idempotencyKeyProblems(m.inputSchema, m.idempotencyKey)) error("idempotency-key", problem);
 
@@ -158,7 +156,7 @@ const isScalar = (v: unknown) => typeof v === "string" || typeof v === "number" 
 export function idempotencyKeyProblems(inputSchema: unknown, fields: readonly string[] | undefined): string[] {
   if (fields === undefined) return [];
   if (!Array.isArray(fields) || fields.length === 0) return ["idempotencyKey lists no fields. List the input fields that identify a request, or leave it out."];
-  const schema = (inputSchema ?? {}) as { properties?: Record<string, Record<string, unknown>>; required?: unknown };
+  const schema = (inputSchema ?? {}) as { properties?: Record<string, Record<string, unknown>>; required?: unknown; $defs?: unknown; definitions?: unknown };
   const properties = schema.properties && typeof schema.properties === "object" ? schema.properties : {};
   const required = Array.isArray(schema.required) ? schema.required : [];
   const problems: string[] = [];
@@ -170,7 +168,7 @@ export function idempotencyKeyProblems(inputSchema: unknown, fields: readonly st
       continue;
     }
     seen.add(name);
-    const prop = Object.prototype.hasOwnProperty.call(properties, name) ? properties[name] : undefined;
+    const prop = Object.prototype.hasOwnProperty.call(properties, name) ? resolveLocalRef(schema, properties[name]) : undefined;
     if (typeof field !== "string" || !prop) {
       problems.push(`idempotencyKey field "${name}" is not a top-level field of the input schema.`);
       continue;
@@ -185,6 +183,24 @@ export function idempotencyKeyProblems(inputSchema: unknown, fields: readonly st
     }
   }
   return problems;
+}
+
+/**
+ * Follow a local `$ref` (`#/$defs/<id>` or `#/definitions/<id>`, as zod emits for a schema with `.meta({ id })`),
+ * keeping the referring node's own keywords. Anything else is returned as it is.
+ */
+function resolveLocalRef(root: { $defs?: unknown; definitions?: unknown }, node: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  let current = node;
+  for (let i = 0; current && typeof current.$ref === "string" && i < 16; i++) {
+    const m = /^#\/(\$defs|definitions)\/(.+)$/.exec(current.$ref);
+    const defs = m ? (root[m[1] as "$defs" | "definitions"] as Record<string, Record<string, unknown>> | undefined) : undefined;
+    const name = m ? decodeURIComponent(m[2]!).replace(/~1/g, "/").replace(/~0/g, "~") : "";
+    const target = defs && typeof defs === "object" && Object.prototype.hasOwnProperty.call(defs, name) ? defs[name] : undefined;
+    if (!target || typeof target !== "object") return current;
+    const { $ref: _ref, ...own } = current;
+    current = { ...target, ...own };
+  }
+  return current;
 }
 
 export function formatIssues(issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey>; message: string }>): string {

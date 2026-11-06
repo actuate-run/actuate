@@ -11,7 +11,7 @@ export const INPUT_KEY_COMPLETED_TTL_MS = 24 * 60 * 60 * 1000;
  * MCP tool calls and the run API. Never cron (every firing has the same input) and never webhooks (a delivery
  * key, when the sender has one, is the right key there).
  */
-export function derivesInputKey(kind: TriggerKind): boolean {
+export function triggerDerivesInputKey(kind: TriggerKind): boolean {
   return kind === "mcp" || kind === "api";
 }
 
@@ -40,13 +40,16 @@ export function inputKeyMaterial(fields: readonly string[], input: unknown): str
 
 /**
  * The run key derived from an actuator's `idempotencyKey` fields: `input:<SHA-256 hex of inputKeyMaterial>`,
- * or `undefined` when no fields are declared. Pass the input as the caller sent it, after it passed validation
+ * or `undefined` (no key: every call starts a run) when no fields are declared or the input lacks one of them
+ * (absent or `undefined`), so calls that leave an optional key field out never share a key. Pass the input as the caller sent it, after it passed validation
  * (the JSON Schema check, or `safeParse` succeeding) but before zod's defaults, coercion and transforms, so
  * every host computes the same key. Keys are per actuator: compare them only within one actuator's runs.
  * Pass it to `RunManager.start` as `inputKey`, and only when the caller sent no idempotency key of its own.
  */
 export async function deriveInputKey(fields: readonly string[] | undefined, input: unknown): Promise<string | undefined> {
   if (!fields?.length) return undefined;
+  const record = input !== null && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
+  if (fields.some((f) => !Object.prototype.hasOwnProperty.call(record, f) || record[f] === undefined)) return undefined;
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(inputKeyMaterial(fields, input))));
   return INPUT_KEY_PREFIX + Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
 }
