@@ -102,6 +102,14 @@ describe("custom-webhook credentials", () => {
     }
   });
 
+  it("treats an empty format as automatic: template when a template is set, otherwise standard", async () => {
+    expect(parse({ format: "" }).format).toBeUndefined();
+    expect(JSON.parse((await sendOnce({ format: "" }, "me", "hi")).call.body)).toMatchObject({ to: "me", text: "hi" });
+    expect(parse({ format: " ", template: '{"m":"{{text}}"}' }).format).toBeUndefined();
+    expect(JSON.parse((await sendOnce({ format: "", template: '{"m":"{{text}}"}' }, "me", "hi")).call.body)).toEqual({ m: "hi" });
+    expect(problem({ url: URL_, format: "", template: '{"m":{{text}}}' })).toMatch(/template: .*inside a JSON string/);
+  });
+
   it("validates the body format and the JSON template", () => {
     expect(problem({ url: URL_, format: "xml" })).toMatch(/format must be one of standard, text, template/);
     expect(problem({ url: URL_, format: "template" })).toMatch(/template: template is required when format is template/);
@@ -219,6 +227,12 @@ describe("custom-webhook send", () => {
     expect((await sendOnce({ format: "text" }, "", "x", { subject: "Résumé ✓" })).call.headers.title).toBe("=?UTF-8?B?UsOpc3Vtw6kg4pyT?=");
     expect((await sendOnce({ format: "text" }, "", "x", { subject: "a\r\nb" })).call.headers.title).toBe("a b");
     expect((await sendOnce({ format: "text" }, "", "x")).call.headers.title).toBeUndefined();
+    // A very long subject is capped (to 1024 characters) instead of overflowing the stack while encoding.
+    const long = (await sendOnce({ format: "text" }, "", "x", { subject: "é".repeat(200_000) })).call.headers.title!;
+    const decoded = new TextDecoder().decode(Uint8Array.from(atob(long.slice(10, -2)), (c) => c.charCodeAt(0)));
+    expect(long.startsWith("=?UTF-8?B?")).toBe(true);
+    expect(decoded).toBe("é".repeat(1024));
+    expect((await sendOnce({ format: "text" }, "", "x", { subject: "a".repeat(5000) })).call.headers.title).toBe("a".repeat(1024));
   });
 
   it.each([
@@ -322,6 +336,24 @@ describe("custom-webhook send", () => {
     }
   });
 
+  it("reports a timeout while reading the response readably too", async () => {
+    const stalled = new ReadableStream<Uint8Array>({
+      pull() {
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      },
+    });
+    const { fetch } = mockFetch(() => new Response(stalled, { status: 200 }));
+    expect((await failure(customWebhook.create(parse({}), context(fetch)).send("me", "x"))).message).toBe("Custom webhook request timed out after 10 s");
+    const broken = new ReadableStream<Uint8Array>({
+      pull() {
+        throw new TypeError(`terminated: ${URL_}`);
+      },
+    });
+    const { fetch: f2 } = mockFetch(() => new Response(broken, { status: 200 }));
+    const err = await failure(customWebhook.create(parse({}), context(f2)).send("me", "x"));
+    expect(err.message).toBe("Custom webhook request failed: terminated: <url>");
+  });
+
   it("reports a timeout readably", async () => {
     const fetch = (async () => {
       throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
@@ -342,10 +374,14 @@ describe("custom-webhook send", () => {
     const receipt = await customWebhook.create(parse({}), context(fetch)).send("me", "x");
     expect(receipt.id).toMatch(/^msg_/);
     expect(pulled).toBeLessThanOrEqual(64 * 1024 + 4 * chunk.length);
-    // An error body is capped the same way.
-    const { fetch: big } = mockFetch(() => new Response(`{"message":"${"y".repeat(200_000)}"}`, { status: 500 }));
-    const err = await failure(customWebhook.create(parse({}), context(big)).send("me", "x"));
-    expect(err.message.length).toBeLessThan(70 * 1024);
+    // An error body is capped the same way, and the message quotes at most 500 characters of it.
+    for (const size of [60_000, 200_000]) {
+      const { fetch: big } = mockFetch(() => new Response(`{"message":"${"y".repeat(size)}"}`, { status: 500 }));
+      const err = await failure(customWebhook.create(parse({}), context(big)).send("me", "x"));
+      // Valid JSON gives its message; a body cut at 64 KB is no longer JSON and is quoted as text.
+      expect(err.message).toMatch(/^Custom webhook API error \(HTTP 500\): (\{"message":")?y+$/);
+      expect(err.message.length).toBeLessThanOrEqual("Custom webhook API error (HTTP 500): ".length + 500);
+    }
   });
 });
 
@@ -365,6 +401,16 @@ describe("custom-webhook replies", () => {
       payload: { channel: "custom-webhook", from: "me", text: "yes", type: "text", id: expect.stringMatching(/^msg_[0-9a-f]{32}$/), at: 1793664000123 },
     });
     expect(await customWebhook.parseWebhook!(reply({ from: "me" }, { authorization: `bearer  ${SECRET}` }), creds)).toMatchObject({ payload: { text: "" } });
+  });
+
+  it("accepts ?secret= with a + in the secret, raw or percent-encoded", async () => {
+    // 24 bytes whose base64 is all "+": searchParams reads an unencoded "+" as a space.
+    const plus = `whsec_${"+".repeat(32)}`;
+    const withPlus = parse({ secret: plus });
+    for (const given of [plus, encodeURIComponent(plus)]) {
+      expect(await customWebhook.parseWebhook!(reply({ from: "me" }, {}, `${REPLY_URL}?secret=${given}`), withPlus)).toMatchObject({ event: "message.custom-webhook.me" });
+    }
+    await expect(customWebhook.parseWebhook!(reply({ from: "me" }, {}, `${REPLY_URL}?secret=whsec_${"-".repeat(32)}`), withPlus)).rejects.toBeInstanceOf(WebhookVerificationError);
   });
 
   it("accepts ?secret= for tools that can only set a URL", async () => {

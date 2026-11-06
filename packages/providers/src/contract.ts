@@ -42,7 +42,7 @@ export interface ProviderDefinition<C = unknown, K extends ProviderCapability = 
     optional?: boolean;
     /** Render a textarea: the value spans several lines (extra headers, a JSON template). */
     multiline?: boolean;
-    /** The accepted values, for a select. The first is the default. */
+    /** The accepted values, for a select. Leaving the field empty picks the provider's default, which its help explains. */
     options?: readonly string[];
     /** Offer a "Generate" button: "whsec" makes a Standard Webhooks secret (whsec_ + base64 of 32 random bytes). */
     generate?: "whsec";

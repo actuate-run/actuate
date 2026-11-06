@@ -33,7 +33,7 @@ const reply = await ctx.step.waitForEvent("reply", { event: "message.custom-webh
 | `CUSTOM_WEBHOOK_URL` | Required. `https://` (plain `http://` only for `localhost`, `127.0.0.1`, `[::1]`); no IP addresses or `user:pass@`. Treated as a secret. |
 | `CUSTOM_WEBHOOK_SECRET` | Optional signing secret, `whsec_` + base64 of 24 to 64 bytes (`whsec_$(openssl rand -base64 32)`). Signs each message ([Standard Webhooks](https://www.standardwebhooks.com/): `webhook-id`, `webhook-timestamp`, `webhook-signature`) and turns on replies. |
 | `CUSTOM_WEBHOOK_HEADERS` | Optional extra headers, one `Name: value` per line (at most 20), e.g. `Authorization: Bearer ...`, `X-Gotify-Key: ...`. `Host`, `Content-Length`, `Transfer-Encoding`, `Connection` and `webhook-*` are refused. |
-| `CUSTOM_WEBHOOK_FORMAT` | `standard` (default), `text` or `template`. Setting a template without a format means `template`. |
+| `CUSTOM_WEBHOOK_FORMAT` | `standard`, `text` or `template`. Leave empty for automatic: `template` when a JSON template is set, otherwise `standard`. |
 | `CUSTOM_WEBHOOK_TEMPLATE` | JSON for the `template` format, with `{{text}}`, `{{html}}`, `{{subject}}`, `{{to}}`, `{{id}}`, `{{replyUrl}}` inside JSON strings. |
 
 Body formats:

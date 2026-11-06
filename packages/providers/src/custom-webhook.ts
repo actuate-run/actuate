@@ -11,6 +11,8 @@ const MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_URL_LENGTH = 2048;
 const MAX_HEADER_LINES = 20;
 const MAX_TEMPLATE_LENGTH = 16 * 1024;
+const MAX_ERROR_DETAIL = 500;
+const MAX_TITLE_LENGTH = 1024;
 
 export const CUSTOM_WEBHOOK_FORMATS = ["standard", "text", "template"] as const;
 export type CustomWebhookFormat = (typeof CUSTOM_WEBHOOK_FORMATS)[number];
@@ -137,9 +139,12 @@ function formatOf(c: { format?: CustomWebhookFormat | undefined; template?: stri
 
 /** Header values must be bytes: non-ASCII text (a subject in another script) goes as an RFC 2047 encoded word, which ntfy decodes. */
 function headerText(value: string): string {
-  const flat = value.replace(/[\r\n]+/g, " ").trim();
+  // A title, not a message: cap it before encoding (a spread of a long byte array would also overflow the stack).
+  const flat = Array.from(value.replace(/[\r\n]+/g, " ").trim()).slice(0, MAX_TITLE_LENGTH).join("");
   if (/^[ -~]*$/.test(flat)) return flat;
-  return `=?UTF-8?B?${btoa(String.fromCharCode(...new TextEncoder().encode(flat)))}?=`;
+  let binary = "";
+  for (const byte of new TextEncoder().encode(flat)) binary += String.fromCharCode(byte);
+  return `=?UTF-8?B?${btoa(binary)}?=`;
 }
 
 /** Read at most `max` bytes of a response body, then stop: a receiver's reply is a receipt, not a download. */
@@ -219,7 +224,7 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
       secret: false,
       optional: true,
       options: CUSTOM_WEBHOOK_FORMATS,
-      help: "standard: JSON with id, to, text (default). text: the plain text (ntfy). template: your own JSON.",
+      help: "Leave empty for automatic: template when a JSON template is set, otherwise standard. standard: JSON with id, to, text. text: the plain text (ntfy). template: your own JSON.",
     },
     {
       key: "template",
@@ -276,27 +281,37 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
         headers.set("webhook-timestamp", String(timestamp));
         if (credentials.secret) headers.set("webhook-signature", await signStandardWebhook(credentials.secret, id, timestamp, body));
 
+        // Network errors and timeouts, whether while connecting or while reading the body, read the same way.
+        const failed = (err: unknown) => {
+          const e = err as Error;
+          if (e?.name === "TimeoutError" || e?.name === "AbortError") return new Error(`${PROVIDER} request timed out after ${TIMEOUT_MS / 1000} s`);
+          return new Error(`${PROVIDER} request failed: ${redact(e instanceof Error ? e.message : String(err))}`);
+        };
         let res: Response;
         // Call fetch unbound: Workers' global fetch throws "Illegal invocation" when called as ctx.fetch(...).
         const fetcher = ctx.fetch;
         try {
           res = await fetcher(credentials.url, { method: "POST", headers, body, redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS) });
         } catch (err) {
-          const e = err as Error;
-          if (e?.name === "TimeoutError" || e?.name === "AbortError") throw new Error(`${PROVIDER} request timed out after ${TIMEOUT_MS / 1000} s`);
-          throw new Error(`${PROVIDER} request failed: ${redact(e instanceof Error ? e.message : String(err))}`);
+          throw failed(err);
         }
         // A redirect could carry the signed message somewhere else; with redirect "manual" a browser-style fetch reports status 0.
         if ((res.status >= 300 && res.status < 400) || res.type === "opaqueredirect") {
           res.body?.cancel().catch(() => {});
           throw new ProviderApiError(PROVIDER, res.status, "redirects are not followed; use the final URL");
         }
-        const reply = parseMaybeJson(await readCapped(res, MAX_RESPONSE_BYTES));
+        let raw: string;
+        try {
+          raw = await readCapped(res, MAX_RESPONSE_BYTES);
+        } catch (err) {
+          throw failed(err);
+        }
+        const reply = parseMaybeJson(raw);
         if (!res.ok) {
           const fallback = res.statusText || "request failed";
           // An HTML error page (a proxy's 502) says nothing useful in 500 characters of markup.
           const detail = typeof reply === "string" && /^\s*</.test(reply) ? fallback : describeErrorBody(reply, fallback);
-          throw new ProviderApiError(PROVIDER, res.status, redact(detail));
+          throw new ProviderApiError(PROVIDER, res.status, redact(detail).slice(0, MAX_ERROR_DETAIL));
         }
         const receipt = reply && typeof reply === "object" && !Array.isArray(reply) ? (reply as { id?: unknown }).id : undefined;
         return { id: typeof receipt === "string" && receipt ? receipt.slice(0, 256) : id, channel: "custom-webhook" };
@@ -312,7 +327,9 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
     const auth = /^Bearer\s+(.+)$/i.exec(request.headers.get("authorization") ?? "")?.[1]?.trim();
     const query = URL.canParse(request.url) ? new URL(request.url).searchParams.get("secret") : null;
     const bearerOk = auth !== undefined && timingSafeEqual(auth, credentials.secret);
-    const queryOk = query !== null && timingSafeEqual(query, credentials.secret);
+    // searchParams decodes an unencoded "+" (common in base64 secrets) to a space, so also try it with "+" restored.
+    const queryOk =
+      query !== null && [timingSafeEqual(query, credentials.secret), timingSafeEqual(query.replace(/ /g, "+"), credentials.secret)].includes(true);
     if (!bearerOk && !queryOk) {
       if (!request.headers.has("webhook-signature")) {
         throw new WebhookVerificationError("Custom webhook reply not authorized: send Authorization: Bearer <signing secret>, ?secret=, or a Standard Webhooks signature");
