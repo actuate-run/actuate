@@ -144,6 +144,8 @@ it("greets under vitest", async () => {
     expect(res.code, res.err).toBe(0);
     expect(res.out).toContain("Bundled hello:");
     expect(res.out).toContain('"name": "hello"');
+    expect(res.out).toContain("MCP tool entry (tools/list), as agents will see it:");
+    expect(res.out).toContain('"idempotentHint": false');
   });
 
   it("doctor checks the project", () => {

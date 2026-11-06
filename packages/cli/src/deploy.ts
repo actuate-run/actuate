@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { describeJsonError, omitSecrets, secretFields } from "@actuate/runtime";
+import { describeJsonError, mcpToolEntry, omitSecrets, secretFields } from "@actuate/runtime";
 import type { Actuator } from "@actuate/sdk";
 import { CliError, describePlan, resolvePlan, type ResolvedPlan } from "./account.js";
 import { ApiError, api, readCredentials, type Credentials } from "./api.js";
@@ -228,8 +228,14 @@ export async function deploy(file: string, cwd: string, opts: DeployOptions): Pr
   };
 
   if (opts.dryRun) {
-    if (opts.json) out(JSON.stringify({ ok: errors.length === 0, ...summary, dryRun: true, metadata: request.metadata }, null, 2));
-    else out(JSON.stringify(request.metadata, null, 2));
+    // The tools/list entry agents will see, as the platform's MCP endpoint builds it from this metadata.
+    const mcpTool = mcpToolEntry(request.metadata);
+    if (opts.json) out(JSON.stringify({ ok: errors.length === 0, ...summary, dryRun: true, metadata: request.metadata, mcpTool }, null, 2));
+    else {
+      out(JSON.stringify(request.metadata, null, 2));
+      out("\nMCP tool entry (tools/list), as agents will see it:");
+      out(JSON.stringify(mcpTool, null, 2));
+    }
     return errors.length ? 1 : 0;
   }
   if (errors.length && !opts.force) {
