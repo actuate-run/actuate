@@ -111,6 +111,17 @@ describe("platform deploy checks", () => {
     expect(idempotencyKeyProblems({ properties: { k: { $ref: "#/definitions/K" } }, definitions: { K: { type: "integer" } }, required: ["k"] }, ["k"])).toEqual([]);
     expect(idempotencyKeyProblems({ properties: { k: { $ref: "#/$defs/Missing" } }, required: ["k"] }, ["k"])).toHaveLength(1);
     expect(idempotencyKeyProblems({ properties: { k: { $ref: "https://example.com/k" } }, required: ["k"] }, ["k"])).toHaveLength(1);
+    // The input object itself may be a $ref (.meta({ id }) on the object).
+    const order = describeActuator(defineActuator({ ...base, input: z.object({ orderId: z.string(), n: z.number().optional() }).meta({ id: "Order" }), idempotencyKey: ["orderId"] } as never));
+    expect((order.inputSchema as { $ref?: string }).$ref).toBe("#/$defs/Order");
+    expect(idempotencyKeyProblems(order.inputSchema, ["orderId"])).toEqual([]);
+    expect(idempotencyKeyProblems(order.inputSchema, ["n"])).toEqual([expect.stringContaining('"n" must be required')]);
+    expect(idempotencyKeyProblems(order.inputSchema, ["nope"])).toEqual(['idempotencyKey field "nope" is not a top-level field of the input schema.']);
+    // A ref that can't be decoded is a problem, not a crash.
+    expect(idempotencyKeyProblems({ $ref: "#/$defs/%E0", $defs: {} }, ["k"])).toEqual(['The input schema has a $ref that can\'t be read ("#/$defs/%E0").']);
+    expect(idempotencyKeyProblems({ properties: { k: { $ref: "#/$defs/%E0" }, j: { type: "string" } }, required: ["k", "j"] }, ["k", "j"])).toEqual([
+      'idempotencyKey field "k": The input schema has a $ref that can\'t be read ("#/$defs/%E0").',
+    ]);
     // Without a declaration, the metadata has no idempotencyKey at all (deploys of older actuators are unchanged).
     expect("idempotencyKey" in describeActuator(actuator)).toBe(false);
     expect(describeActuator(defineActuator({ ...base, input, idempotencyKey: ["orderId"] } as never)).idempotencyKey).toEqual(["orderId"]);

@@ -156,7 +156,16 @@ const isScalar = (v: unknown) => typeof v === "string" || typeof v === "number" 
 export function idempotencyKeyProblems(inputSchema: unknown, fields: readonly string[] | undefined): string[] {
   if (fields === undefined) return [];
   if (!Array.isArray(fields) || fields.length === 0) return ["idempotencyKey lists no fields. List the input fields that identify a request, or leave it out."];
-  const schema = (inputSchema ?? {}) as { properties?: Record<string, Record<string, unknown>>; required?: unknown; $defs?: unknown; definitions?: unknown };
+  const root = (inputSchema && typeof inputSchema === "object" ? inputSchema : {}) as Record<string, unknown>;
+  type ObjectSchema = { properties?: Record<string, Record<string, unknown>>; required?: unknown };
+  let schema: ObjectSchema;
+  // The input itself may be a $ref (zod's `.meta({ id })` on the object): `{"$ref":"#/$defs/Order","$defs":{...}}`.
+  try {
+    schema = (resolveLocalRef(root, root) ?? {}) as ObjectSchema;
+  } catch (err) {
+    if (err instanceof UnreadableRefError) return [err.message];
+    throw err;
+  }
   const properties = schema.properties && typeof schema.properties === "object" ? schema.properties : {};
   const required = Array.isArray(schema.required) ? schema.required : [];
   const problems: string[] = [];
@@ -168,7 +177,14 @@ export function idempotencyKeyProblems(inputSchema: unknown, fields: readonly st
       continue;
     }
     seen.add(name);
-    const prop = Object.prototype.hasOwnProperty.call(properties, name) ? resolveLocalRef(schema, properties[name]) : undefined;
+    let prop: Record<string, unknown> | undefined;
+    try {
+      prop = Object.prototype.hasOwnProperty.call(properties, name) ? resolveLocalRef(root, properties[name]) : undefined;
+    } catch (err) {
+      if (!(err instanceof UnreadableRefError)) throw err;
+      problems.push(`idempotencyKey field "${name}": ${err.message}`);
+      continue;
+    }
     if (typeof field !== "string" || !prop) {
       problems.push(`idempotencyKey field "${name}" is not a top-level field of the input schema.`);
       continue;
@@ -185,16 +201,30 @@ export function idempotencyKeyProblems(inputSchema: unknown, fields: readonly st
   return problems;
 }
 
+/** A `$ref` whose pointer can't be decoded (bad percent-encoding such as `%E0`). */
+class UnreadableRefError extends Error {
+  constructor(ref: string) {
+    super(`The input schema has a $ref that can't be read (${JSON.stringify(ref.slice(0, 100))}).`);
+    this.name = "UnreadableRefError";
+  }
+}
+
 /**
  * Follow a local `$ref` (`#/$defs/<id>` or `#/definitions/<id>`, as zod emits for a schema with `.meta({ id })`),
- * keeping the referring node's own keywords. Anything else is returned as it is.
+ * keeping the referring node's own keywords. Anything else is returned as it is. Throws UnreadableRefError for a
+ * pointer that can't be decoded.
  */
 function resolveLocalRef(root: { $defs?: unknown; definitions?: unknown }, node: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   let current = node;
   for (let i = 0; current && typeof current.$ref === "string" && i < 16; i++) {
     const m = /^#\/(\$defs|definitions)\/(.+)$/.exec(current.$ref);
     const defs = m ? (root[m[1] as "$defs" | "definitions"] as Record<string, Record<string, unknown>> | undefined) : undefined;
-    const name = m ? decodeURIComponent(m[2]!).replace(/~1/g, "/").replace(/~0/g, "~") : "";
+    let name = "";
+    try {
+      name = m ? decodeURIComponent(m[2]!).replace(/~1/g, "/").replace(/~0/g, "~") : "";
+    } catch {
+      throw new UnreadableRefError(current.$ref);
+    }
     const target = defs && typeof defs === "object" && Object.prototype.hasOwnProperty.call(defs, name) ? defs[name] : undefined;
     if (!target || typeof target !== "object") return current;
     const { $ref: _ref, ...own } = current;
