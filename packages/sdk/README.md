@@ -26,10 +26,11 @@ export default defineActuator({
 | `ctx.step.do(name, fn)` | Run `fn` once; replays and retries get the stored result |
 | `ctx.step.sleep` / `sleepUntil` | Hibernate until a time |
 | `ctx.step.waitForEvent` | Resume on a webhook, payment, inbound message or posted event |
-| `ctx.step.waitForApproval` / `waitForInput` | Resume when a person approves or answers through a signed link |
+| `ctx.step.waitForApproval` / `waitForInput` | Resume when a person approves or answers through a signed link; `notify: "owner"` sends the link to the actuator's owner, no messaging provider needed |
 | `ctx.db` | The actuator's own SQLite database. `batch([...])` runs statements all-or-nothing; `commitWithStep([...])` applies them with the step's completion |
 | `ctx.messaging`, `ctx.payment`, `ctx.llm`, `ctx.http` | Declared capabilities, backed by your own accounts |
 | `ctx.notifyOwner(text, { subject })` | Message the actuator's owner (email on the platform, the terminal under `actuate dev`), inside a step |
+| `idempotencyKey: ["orderId"]` | One run per order: a repeated MCP or run API call with the same field values returns the first run (while it runs or waits, or for 24 hours after it completes) |
 | `secret(schema)` | Mark a config field as secret (`apiKey: secret(z.string())`): its value is redacted from logs, errors and run records, and the platform never shows it again |
 
 Reference: [SDK API](https://actuate.run/docs/reference/sdk/).
