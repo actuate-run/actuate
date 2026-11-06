@@ -1,0 +1,53 @@
+import { DatabaseSync } from "node:sqlite";
+import { describe, expect, it } from "vitest";
+import { defineActuator, z, type Actuator, type NotifyOwnerResult } from "@actuate/sdk";
+import { RunManager, executePass, nodeSqlite, type ApprovalRequest } from "../src/index.js";
+
+function harness(actuator: Actuator, notify: (r: ApprovalRequest) => Promise<void | NotifyOwnerResult>) {
+  const manager = new RunManager({
+    sql: nodeSqlite(new DatabaseSync(":memory:")),
+    approvalSecret: "test-secret",
+    approvalUrl: "https://example.test/approve",
+    now: () => Date.parse("2026-11-02T00:00:00Z"),
+    consoleLogs: false,
+    notifyApproval: notify,
+    invoke: (request, journal) => executePass(actuator, request, { journal, config: {} }),
+  });
+  return { manager };
+}
+
+describe("approval notices that can't go out", () => {
+  const ask = defineActuator({
+    name: "ask",
+    description: "test",
+    input: z.object({ kind: z.enum(["approval", "input"]) }),
+    async run(ctx, input) {
+      if (input.kind === "input") return (await ctx.step.waitForInput("why", { prompt: "Why?", notify: "owner" }))?.text ?? null;
+      return (await ctx.step.waitForApproval("ok", { message: "Refund?", notify: "owner" }))?.approved ?? null;
+    },
+  });
+
+  it("logs the reason as a warning, without the links, and the step still waits", async () => {
+    const seen: ApprovalRequest[] = [];
+    const h = harness(ask, async (r) => (seen.push(r), { sent: false, reason: "daily email cap reached" }));
+    const approval = await h.manager.start({ input: { kind: "approval" }, trigger: { kind: "api" } });
+    const input = await h.manager.start({ input: { kind: "input" }, trigger: { kind: "api" } });
+    expect(seen.map((r) => [r.kind, r.notify])).toEqual([["approval", "owner"], ["input", "owner"]]);
+    expect(approval.run.status).toBe("WAITING");
+    expect(h.manager.getLogs(approval.run.runId).map((l) => [l.level, l.message])).toEqual([
+      ["info", 'Approval requested for "ok"'],
+      ["warn", 'Approval links for "ok" not sent: daily email cap reached'],
+    ]);
+    expect(h.manager.getLogs(input.run.runId).at(-1)).toMatchObject({ level: "warn", message: 'Input link for "why" not sent: daily email cap reached' });
+    expect(JSON.stringify(h.manager.getLogs(approval.run.runId))).not.toContain("token=");
+    expect(h.manager.pendingApprovals()).toHaveLength(2);
+  });
+
+  it("logs nothing more when the notice went out", async () => {
+    for (const reply of [undefined, { sent: true }]) {
+      const h = harness(ask, async () => reply);
+      const { run } = await h.manager.start({ input: { kind: "approval" }, trigger: { kind: "api" } });
+      expect(h.manager.getLogs(run.runId).map((l) => l.level)).toEqual(["info"]);
+    }
+  });
+});

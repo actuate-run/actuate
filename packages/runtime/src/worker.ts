@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { z, type Actuator, type Json, type OwnerNotifier, type Providers } from "@actuate/sdk";
+import { NOTIFY_OWNER, NOTIFY_OWNER_MAX_TEXT, z, type Actuator, type Json, type NotifyOwnerResult, type OwnerNotifier, type Providers } from "@actuate/sdk";
 import { RunManager, type ApprovalRequest, type RunManagerOptions, type RunStatus } from "./manager.js";
 import { executePass } from "./pass.js";
 import { createHttpProvider } from "./providers.js";
@@ -47,9 +47,10 @@ export interface RuntimeOptions<E extends RuntimeEnv = RuntimeEnv> {
    */
   providerWebhook?: (kind: string, request: Request, env: E) => Promise<ProviderWebhookOutcome>;
   /**
-   * Deliver `ctx.notifyOwner` messages (email, chat). Without one, a message goes to the run's log and the
-   * call resolves to `{ sent: false }`. `actuate dev` prints them. Secret config values are redacted before
-   * the notifier sees the text.
+   * Deliver `ctx.notifyOwner` messages (email, chat), and the signed links of approvals and questions that set
+   * `notify: "owner"`. Without one, a message goes to the run's log and the call resolves to `{ sent: false }`,
+   * and links for the owner are printed to the worker's console. `actuate dev` prints both. Secret config values
+   * are redacted before the notifier sees the text.
    */
   notifyOwner?: (env: E) => OwnerNotifier | undefined;
   /** Runtime guards passed to the RunManager (wait/retry limits, pass admission, event caps, max passes). */
@@ -250,13 +251,24 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
       return this.owner ? { owner: this.owner } : {};
     }
 
-    private async notifyApproval(req: ApprovalRequest): Promise<void> {
-      const text =
-        req.kind === "input"
-          ? `${req.message ?? `${actuator.name} needs your input`}\n\nAnswer: ${req.answerUrl}`
-          : `${req.message ?? `Approval needed: ${actuator.name} / ${req.step}`}\n\nApprove: ${req.approveUrl}\nReject: ${req.rejectUrl}`;
+    private async notifyApproval(req: ApprovalRequest): Promise<void | NotifyOwnerResult> {
+      const links = req.kind === "input" ? `Answer: ${req.answerUrl}` : `Approve: ${req.approveUrl}\nReject: ${req.rejectUrl}`;
+      const message = req.message ?? (req.kind === "input" ? `${actuator.name} needs your input` : `Approval needed: ${actuator.name} / ${req.step}`);
+      const subject = `Approval needed: ${actuator.name}`;
+      if (req.notify === NOTIFY_OWNER) {
+        // Reserved: never a messaging recipient. The message is cut, never the links, to fit a notifyOwner text.
+        const room = NOTIFY_OWNER_MAX_TEXT - links.length - 2;
+        const text = `${message.length > room ? `${message.slice(0, Math.max(room - 1, 0))}…` : message}\n\n${links}`;
+        const owner = this.getOwner().owner;
+        if (owner) {
+          return owner.notify({ text, subject, runId: req.runId, actuator: actuator.name, idempotencyKey: `approval:${req.runId}:${req.step}` });
+        }
+        console.log(`\n🔐  [approval requested for the owner] ${text}\n`);
+        return { sent: false, reason: "no owner notifier is configured (createRuntime notifyOwner), so the links were printed to the worker's console" };
+      }
+      const text = `${message}\n\n${links}`;
       const messaging = this.getProviders().messaging;
-      if (req.notify && messaging) await messaging.send(req.notify, text, { subject: `Approval needed: ${actuator.name}` });
+      if (req.notify && messaging) await messaging.send(req.notify, text, { subject });
       else console.log(`\n🔐  [approval requested] ${text}\n`);
     }
 

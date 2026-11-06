@@ -1,4 +1,4 @@
-import type { DbStatement, Json, Row, SqlValue, Trigger, WaitForApprovalOptions } from "@actuate/sdk";
+import type { DbStatement, Json, NotifyOwnerResult, Row, SqlValue, Trigger, WaitForApprovalOptions } from "@actuate/sdk";
 import {
   fromJson,
   toJson,
@@ -57,6 +57,7 @@ export interface ApprovalRequest {
   kind: "approval" | "input";
   /** The approval message, or the question for input. */
   message?: string;
+  /** The step's `notify`: a messaging recipient, or `"owner"` for the actuator's owner (see `WaitForApprovalOptions.notify`). */
   notify?: string;
   approveUrl?: string;
   rejectUrl?: string;
@@ -74,8 +75,12 @@ export interface RunManagerOptions {
   approvalSecret: string;
   /** Absolute URL of the approval endpoint (or a getter); tokens are appended as `?token=`. */
   approvalUrl: string | (() => string);
-  /** Deliver approval links (email, messaging). Errors are logged, not thrown. */
-  notifyApproval?: (request: ApprovalRequest) => Promise<void>;
+  /**
+   * Deliver approval links (email, messaging). A thrown error is logged on the run as an error. Resolve to
+   * `{ sent: false, reason }` when the links can't go out for a known reason (no channel, a daily cap reached):
+   * the reason is logged on the run as a warning, and the step waits all the same. Never put the links in `reason`.
+   */
+  notifyApproval?: (request: ApprovalRequest) => Promise<void | NotifyOwnerResult>;
   /** Called whenever the earliest wake time changes, so the host can set its alarm. */
   scheduleWake?: (wakeAt: number | null) => void | Promise<void>;
   now?: () => number;
@@ -663,7 +668,11 @@ export class RunManager {
       expiresAt: opts.expiresAt,
     });
     try {
-      await this.options.notifyApproval?.(request);
+      const result = await this.options.notifyApproval?.(request);
+      if (result && result.sent === false) {
+        const what = kind === "input" ? "Input link" : "Approval links";
+        await this.writeLog(runId, "warn", `${what} for "${step}" not sent: ${result.reason ?? "no reason given"}`, { step });
+      }
     } catch (err) {
       await this.writeLog(runId, "error", `Could not deliver approval link for "${step}"`, {
         error: err instanceof Error ? err.message : String(err),

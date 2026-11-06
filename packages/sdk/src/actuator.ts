@@ -104,10 +104,25 @@ export interface WaitForEventOptions {
   until?: Date | number;
 }
 
+/**
+ * The `notify` value that sends approval and input links to the actuator's owner instead of through
+ * `ctx.messaging`. Reserved: it is never passed to a messaging provider as a recipient.
+ */
+export const NOTIFY_OWNER = "owner";
+
 export interface WaitForInputOptions {
   /** The question shown on the form. */
   prompt: string;
-  /** Who gets the signed link: a chat ID, phone or email understood by the messaging provider. */
+  /**
+   * Who gets the signed link: a chat ID, phone or email understood by the messaging provider, or `"owner"`.
+   *
+   * `"owner"` (reserved, never a default) sends the link to the actuator's owner the way `ctx.notifyOwner` does,
+   * with no messaging provider needed: on the hosted platform, an email to the account, and the account's alert
+   * channel when it is Telegram, Slack, Discord or email (never a custom webhook, so the link never reaches
+   * another agent); self-hosted, the `notifyOwner` notifier given to `createRuntime`, else the worker's console;
+   * under `actuate dev`, the terminal. When it can't go out (a daily cap reached), the step still waits, the
+   * request is in the approval queue, and the run's log gets a warning.
+   */
   notify?: string;
   /** Pre-filled text, e.g. a draft to edit. */
   initial?: string;
@@ -129,7 +144,17 @@ export interface InputResult {
 export interface WaitForApprovalOptions {
   /** Shown to the approver. */
   message?: string;
-  /** Who gets the signed link: a chat ID, phone or email understood by the messaging provider. */
+  /**
+   * Who gets the signed approve and reject links: a chat ID, phone or email understood by the messaging
+   * provider, or `"owner"`.
+   *
+   * `"owner"` (reserved, never a default) sends the links to the actuator's owner the way `ctx.notifyOwner` does,
+   * with no messaging provider needed: on the hosted platform, an email to the account, and the account's alert
+   * channel when it is Telegram, Slack, Discord or email (never a custom webhook, so the links never reach
+   * another agent); self-hosted, the `notifyOwner` notifier given to `createRuntime`, else the worker's console;
+   * under `actuate dev`, the terminal. When they can't go out (a daily cap reached), the step still waits, the
+   * approval is in the approval queue, and the run's log gets a warning.
+   */
   notify?: string;
   /** Give up after this long and resolve to `null`. Default "7 days". */
   timeout?: Duration;

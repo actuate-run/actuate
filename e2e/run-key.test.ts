@@ -1,5 +1,6 @@
 /**
- * The self-hosted runtime on workerd: run keys derived from `idempotencyKey` on POST /run (and nowhere else).
+ * The self-hosted runtime on workerd: run keys derived from `idempotencyKey` on POST /run (and nowhere else),
+ * and `notify: "owner"` approvals handed to the createRuntime notifier, or printed when there is none.
  */
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -10,6 +11,7 @@ const base = "http://keyed.test";
 const auth = { authorization: "Bearer admin" };
 let script: string;
 let mf: Miniflare;
+let bare: Miniflare;
 
 const worker = (bindings: Record<string, string>) =>
   new Miniflare({
@@ -29,16 +31,19 @@ beforeAll(async () => {
   });
   script = out.outputFiles[0]!.text;
   mf = worker({});
+  bare = worker({ NO_OWNER: "1" });
 }, 60_000);
 
 afterAll(async () => {
   await mf?.dispose();
+  await bare?.dispose();
 });
 
 async function post(path: string, body: unknown, headers: Record<string, string> = auth, on = mf) {
   const res = await on.dispatchFetch(`${base}${path}`, { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json", ...headers } });
   return { status: res.status, body: (await res.json()) as any };
 }
+const get = async (path: string, on = mf) => (await (await on.dispatchFetch(`${base}${path}`, { headers: auth })).json()) as any;
 
 describe("run keys from idempotencyKey on the self-hosted runtime", () => {
   it("returns the first run for a repeated POST /run with the same key fields", async () => {
@@ -74,5 +79,28 @@ describe("run keys from idempotencyKey on the self-hosted runtime", () => {
     expect([a.status, b.status]).toEqual([201, 201]);
     expect(a.body.runId).not.toBe(b.body.runId);
     expect(a.body.output).toEqual({ trigger: "webhook" });
+  });
+});
+
+describe('notify: "owner" on the self-hosted runtime', () => {
+  it("hands the approval to the createRuntime notifier, with the message and both links, keyed per step", async () => {
+    const started = await post("/run", { orderId: "O-1", mode: "approve" });
+    expect(started.body.status).toBe("WAITING");
+    const run = await get(`/runs/${started.body.runId}`);
+    // The notifier refused it (by design here), so its reason is a warning; the links never reach the log.
+    expect(run.logs.at(-1)).toMatchObject({ level: "warn", message: 'Approval links for "ok" not sent: Approval needed: e2e_keyed / message / links / keyed' });
+    expect(JSON.stringify(run.logs)).not.toContain("token=");
+    // The approval still waits in the queue and can be decided.
+    expect(await get("/approvals")).toMatchObject([{ runId: started.body.runId, step: "ok", kind: "approval" }]);
+    expect((await post(`/runs/${started.body.runId}/approvals/ok/approve`, {})).body.ok).toBe(true);
+    expect((await get(`/runs/${started.body.runId}`)).output).toEqual({ approved: true });
+  });
+
+  it("prints the links to the console when no notifier is configured, and says so on the run", async () => {
+    const started = await post("/run", { orderId: "O-2", mode: "approve" }, auth, bare);
+    expect(started.body.status).toBe("WAITING");
+    const run = await get(`/runs/${started.body.runId}`, bare);
+    expect(run.logs.at(-1)).toMatchObject({ level: "warn", message: expect.stringContaining('Approval links for "ok" not sent: no owner notifier is configured') });
+    expect(JSON.stringify(run.logs)).not.toContain("token=");
   });
 });
