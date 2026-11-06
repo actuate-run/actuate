@@ -246,7 +246,7 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
       secret: false,
       optional: true,
       multiline: true,
-      help: 'Used instead for approval and input requests, e.g. a card with Approve and Reject buttons: {{approveUrl}}, {{rejectUrl}}, {{answerUrl}} (input), {{expiresAt}}, plus the JSON template\'s placeholders. Empty: those requests use the body format above.',
+      help: 'Used for approval requests only; questions use the body format. E.g. a card with Approve and Reject buttons: {{approveUrl}}, {{rejectUrl}}, {{expiresAt}}, plus the JSON template\'s placeholders. Empty: approvals use the body format above.',
     },
   ],
   parseCredentials: (input) => parseWith(PROVIDER, schema, input),
@@ -285,7 +285,8 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
         });
         const headers = new Headers();
         let body: string;
-        if (approval && credentials.approvalTemplate) {
+        // Approvals only: a question (waitForInput) has no Approve or Reject URL, so a card for one would show empty buttons.
+        if (approval?.kind === "approval" && credentials.approvalTemplate) {
           body = fillTemplate(credentials.approvalTemplate, values());
           headers.set("content-type", "application/json");
         } else if (format === "text") {

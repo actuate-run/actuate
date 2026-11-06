@@ -427,7 +427,7 @@ describe("custom-webhook approvals", () => {
     });
   });
 
-  it("uses the approval template only for approval and input requests, falling back to the body format", async () => {
+  it("uses the approval template for approval requests only, falling back to the body format", async () => {
     const approvalTemplate = '{"card":"{{subject}}","yes":"{{approveUrl}}","no":"{{rejectUrl}}","answer":"{{answerUrl}}"}';
     for (const format of ["standard", "text", "template"] as const) {
       const creds = { format, template: '{"m":"{{text}}"}', approvalTemplate };
@@ -441,6 +441,16 @@ describe("custom-webhook approvals", () => {
     }
     // Without one, approvals use the configured format: here, text.
     expect((await sendOnce({ format: "text" }, "me", text, { approval })).call.body).toBe(text);
+  });
+
+  it("sends questions in the body format even with an approval template set", async () => {
+    const approvalTemplate = '{"card":"{{subject}}","yes":"{{approveUrl}}","no":"{{rejectUrl}}"}';
+    const standard = JSON.parse((await sendOnce({ approvalTemplate }, "me", "Why?", { subject: "Input needed: refund_order", approval: input })).call.body);
+    expect(standard).toMatchObject({ to: "me", text: "Why?", subject: "Input needed: refund_order", approval: { kind: "input", answerUrl: input.answerUrl } });
+    expect(standard).not.toHaveProperty("card");
+    const templated = await sendOnce({ approvalTemplate, template: '{"m":"{{text}}","a":"{{answerUrl}}","y":"{{approveUrl}}"}' }, "me", "Why?", { approval: input });
+    expect(JSON.parse(templated.call.body)).toEqual({ m: "Why?", a: input.answerUrl, y: "" });
+    expect((await sendOnce({ approvalTemplate, format: "text" }, "me", "Why?", { approval: input })).call.body).toBe("Why?");
   });
 
   it("validates the approval template like the JSON template, whatever the format", () => {
