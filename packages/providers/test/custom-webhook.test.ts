@@ -403,20 +403,15 @@ describe("custom-webhook replies", () => {
     expect(await customWebhook.parseWebhook!(reply({ from: "me" }, { authorization: `bearer  ${SECRET}` }), creds)).toMatchObject({ payload: { text: "" } });
   });
 
-  it("accepts ?secret= with a + in the secret, raw or percent-encoded", async () => {
-    // 24 bytes whose base64 is all "+": searchParams reads an unencoded "+" as a space.
-    const plus = `whsec_${"+".repeat(32)}`;
-    const withPlus = parse({ secret: plus });
-    for (const given of [plus, encodeURIComponent(plus)]) {
-      expect(await customWebhook.parseWebhook!(reply({ from: "me" }, {}, `${REPLY_URL}?secret=${given}`), withPlus)).toMatchObject({ event: "message.custom-webhook.me" });
+  it("refuses ?secret=, even with the right secret: a secret in the URL ends up in logs", async () => {
+    for (const given of [SECRET, encodeURIComponent(SECRET)]) {
+      const err = await failure(customWebhook.parseWebhook!(reply({ from: "me", text: "ok" }, {}, `${REPLY_URL}?secret=${given}`), creds));
+      expect(err).toBeInstanceOf(WebhookVerificationError);
+      expect(err.message).not.toContain(SECRET);
     }
-    await expect(customWebhook.parseWebhook!(reply({ from: "me" }, {}, `${REPLY_URL}?secret=whsec_${"-".repeat(32)}`), withPlus)).rejects.toBeInstanceOf(WebhookVerificationError);
-  });
-
-  it("accepts ?secret= for tools that can only set a URL", async () => {
-    const url = `${REPLY_URL}?secret=${encodeURIComponent(SECRET)}`;
-    expect(await customWebhook.parseWebhook!(reply({ from: "me", text: "ok" }, {}, url), creds)).toMatchObject({ event: "message.custom-webhook.me" });
-    await expect(customWebhook.parseWebhook!(reply({ from: "me" }, {}, `${REPLY_URL}?secret=wrong`), creds)).rejects.toBeInstanceOf(WebhookVerificationError);
+    // A valid bearer token still works when the URL also carries one.
+    const both = reply({ from: "me" }, { authorization: `Bearer ${SECRET}` }, `${REPLY_URL}?secret=wrong`);
+    expect(await customWebhook.parseWebhook!(both, creds)).toMatchObject({ event: "message.custom-webhook.me" });
   });
 
   it("accepts a Standard Webhooks signature, taking the id from webhook-id", async () => {
@@ -446,7 +441,7 @@ describe("custom-webhook replies", () => {
       expect(err.message).toMatch(message);
       expect(err.message).not.toContain(SECRET);
     };
-    await refused(reply(body), /send Authorization: Bearer <signing secret>, \?secret=, or a Standard Webhooks signature/);
+    await refused(reply(body), /send Authorization: Bearer <signing secret> or a Standard Webhooks signature/);
     await refused(reply(body, { authorization: "Bearer wrong" }), /not authorized/);
     await refused(reply(body, { authorization: SECRET }), /not authorized/);
     await refused(await signed(body, { signature: "v1,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }), /signature check failed: no webhook-signature matches/);

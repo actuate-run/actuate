@@ -44,7 +44,7 @@ Body formats:
 
 `id` (also the `webhook-id` header) comes from the step's idempotency key, so a retried step sends the same `id` and the receiver can drop the duplicate. A JSON reply with a string `id` becomes the receipt's `id`. Redirects are not followed, requests time out after 10 s, and at most 64 KB of the response is read.
 
-Replies are a POST to the reply URL (`/providers/custom-webhook/webhook`) with JSON `{ "from": "me", "text": "yes" }` (also `id`, `at` in ms, `name`, `type`), authorized by any one of `Authorization: Bearer <secret>`, `?secret=<secret>`, or a Standard Webhooks signature made with the secret. Each becomes the event `message.custom-webhook.<from>`; a reply without `from` is ignored (`{"ignored": true}`). Known limitation: Actuate does not deduplicate a signed reply replayed within its 5-minute window.
+Replies are a POST to the reply URL (`/providers/custom-webhook/webhook`) with JSON `{ "from": "me", "text": "yes" }` (also `id`, `at` in ms, `name`, `type`), authorized by `Authorization: Bearer <secret>` or a Standard Webhooks signature made with the secret (never `?secret=`: a secret in the URL ends up in logs). Each becomes the event `message.custom-webhook.<from>`; a reply without `from` is ignored (`{"ignored": true}`). Known limitation: Actuate does not deduplicate a signed reply replayed within its 5-minute window.
 
 ```sh
 curl -X POST "$REPLY_URL" -H "Authorization: Bearer $CUSTOM_WEBHOOK_SECRET" -H "content-type: application/json" -d '{"from":"me","text":"yes"}'

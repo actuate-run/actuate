@@ -322,17 +322,13 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
     // Without a secret anyone who learns the reply URL could post fake replies, so inbound needs one.
     if (!credentials.secret || request.method !== "POST") return null;
     const raw = await request.text();
-    // Any one of: a bearer token (simplest, for curl), ?secret= (for tools that only take a URL, like the
-    // /webhook trigger), or a Standard Webhooks signature (for senders that sign).
+    // Either a bearer token (simplest, for curl) or a Standard Webhooks signature (for senders that sign).
+    // Never ?secret=: a secret in the URL ends up in proxy, sender and request logs.
     const auth = /^Bearer\s+(.+)$/i.exec(request.headers.get("authorization") ?? "")?.[1]?.trim();
-    const query = URL.canParse(request.url) ? new URL(request.url).searchParams.get("secret") : null;
     const bearerOk = auth !== undefined && timingSafeEqual(auth, credentials.secret);
-    // searchParams decodes an unencoded "+" (common in base64 secrets) to a space, so also try it with "+" restored.
-    const queryOk =
-      query !== null && [timingSafeEqual(query, credentials.secret), timingSafeEqual(query.replace(/ /g, "+"), credentials.secret)].includes(true);
-    if (!bearerOk && !queryOk) {
+    if (!bearerOk) {
       if (!request.headers.has("webhook-signature")) {
-        throw new WebhookVerificationError("Custom webhook reply not authorized: send Authorization: Bearer <signing secret>, ?secret=, or a Standard Webhooks signature");
+        throw new WebhookVerificationError("Custom webhook reply not authorized: send Authorization: Bearer <signing secret> or a Standard Webhooks signature");
       }
       const check = await verifyStandardWebhook(credentials.secret, request.headers, raw);
       if (!check.ok) throw new WebhookVerificationError(`Custom webhook signature check failed: ${check.reason}`);

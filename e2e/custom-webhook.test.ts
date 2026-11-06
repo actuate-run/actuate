@@ -62,7 +62,9 @@ it("sends a signed message with a reply URL, and resumes on the reply", async ()
   expect(await res.json()).toMatchObject({ event: "message.custom-webhook.me", resumed: [started.runId] });
   const run = await (await mf.dispatchFetch(`${local}/runs/${started.runId}`)).json<any>();
   expect(run).toMatchObject({ status: "COMPLETED", output: { answer: "yes" } });
-  // ?secret= works too; with no run waiting the reply is buffered.
-  const again = await post(`${body.replyUrl}?secret=${encodeURIComponent(SECRET)}`);
+  // A secret in the URL is not accepted, even the right one.
+  expect((await post(`${body.replyUrl}?secret=${encodeURIComponent(SECRET)}`)).status).toBe(401);
+  // With no run waiting, a reply is buffered.
+  const again = await post(body.replyUrl, { authorization: `Bearer ${SECRET}` });
   expect(await again.json()).toMatchObject({ event: "message.custom-webhook.me", buffered: true });
 });
