@@ -129,11 +129,13 @@ describe("custom-webhook credentials", () => {
       ["headers", true, true],
       ["format", false, true],
       ["template", false, true],
+      ["approvalTemplate", false, true],
     ]);
     const field = (key: string) => customWebhook.credentialFields.find((f) => f.key === key)!;
     expect(field("secret").generate).toBe("whsec");
     expect(field("headers").multiline).toBe(true);
     expect(field("template").multiline).toBe(true);
+    expect(field("approvalTemplate")).toMatchObject({ label: "Approval JSON template", multiline: true });
     expect(field("format").options).toEqual(["standard", "text", "template"]);
   });
 });
@@ -385,6 +387,111 @@ describe("custom-webhook send", () => {
   });
 });
 
+describe("custom-webhook approvals", () => {
+  const approval = {
+    kind: "approval" as const,
+    actuator: "refund_order",
+    step: "manager-ok",
+    message: "Refund RM 20?",
+    approveUrl: "https://bot.example.org/approve?token=aaa",
+    rejectUrl: "https://bot.example.org/approve?token=rrr",
+    expiresAt: Date.UTC(2026, 10, 13, 12),
+  };
+  const input = { kind: "input" as const, actuator: "refund_order", step: "why", message: "Why?", answerUrl: "https://bot.example.org/approve?token=qqq", expiresAt: Date.UTC(2026, 10, 13, 12) };
+  const text = "Refund RM 20?\n\nApprove: https://bot.example.org/approve?token=aaa\nReject: https://bot.example.org/approve?token=rrr";
+
+  it("adds an approval object to the standard body, expiresAt in ISO 8601, and keeps the links in text", async () => {
+    const { call } = await sendOnce({}, "me", text, { subject: "Approval needed: refund_order", approval });
+    expect(JSON.parse(call.body)).toEqual({
+      id: expect.stringMatching(/^msg_/),
+      to: "me",
+      text,
+      subject: "Approval needed: refund_order",
+      approval: { ...approval, expiresAt: "2026-11-13T12:00:00.000Z" },
+    });
+    const asked = JSON.parse((await sendOnce({}, "me", "Why?", { approval: input })).call.body);
+    expect(asked.approval).toEqual({ kind: "input", actuator: "refund_order", step: "why", message: "Why?", answerUrl: input.answerUrl, expiresAt: "2026-11-13T12:00:00.000Z" });
+    // Ordinary sends are unchanged.
+    expect(JSON.parse((await sendOnce({}, "me", "hi")).call.body)).not.toHaveProperty("approval");
+  });
+
+  it("fills the approval placeholders in templates, empty on ordinary sends", async () => {
+    const template = '{"t":"{{text}}","a":"{{approveUrl}}","r":"{{rejectUrl}}","q":"{{answerUrl}}","e":"{{expiresAt}}"}';
+    expect(JSON.parse((await sendOnce({ template }, "me", "hi")).call.body)).toEqual({ t: "hi", a: "", r: "", q: "", e: "" });
+    expect(JSON.parse((await sendOnce({ template }, "me", text, { approval })).call.body)).toEqual({
+      t: text,
+      a: approval.approveUrl,
+      r: approval.rejectUrl,
+      q: "",
+      e: "2026-11-13T12:00:00.000Z",
+    });
+  });
+
+  it("uses the approval template only for approval and input requests, falling back to the body format", async () => {
+    const approvalTemplate = '{"card":"{{subject}}","yes":"{{approveUrl}}","no":"{{rejectUrl}}","answer":"{{answerUrl}}"}';
+    for (const format of ["standard", "text", "template"] as const) {
+      const creds = { format, template: '{"m":"{{text}}"}', approvalTemplate };
+      const card = await sendOnce(creds, "me", text, { subject: "S", approval });
+      expect(card.call.headers["content-type"]).toBe("application/json");
+      expect(JSON.parse(card.call.body)).toEqual({ card: "S", yes: approval.approveUrl, no: approval.rejectUrl, answer: "" });
+      const plain = await sendOnce(creds, "me", "hi");
+      if (format === "text") expect(plain.call.body).toBe("hi");
+      else if (format === "template") expect(JSON.parse(plain.call.body)).toEqual({ m: "hi" });
+      else expect(JSON.parse(plain.call.body)).toMatchObject({ text: "hi" });
+    }
+    // Without one, approvals use the configured format: here, text.
+    expect((await sendOnce({ format: "text" }, "me", text, { approval })).call.body).toBe(text);
+  });
+
+  it("validates the approval template like the JSON template, whatever the format", () => {
+    expect(problem({ url: URL_, approvalTemplate: '{"a":{{approveUrl}}}' })).toMatch(/approvalTemplate: approvalTemplate must be valid JSON with each placeholder inside a JSON string/);
+    expect(problem({ url: URL_, approvalTemplate: '{"a":"{{approve}}"}' })).toMatch(/approvalTemplate: unknown placeholder \{\{approve\}\}.*\{\{approveUrl\}\}, \{\{rejectUrl\}\}, \{\{answerUrl\}\}, \{\{expiresAt\}\}/);
+    expect(problem({ url: URL_, format: "template", template: '{"a":"{{nope}}"}' })).toMatch(/\{\{expiresAt\}\}/);
+    expect(() => parse({ approvalTemplate: '{"a":"{{approveUrl}}","e":"{{expiresAt}}"}' })).not.toThrow();
+  });
+
+  it("ships presets that are valid approval templates: Teams Adaptive Card and Google Chat card", async () => {
+    const readme = await import("node:fs").then((fs) => fs.readFileSync(new URL("../README.md", import.meta.url), "utf8"));
+    const presets = [...readme.matchAll(/<!-- preset: (\w+) -->\n```json\n([\s\S]*?)\n```/g)].map((m) => [m[1]!, m[2]!] as const);
+    expect(presets.map(([name]) => name)).toEqual(["teams", "googlechat"]);
+    for (const [name, approvalTemplate] of presets) {
+      const { call } = await sendOnce({ approvalTemplate }, "me", text, { subject: "Approval needed: refund_order", approval });
+      const body = JSON.parse(call.body);
+      const json = JSON.stringify(body);
+      expect(json).toContain(approval.approveUrl);
+      expect(json).toContain(approval.rejectUrl);
+      if (name === "teams") {
+        expect(body.attachments[0].contentType).toBe("application/vnd.microsoft.card.adaptive");
+        expect(body.attachments[0].content.actions.map((a: { type: string; title: string; url: string }) => [a.type, a.title, a.url])).toEqual([
+          ["Action.OpenUrl", "Approve", approval.approveUrl],
+          ["Action.OpenUrl", "Reject", approval.rejectUrl],
+        ]);
+      } else {
+        const buttons = body.cardsV2[0].card.sections[0].widgets.find((w: { buttonList?: unknown }) => w.buttonList).buttonList.buttons;
+        expect(buttons.map((b: { text: string; onClick: { openLink: { url: string } } }) => [b.text, b.onClick.openLink.url])).toEqual([
+          ["Approve", approval.approveUrl],
+          ["Reject", approval.rejectUrl],
+        ]);
+      }
+    }
+  });
+});
+
+describe("approval prompts on other providers", () => {
+  it("are ignored: the text with its links is sent as before", async () => {
+    const approval = { kind: "approval" as const, actuator: "a", step: "s", approveUrl: "https://x/approve?token=1", rejectUrl: "https://x/approve?token=2", expiresAt: 1 };
+    const creds = telegram.parseCredentials({ botToken: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" });
+    const bodies: string[] = [];
+    for (const options of [{}, { approval }]) {
+      const { fetch, calls } = mockFetch(json({ ok: true, result: { message_id: 1 } }));
+      await telegram.create(creds, context(fetch)).send("42", "Approve? https://x/approve?token=1", options);
+      bodies.push(calls[0]!.body);
+    }
+    expect(bodies[1]).toBe(bodies[0]);
+    expect(bodies[0]).not.toContain("approval");
+  });
+});
+
 describe("custom-webhook replies", () => {
   const creds = parse({ secret: SECRET });
   const reply = (body: unknown, headers: Record<string, string> = {}, url = REPLY_URL) =>
@@ -483,6 +590,7 @@ describe("custom-webhook from environment variables", () => {
       ["CUSTOM_WEBHOOK_HEADERS", true],
       ["CUSTOM_WEBHOOK_FORMAT", true],
       ["CUSTOM_WEBHOOK_TEMPLATE", true],
+      ["CUSTOM_WEBHOOK_APPROVAL_TEMPLATE", true],
     ]);
     expect(configuredFromEnv(env)[0]).toMatchObject({ capability: "messaging", credentials: { url: URL_, secret: SECRET, format: "template" } });
     const { fetch, calls } = mockFetch(json({}));

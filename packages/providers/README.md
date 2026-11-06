@@ -34,13 +34,34 @@ const reply = await ctx.step.waitForEvent("reply", { event: "message.custom-webh
 | `CUSTOM_WEBHOOK_SECRET` | Optional signing secret, `whsec_` + base64 of 24 to 64 bytes (`whsec_$(openssl rand -base64 32)`). Signs each message ([Standard Webhooks](https://www.standardwebhooks.com/): `webhook-id`, `webhook-timestamp`, `webhook-signature`) and turns on replies. |
 | `CUSTOM_WEBHOOK_HEADERS` | Optional extra headers, one `Name: value` per line (at most 20), e.g. `Authorization: Bearer ...`, `X-Gotify-Key: ...`. `Host`, `Content-Length`, `Transfer-Encoding`, `Connection` and `webhook-*` are refused. |
 | `CUSTOM_WEBHOOK_FORMAT` | `standard`, `text` or `template`. Leave empty for automatic: `template` when a JSON template is set, otherwise `standard`. |
-| `CUSTOM_WEBHOOK_TEMPLATE` | JSON for the `template` format, with `{{text}}`, `{{html}}`, `{{subject}}`, `{{to}}`, `{{id}}`, `{{replyUrl}}` inside JSON strings. |
+| `CUSTOM_WEBHOOK_TEMPLATE` | JSON for the `template` format, with `{{text}}`, `{{html}}`, `{{subject}}`, `{{to}}`, `{{id}}`, `{{replyUrl}}` inside JSON strings (and the approval placeholders below, empty on ordinary messages). |
+| `CUSTOM_WEBHOOK_APPROVAL_TEMPLATE` | Optional JSON used instead, whatever the format, for approval and input requests (`waitForApproval` / `waitForInput` with `notify`): the same placeholders plus `{{approveUrl}}`, `{{rejectUrl}}`, `{{answerUrl}}` (input) and `{{expiresAt}}` (ISO 8601). Without it, those requests use the body format. |
 
 Body formats:
 
 - `standard`: `{ "id", "to", "text", "html"?, "subject"?, "replyUrl"? }` as JSON. `text` is always plain text; `html` is the original when sent with `format: "html"`. `replyUrl` is there only with a signing secret.
 - `text`: the plain text as `text/plain`, with the subject as a `Title` header (ntfy).
 - `template`: your JSON with the placeholders filled in, JSON-escaped. Google Chat, Mattermost and Rocket.Chat take `{"text":"{{text}}"}`; Gotify `{"title":"{{subject}}","message":"{{text}}"}`; Apprise `{"title":"{{subject}}","body":"{{text}}"}`.
+
+Approval and input requests carry an `approval` object in the `standard` body: `{ "kind": "approval" | "input", "actuator", "step", "message"?, "approveUrl", "rejectUrl" }` (or `"answerUrl"` for input), and `"expiresAt"` in ISO 8601. `text` still holds the message and the links. Only Actuate's approval notifications set it: the runtime drops `approval` from sends made by actuator code. The links open Actuate's confirm page, where the decision is made (opening a link decides nothing, so link previews are harmless). Send approvals only to a receiver that shows them to a person: a link is all it takes to decide.
+
+Approval templates for chat apps whose incoming webhooks show cards with link buttons:
+
+Microsoft Teams (Workflows, "When a Teams webhook request is received"; Office 365 connectors are retired), an Adaptive Card with `Action.OpenUrl` buttons:
+
+<!-- preset: teams -->
+```json
+{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"$schema":"http://adaptivecards.io/schemas/adaptive-card.json","type":"AdaptiveCard","version":"1.4","body":[{"type":"TextBlock","text":"{{subject}}","weight":"Bolder","wrap":true},{"type":"TextBlock","text":"{{text}}","wrap":true},{"type":"TextBlock","text":"Links expire {{expiresAt}}","isSubtle":true,"size":"Small","wrap":true}],"actions":[{"type":"Action.OpenUrl","title":"Approve","url":"{{approveUrl}}"},{"type":"Action.OpenUrl","title":"Reject","url":"{{rejectUrl}}"}]}}]}
+```
+
+Google Chat, a `cardsV2` card with link buttons. Test it in your space first: Google's documentation doesn't say that incoming webhooks accept `cardsV2` (they are known to work, and other tools send them, but it isn't promised). If the space shows nothing, use `{"text":"{{text}}"}`, which carries the same links.
+
+<!-- preset: googlechat -->
+```json
+{"text":"{{subject}}","cardsV2":[{"cardId":"approval","card":{"header":{"title":"{{subject}}","subtitle":"Links expire {{expiresAt}}"},"sections":[{"widgets":[{"textParagraph":{"text":"{{text}}"}},{"buttonList":{"buttons":[{"text":"Approve","onClick":{"openLink":{"url":"{{approveUrl}}"}}},{"text":"Reject","onClick":{"openLink":{"url":"{{rejectUrl}}"}}}]}}]}]}}]}
+```
+
+The approval template is used for `waitForInput` requests too, where `{{approveUrl}}` and `{{rejectUrl}}` are empty and `{{answerUrl}}` is set. These presets are for approvals: a card whose button has an empty URL may be refused. If your actuator also asks questions with `notify`, give it a template with an Answer button to `{{answerUrl}}` instead.
 
 `id` (also the `webhook-id` header) comes from the step's idempotency key, so a retried step sends the same `id` and the receiver can drop the duplicate. A JSON reply with a string `id` becomes the receipt's `id`. Redirects are not followed, requests time out after 10 s, and at most 64 KB of the response is read.
 

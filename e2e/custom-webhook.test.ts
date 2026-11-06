@@ -39,7 +39,12 @@ beforeAll(async () => {
   });
 }, 60_000);
 
-afterAll(() => mf?.dispose());
+afterAll(async () => {
+  await mf?.dispose();
+  await approvals?.dispose();
+});
+
+let approvals: Miniflare | undefined;
 
 it("sends a signed message with a reply URL, and resumes on the reply", async () => {
   const started = await (await mf.dispatchFetch(`${local}/run`, { method: "POST", body: JSON.stringify({ to: "me" }) })).json<any>();
@@ -68,3 +73,52 @@ it("sends a signed message with a reply URL, and resumes on the reply", async ()
   const again = await post(body.replyUrl, { authorization: `Bearer ${SECRET}` });
   expect(await again.json()).toMatchObject({ event: "message.custom-webhook.me", buffered: true });
 });
+
+it("sends approval requests with an approval object, through the approval template when one is set", async () => {
+  const out = await build({
+    entryPoints: [fileURLToPath(new URL("./fixtures/reply-entry.ts", import.meta.url))],
+    bundle: true, format: "esm", platform: "neutral", target: "es2022", external: ["cloudflare:workers"],
+    conditions: ["workerd", "worker", "import"], mainFields: ["module", "main"], write: false,
+  });
+  const got: Array<{ url: string; body: string }> = [];
+  const worker = (bindings: Record<string, string>) =>
+    new Miniflare({
+      modules: true,
+      script: out.outputFiles[0]!.text,
+      compatibilityDate: "2025-09-01",
+      compatibilityFlags: ["nodejs_compat"],
+      durableObjects: { ACTUATOR: { className: "ActuatorObject", useSQLite: true } },
+      bindings: { ACTUATE_DEV: "1", ACTUATE_PUBLIC_URL: base, ACTUATE_MESSAGING: "custom-webhook", CUSTOM_WEBHOOK_URL: "https://hooks.example.test/approvals", ...bindings },
+      outboundService: async (req: Request) => {
+        got.push({ url: req.url, body: await req.text() });
+        return Response.json({});
+      },
+    });
+  const start = async (on: Miniflare, mode: string) => (await (await on.dispatchFetch(`${local}/run`, { method: "POST", body: JSON.stringify({ to: "boss", mode }) })).json()) as any;
+
+  approvals = worker({});
+  const run = await start(approvals, "approve");
+  expect(run.status).toBe("WAITING");
+  const body = JSON.parse(got.at(-1)!.body);
+  expect(body).toMatchObject({ to: "boss", subject: "Approval needed: reply", approval: { kind: "approval", actuator: "reply", step: "ok", message: "Refund RM 20?" } });
+  expect(body.approval.approveUrl).toMatch(new RegExp(`^${base}/approve\\?token=`));
+  expect(body.text).toContain(body.approval.approveUrl);
+  expect(new Date(body.approval.expiresAt).toISOString()).toBe(body.approval.expiresAt);
+  // The link opens the confirm page and decides only on POST.
+  const token = new URL(body.approval.approveUrl).searchParams.get("token")!;
+  expect((await approvals.dispatchFetch(`${local}/approve?token=${token}`)).status).toBe(200);
+  expect((await (await approvals.dispatchFetch(`${local}/runs/${run.runId}`)).json<any>()).status).toBe("WAITING");
+
+  // Actuator code's own sends never carry an approval.
+  await start(approvals, "fake");
+  expect(JSON.parse(got.at(-1)!.body)).not.toHaveProperty("approval");
+  await approvals.dispose();
+
+  approvals = worker({ CUSTOM_WEBHOOK_APPROVAL_TEMPLATE: '{"title":"{{subject}}","yes":"{{approveUrl}}","no":"{{rejectUrl}}","until":"{{expiresAt}}"}' });
+  await start(approvals, "approve");
+  const card = JSON.parse(got.at(-1)!.body);
+  expect(Object.keys(card)).toEqual(["title", "yes", "no", "until"]);
+  expect(card.yes).toMatch(/\/approve\?token=/);
+  await start(approvals, "reply");
+  expect(JSON.parse(got.at(-1)!.body)).toMatchObject({ to: "boss", text: "Approve the refund?" });
+}, 60_000);

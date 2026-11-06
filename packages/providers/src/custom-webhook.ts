@@ -1,7 +1,7 @@
 // Signing follows Standard Webhooks: https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md
 import { z } from "zod";
 import { WebhookVerificationError, timingSafeEqual, type ProviderDefinition } from "./contract.js";
-import type { InboundMessage, MessagingProvider } from "@actuate/sdk";
+import type { ApprovalPrompt, InboundMessage, MessagingProvider } from "@actuate/sdk";
 import { signStandardWebhook, standardWebhookKey, verifyStandardWebhook } from "./standard-webhooks.js";
 import { describeErrorBody, htmlToText, idempotencyNonce, messageEvent, optionalString, parseWith, ProviderApiError } from "./util.js";
 
@@ -16,7 +16,8 @@ const MAX_TITLE_LENGTH = 1024;
 
 export const CUSTOM_WEBHOOK_FORMATS = ["standard", "text", "template"] as const;
 export type CustomWebhookFormat = (typeof CUSTOM_WEBHOOK_FORMATS)[number];
-const PLACEHOLDERS = ["text", "html", "subject", "to", "id", "replyUrl"] as const;
+// The approval ones are filled on approval and input notifications (MessagingSendOptions.approval) and empty otherwise.
+const PLACEHOLDERS = ["text", "html", "subject", "to", "id", "replyUrl", "approveUrl", "rejectUrl", "answerUrl", "expiresAt"] as const;
 type Placeholder = (typeof PLACEHOLDERS)[number];
 const PLACEHOLDER = /\{\{([^{}]*)\}\}/g;
 
@@ -84,8 +85,8 @@ function fillTemplate(template: string, values: Record<Placeholder, string>): st
   return template.replace(PLACEHOLDER, (_, name: string) => jsonInner(values[name.trim() as Placeholder] ?? ""));
 }
 
-function templateProblem(template: string): string | null {
-  if (template.length > MAX_TEMPLATE_LENGTH) return `template must be at most ${MAX_TEMPLATE_LENGTH} characters`;
+function templateProblem(template: string, field = "template"): string | null {
+  if (template.length > MAX_TEMPLATE_LENGTH) return `${field} must be at most ${MAX_TEMPLATE_LENGTH} characters`;
   for (const [, raw] of template.matchAll(PLACEHOLDER)) {
     const name = raw!.trim();
     if (!(PLACEHOLDERS as readonly string[]).includes(name)) {
@@ -97,7 +98,7 @@ function templateProblem(template: string): string | null {
   try {
     JSON.parse(fillTemplate(template, Object.fromEntries(PLACEHOLDERS.map((p) => [p, sample])) as Record<Placeholder, string>));
   } catch {
-    return 'template must be valid JSON with each placeholder inside a JSON string, e.g. {"text":"{{text}}"}';
+    return `${field} must be valid JSON with each placeholder inside a JSON string, e.g. {"text":"{{text}}"}`;
   }
   return null;
 }
@@ -116,6 +117,7 @@ const schema = z
       .refine((v) => v === undefined || (CUSTOM_WEBHOOK_FORMATS as readonly string[]).includes(v), `format must be one of ${CUSTOM_WEBHOOK_FORMATS.join(", ")}`)
       .transform((v) => v as CustomWebhookFormat | undefined),
     template: optionalString(),
+    approvalTemplate: optionalString(),
   })
   .superRefine((c, ctx) => {
     const url = urlProblem(c.url);
@@ -127,6 +129,10 @@ const schema = z
     if (formatOf(c) === "template") {
       const problem = c.template ? templateProblem(c.template) : "template is required when format is template";
       if (problem) ctx.addIssue({ code: "custom", path: ["template"], message: problem });
+    }
+    if (c.approvalTemplate) {
+      const problem = templateProblem(c.approvalTemplate, "approvalTemplate");
+      if (problem) ctx.addIssue({ code: "custom", path: ["approvalTemplate"], message: problem });
     }
   });
 // Credentials stay plain strings (headers and template are parsed again in create), so parsing is idempotent.
@@ -234,6 +240,14 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
       multiline: true,
       help: 'For the template format. Placeholders go inside JSON strings: {"text":"{{text}}"}. Also {{subject}}, {{html}}, {{to}}, {{id}}, {{replyUrl}}.',
     },
+    {
+      key: "approvalTemplate",
+      label: "Approval JSON template",
+      secret: false,
+      optional: true,
+      multiline: true,
+      help: 'Used instead for approval and input requests, e.g. a card with Approve and Reject buttons: {{approveUrl}}, {{rejectUrl}}, {{answerUrl}} (input), {{expiresAt}}, plus the JSON template\'s placeholders. Empty: those requests use the body format above.',
+    },
   ],
   parseCredentials: (input) => parseWith(PROVIDER, schema, input),
   create(credentials, ctx): MessagingProvider {
@@ -256,14 +270,30 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
         const html = options?.format === "html" ? text : undefined;
         const plain = html !== undefined ? htmlToText(text) : text;
         const subject = options?.subject;
+        const approval = approvalOf(options?.approval);
+        const values = (): Record<Placeholder, string> => ({
+          text: plain,
+          html: html ?? "",
+          subject: subject ?? "",
+          to: to ?? "",
+          id,
+          replyUrl,
+          approveUrl: approval?.approveUrl ?? "",
+          rejectUrl: approval?.rejectUrl ?? "",
+          answerUrl: approval?.answerUrl ?? "",
+          expiresAt: approval?.expiresAt ?? "",
+        });
         const headers = new Headers();
         let body: string;
-        if (format === "text") {
+        if (approval && credentials.approvalTemplate) {
+          body = fillTemplate(credentials.approvalTemplate, values());
+          headers.set("content-type", "application/json");
+        } else if (format === "text") {
           body = plain;
           headers.set("content-type", "text/plain; charset=utf-8");
           if (subject) headers.set("title", headerText(subject));
         } else if (format === "template") {
-          body = fillTemplate(credentials.template!, { text: plain, html: html ?? "", subject: subject ?? "", to: to ?? "", id, replyUrl });
+          body = fillTemplate(credentials.template!, values());
           headers.set("content-type", "application/json");
         } else {
           body = JSON.stringify({
@@ -273,6 +303,7 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
             ...(html !== undefined ? { html } : {}),
             ...(subject ? { subject } : {}),
             ...(replyUrl ? { replyUrl } : {}),
+            ...(approval ? { approval } : {}),
           });
           headers.set("content-type", "application/json");
         }
@@ -357,6 +388,25 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
     return { event: messageEvent("custom-webhook", from), payload: { ...message } };
   },
 };
+
+/** The approval as the standard body carries it (`expiresAt` as ISO 8601), or undefined for an ordinary send. */
+function approvalOf(prompt: ApprovalPrompt | undefined): (Omit<ApprovalPrompt, "expiresAt"> & { expiresAt: string }) | undefined {
+  if (!prompt || typeof prompt !== "object" || (prompt.kind !== "approval" && prompt.kind !== "input")) return undefined;
+  const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+  const at = typeof prompt.expiresAt === "number" && Number.isFinite(prompt.expiresAt) ? new Date(prompt.expiresAt).toISOString() : "";
+  const links =
+    prompt.kind === "input"
+      ? { ...(str(prompt.answerUrl) ? { answerUrl: str(prompt.answerUrl)! } : {}) }
+      : { ...(str(prompt.approveUrl) ? { approveUrl: str(prompt.approveUrl)! } : {}), ...(str(prompt.rejectUrl) ? { rejectUrl: str(prompt.rejectUrl)! } : {}) };
+  return {
+    kind: prompt.kind,
+    actuator: str(prompt.actuator) ?? "",
+    step: str(prompt.step) ?? "",
+    ...(str(prompt.message) !== undefined ? { message: str(prompt.message)! } : {}),
+    ...links,
+    expiresAt: at,
+  };
+}
 
 interface CustomWebhookReply {
   from?: unknown;
