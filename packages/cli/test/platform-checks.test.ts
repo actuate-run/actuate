@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { defineActuator, secret, z } from "@actuate/sdk";
 import { describeActuator } from "../src/load.js";
-import { httpAllowProblems, platformChecks, regexProblems } from "../src/platform-checks.js";
+import { httpAllowProblems, idempotencyKeyProblems, platformChecks, regexProblems } from "../src/platform-checks.js";
 import { PLANS, planFromAccount } from "../src/plans.js";
 
 const base = {
@@ -81,6 +81,43 @@ describe("platform deploy checks", () => {
       "warning:cron-input:Every cron run starts with the input {}, which the input schema rejects, so every firing fails. Make the fields optional or give them defaults.",
     ]);
     expect(check({ ...def, input: z.object({ id: z.string().optional() }) }, { plan: PLANS.maker })).toEqual([]);
+  });
+
+  it("refuses an idempotencyKey field that isn't a required scalar of the input", () => {
+    const input = z.object({ orderId: z.string(), n: z.int(), kind: z.enum(["a", "b"]), maybe: z.string().optional(), dflt: z.string().default("x") });
+    expect(check({ ...base, input, idempotencyKey: ["orderId", "n", "kind"] } as never)).toEqual([]);
+    expect(check({ ...base, input, idempotencyKey: ["maybe", "dflt"] } as never)).toEqual([
+      'error:idempotency-key:idempotencyKey field "maybe" must be required in the input schema (not optional, no default): the run key is computed from the input as sent.',
+      'error:idempotency-key:idempotencyKey field "dflt" must be required in the input schema (not optional, no default): the run key is computed from the input as sent.',
+    ]);
+    // What defineActuator already refuses is refused here too: the platform can't trust an old SDK's bundle to have checked.
+    const actuator = defineActuator({ ...base, input: z.object({ id: z.string(), items: z.array(z.string()) }) } as never);
+    const keyed = (idempotencyKey: string[]) =>
+      platformChecks({ metadata: { ...describeActuator(actuator), idempotencyKey }, actuator, plan: PLANS.sandbox }).map((i) => `${i.rule}:${i.message}`);
+    expect(keyed(["items", "nope", "id", "id"])).toEqual([
+      'idempotency-key:idempotencyKey field "items" must be a string, number, integer or boolean.',
+      'idempotency-key:idempotencyKey field "nope" is not a top-level field of the input schema.',
+      'idempotency-key:idempotencyKey lists "id" twice.',
+    ]);
+    expect(keyed([])).toEqual(["idempotency-key:idempotencyKey lists no fields. List the input fields that identify a request, or leave it out."]);
+    expect(idempotencyKeyProblems({ type: "object", properties: { v: { type: "number", const: 3 } }, required: ["v"] }, ["v"])).toEqual([]);
+    expect(idempotencyKeyProblems(undefined, undefined)).toEqual([]);
+    // Without a declaration, the metadata has no idempotencyKey at all (deploys of older actuators are unchanged).
+    expect("idempotencyKey" in describeActuator(actuator)).toBe(false);
+    expect(describeActuator(defineActuator({ ...base, input, idempotencyKey: ["orderId"] } as never)).idempotencyKey).toEqual(["orderId"]);
+  });
+
+  it("extends the cron-input warning when the actuator also declares idempotencyKey", () => {
+    const def = { ...base, input: z.object({ id: z.string() }), cron: ["0 9 * * *"], idempotencyKey: ["id"] };
+    expect(check(def as never, { plan: PLANS.maker })).toEqual([
+      "warning:cron-input:Every cron run starts with the input {}, which the input schema rejects (the idempotencyKey fields are required), so every firing fails. Cron runs never use idempotencyKey: move the schedule to an actuator of its own.",
+    ]);
+    // A cron run whose input does parse (here, the key field has a default, which is refused) still never gets the key.
+    const lenient = check({ ...def, input: z.object({ id: z.string().default("daily") }) } as never, { plan: PLANS.maker });
+    expect(lenient).toEqual([
+      "warning:cron-input:Cron runs never use idempotencyKey: every firing starts a new run.",
+      'error:idempotency-key:idempotencyKey field "id" must be required in the input schema (not optional, no default): the run key is computed from the input as sent.',
+    ]);
   });
 
   it("checks http.allow like the platform", () => {

@@ -50,7 +50,8 @@ export const PLATFORM_RULES: ReadonlyArray<{ rule: string; checks: string; needs
   { rule: "bundle-size", checks: "the bundle is at most 5 MB" },
   { rule: "name", checks: "the name is lowercase letters, digits and underscores (at most 64), not starting with actuate_" },
   { rule: "cron", checks: "cron syntax, how many schedules, and how often they fire (alone and together)", needs: "plan" },
-  { rule: "cron-input", checks: "the input schema accepts {}, the input every cron run gets (warning)" },
+  { rule: "cron-input", checks: "the input schema accepts {}, the input every cron run gets, and no idempotencyKey is declared alongside cron, since cron runs never use it (warning)" },
+  { rule: "idempotency-key", checks: "every idempotencyKey field is a required, top-level string, number, integer or boolean input field" },
   { rule: "http-allow", checks: "http.allow: at most 20 hostnames, no IP addresses, no actuate.run, no wildcard over a shared zone" },
   { rule: "input-regex", checks: "no regex in the input schema with nested quantifiers such as (a+)+" },
   { rule: "plan-capability", checks: "every required capability is on the plan (optional ones get a warning)", needs: "plan" },
@@ -95,9 +96,16 @@ export function platformChecks(input: PlatformCheckInput): PlatformIssue[] {
       ? cronProblem(m.cron, plan.limits.cronsPerActuator, plan.limits.minCronIntervalMinutes)
       : cronProblem(parsable, plan.limits.cronsPerActuator, plan.limits.minCronIntervalMinutes);
   if (cron) planRule("cron", `${cron} The ${plan.name} plan allows ${plan.limits.cronsPerActuator} schedules, at least ${plan.limits.minCronIntervalMinutes} min apart.`);
-  if (m.cron.length && input.actuator && !input.actuator.input.safeParse({}).success) {
+  const keyed = (m.idempotencyKey?.length ?? 0) > 0;
+  const cronRejects = m.cron.length > 0 && !!input.actuator && !input.actuator.input.safeParse({}).success;
+  if (cronRejects && keyed) {
+    warn("cron-input", "Every cron run starts with the input {}, which the input schema rejects (the idempotencyKey fields are required), so every firing fails. Cron runs never use idempotencyKey: move the schedule to an actuator of its own.");
+  } else if (cronRejects) {
     warn("cron-input", "Every cron run starts with the input {}, which the input schema rejects, so every firing fails. Make the fields optional or give them defaults.");
+  } else if (m.cron.length && keyed) {
+    warn("cron-input", "Cron runs never use idempotencyKey: every firing starts a new run.");
   }
+  for (const problem of idempotencyKeyProblems(m.inputSchema, m.idempotencyKey)) error("idempotency-key", problem);
 
   for (const problem of httpAllowProblems(m.httpAllow)) error("http-allow", problem);
   for (const problem of regexProblems(m.inputSchema)) error("input-regex", problem);
@@ -136,6 +144,47 @@ export function platformChecks(input: PlatformCheckInput): PlatformIssue[] {
     }
   }
   return issues;
+}
+
+const KEY_TYPES = new Set(["string", "number", "integer", "boolean"]);
+const isScalar = (v: unknown) => typeof v === "string" || typeof v === "number" || typeof v === "boolean";
+
+/**
+ * What is wrong with an actuator's `idempotencyKey`, judged on the input's JSON Schema (input side), as the
+ * platform judges it: each field must be a top-level property listed in `required`, of type string, number,
+ * integer or boolean (or an enum or const of those). A field with a default is not required: the key is computed
+ * from the input as sent, so it must always be there.
+ */
+export function idempotencyKeyProblems(inputSchema: unknown, fields: readonly string[] | undefined): string[] {
+  if (fields === undefined) return [];
+  if (!Array.isArray(fields) || fields.length === 0) return ["idempotencyKey lists no fields. List the input fields that identify a request, or leave it out."];
+  const schema = (inputSchema ?? {}) as { properties?: Record<string, Record<string, unknown>>; required?: unknown };
+  const properties = schema.properties && typeof schema.properties === "object" ? schema.properties : {};
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  const problems: string[] = [];
+  const seen = new Set<string>();
+  for (const field of fields) {
+    const name = String(field);
+    if (seen.has(name)) {
+      problems.push(`idempotencyKey lists "${name}" twice.`);
+      continue;
+    }
+    seen.add(name);
+    const prop = Object.prototype.hasOwnProperty.call(properties, name) ? properties[name] : undefined;
+    if (typeof field !== "string" || !prop) {
+      problems.push(`idempotencyKey field "${name}" is not a top-level field of the input schema.`);
+      continue;
+    }
+    const scalar =
+      (typeof prop.type === "string" && KEY_TYPES.has(prop.type)) ||
+      (Array.isArray(prop.enum) && prop.enum.length > 0 && prop.enum.every(isScalar)) ||
+      ("const" in prop && isScalar(prop.const));
+    if (!scalar) problems.push(`idempotencyKey field "${name}" must be a string, number, integer or boolean.`);
+    else if (!required.includes(name)) {
+      problems.push(`idempotencyKey field "${name}" must be required in the input schema (not optional, no default): the run key is computed from the input as sent.`);
+    }
+  }
+  return problems;
 }
 
 export function formatIssues(issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey>; message: string }>): string {

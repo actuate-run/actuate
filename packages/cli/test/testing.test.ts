@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import { defineActuator, secret, z, type Actuator } from "@actuate/sdk";
+import { deriveInputKey } from "@actuate/runtime";
 import { TEST_START, testActuator, type ActuatorTest, type TestActuatorOptions } from "../src/testing.js";
 
 const open: Array<() => void> = [];
@@ -232,6 +233,44 @@ describe("testActuator", () => {
     expect((await t.cron()).output).toEqual({ trigger: { kind: "cron", cron: "0 9 * * *" }, day: "today" });
     const strict = make(defineActuator({ name: "strict", description: "t", input: z.object({ id: z.string() }), run: () => 1 }));
     await expect(strict.cron("0 * * * *")).rejects.toThrow(/Cron runs start with the input \{\}/);
+  });
+
+  it("derives the run key from idempotencyKey as the platform and the self-hosted runtime do", async () => {
+    let n = 0;
+    const act = defineActuator({
+      name: "one_per_order",
+      description: "test",
+      // A default lets cron runs start here; the deploy checks would refuse it (idempotency-key).
+      input: z.object({ orderId: z.string().default("daily"), fail: z.boolean().default(false) }),
+      idempotencyKey: ["orderId"],
+      cron: ["0 9 * * *"],
+      async run(ctx, input) {
+        const count = await ctx.step.do("count", () => ++n);
+        if (input.fail) throw new Error("boom");
+        return count;
+      },
+    });
+    const t = make(act);
+    const first = await t.start({ orderId: "A-1" });
+    // Same order, other fields, field order: the first run. Over MCP too.
+    expect((await t.start({ fail: false, orderId: "A-1" })).runId).toBe(first.runId);
+    expect((await t.start({ orderId: "A-1" }, { trigger: "mcp" })).runId).toBe(first.runId);
+    // The stored key is the one the hosts compute from the input as sent.
+    expect(t.query("SELECT input_key FROM _actuate_runs WHERE run_id = ?", [first.runId])).toEqual([{ input_key: await deriveInputKey(["orderId"], { orderId: "A-1" }) }]);
+    // A key of the caller's own forces a new run; webhooks and cron never derive one.
+    expect((await t.start({ orderId: "A-1" }, { idempotencyKey: "again" })).runId).not.toBe(first.runId);
+    const hooks = [await t.start({ orderId: "A-1" }, { trigger: "webhook" }), await t.start({ orderId: "A-1" }, { trigger: "webhook" })];
+    expect(new Set([first.runId, ...hooks.map((r) => r.runId)]).size).toBe(3);
+    expect((await t.cron()).runId).not.toBe((await t.cron()).runId);
+    // A failed run never blocks a retry; a completed one matches for 24 hours.
+    const failed = await t.start({ orderId: "B-1", fail: true });
+    expect(failed.status).toBe("FAILED");
+    expect((await t.start({ orderId: "B-1" })).status).toBe("COMPLETED");
+    await t.advance("24 hours");
+    await t.advance("1 second");
+    const later = await t.start({ orderId: "A-1" });
+    expect(later.runId).not.toBe(first.runId);
+    expect(later.output).toBe(n);
   });
 
   it("redacts secret config values only with redactSecrets, and replays still see the real value", async () => {
