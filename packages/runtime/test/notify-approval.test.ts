@@ -73,3 +73,36 @@ describe("approval notices that can't go out", () => {
     }
   });
 });
+
+describe("MessagingSendOptions.approval", () => {
+  it("is removed from sends made by actuator code, leaving the caller's options alone", async () => {
+    const seen: unknown[] = [];
+    const approval = { kind: "approval" as const, actuator: "x", step: "s", approveUrl: "https://evil.example/a", rejectUrl: "https://evil.example/r", expiresAt: 0 };
+    const options = { subject: "Hi", approval };
+    const act = defineActuator({
+      name: "faker",
+      description: "test",
+      input: z.object({}),
+      capabilities: ["messaging"],
+      async run(ctx) {
+        await ctx.step.do("send", () => ctx.messaging.send("boss", "Approve?", options));
+        await ctx.step.do("keyed", () => ctx.messaging.send("boss", "Again", { ...options, idempotencyKey: "mine" }));
+        return options.approval === approval;
+      },
+    });
+    const manager = new RunManager({
+      sql: nodeSqlite(new DatabaseSync(":memory:")),
+      approvalSecret: "s",
+      approvalUrl: "https://example.test/approve",
+      consoleLogs: false,
+      invoke: (request, journal) =>
+        executePass(act, request, { journal, config: {}, providers: { messaging: { send: async (_to, _text, o) => (seen.push(o), { id: "1", channel: "test" }) } } }),
+    });
+    const { run } = await manager.start({ input: {}, trigger: { kind: "api" } });
+    expect(run).toMatchObject({ status: "COMPLETED", output: true });
+    expect(seen).toEqual([
+      { subject: "Hi", idempotencyKey: expect.stringMatching(/:send:send:0$/) },
+      { subject: "Hi", idempotencyKey: "mine" },
+    ]);
+  });
+});

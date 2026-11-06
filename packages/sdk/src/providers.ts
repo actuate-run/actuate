@@ -27,6 +27,29 @@ export interface MessagingSendOptions {
    * Inside `ctx.step.do`, defaults to a key derived from the step's idempotency key: see `StepInfo.idempotencyKey`.
    */
   idempotencyKey?: string;
+  /**
+   * Set only by Actuate's own approval and input notifications (a `waitForApproval` or `waitForInput` with
+   * `notify`), never by actuator code: the runtime removes it from sends made through `ctx.messaging`. A provider
+   * that knows it can render the request (a card with link buttons); every other provider ignores it. The
+   * message text always carries the same links too, so nothing is lost either way.
+   */
+  approval?: ApprovalPrompt;
+}
+
+/** A step waiting for a person, as an approval notification describes it to the messaging provider. */
+export interface ApprovalPrompt {
+  /** "approval" carries `approveUrl` and `rejectUrl`; "input" carries `answerUrl`. */
+  kind: "approval" | "input";
+  actuator: string;
+  step: string;
+  /** The approval message, or the question for input (secret config values redacted). */
+  message?: string;
+  /** Signed links to the confirm page: opening one shows the page (GET), and only the page's button decides (POST). */
+  approveUrl?: string;
+  rejectUrl?: string;
+  answerUrl?: string;
+  /** When the links stop working, epoch ms. */
+  expiresAt: number;
 }
 
 export interface MessageReceipt {

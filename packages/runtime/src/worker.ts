@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { NOTIFY_OWNER, NOTIFY_OWNER_MAX_TEXT, z, type Actuator, type Json, type NotifyOwnerResult, type OwnerNotifier, type Providers } from "@actuate/sdk";
+import { NOTIFY_OWNER, NOTIFY_OWNER_MAX_TEXT, z, type Actuator, type ApprovalPrompt, type Json, type NotifyOwnerResult, type OwnerNotifier, type Providers } from "@actuate/sdk";
 import { RunManager, type ApprovalRequest, type RunManagerOptions, type RunStatus } from "./manager.js";
 import { executePass } from "./pass.js";
 import { createHttpProvider } from "./providers.js";
@@ -143,6 +143,18 @@ function configJsonSchema(schema: z.ZodType): unknown {
   }
 }
 
+/** The request as `MessagingSendOptions.approval` describes it, for providers that render approvals. */
+function approvalPrompt(req: ApprovalRequest, actuatorName: string): ApprovalPrompt {
+  return {
+    kind: req.kind,
+    actuator: actuatorName,
+    step: req.step,
+    ...(req.message !== undefined ? { message: req.message } : {}),
+    ...(req.kind === "input" ? { answerUrl: req.answerUrl! } : { approveUrl: req.approveUrl!, rejectUrl: req.rejectUrl! }),
+    expiresAt: req.expiresAt,
+  };
+}
+
 type ProviderWebhookEvent = { event: string; payload: Json };
 /** What a provider webhook handler returns: events to deliver, none, or a plain-text handshake reply. */
 export type ProviderWebhookOutcome = ProviderWebhookEvent | ProviderWebhookEvent[] | { reply: string } | null;
@@ -268,7 +280,7 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
       }
       const text = `${message}\n\n${links}`;
       const messaging = this.getProviders().messaging;
-      if (req.notify && messaging) await messaging.send(req.notify, text, { subject });
+      if (req.notify && messaging) await messaging.send(req.notify, text, { subject, approval: approvalPrompt(req, actuator.name) });
       else console.log(`\n🔐  [approval requested] ${text}\n`);
     }
 

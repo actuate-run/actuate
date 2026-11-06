@@ -552,6 +552,8 @@ class Pass {
                 `ctx.${cap}.${prop}() must be called inside ctx.step.do(...); otherwise it repeats on every replay.`,
               );
             }
+            // Only Actuate's approval notifications describe an approval: actuator code can't fake an "Approve" card.
+            if (cap === "messaging" && prop === "send") args = withoutApproval(args);
             const keyed = KEYED_METHODS[cap];
             const at = keyed && Object.hasOwn(keyed, prop) ? keyed[prop] : undefined;
             if (at !== undefined) return this.withIdempotencyKey(prop, at, args).then((keyed) => Reflect.apply(value as (...a: unknown[]) => unknown, provider, keyed));
@@ -562,6 +564,16 @@ class Pass {
       },
     );
   }
+}
+
+/** `messaging.send` arguments with `options.approval` removed (a copy; the caller's options are left alone). */
+function withoutApproval(args: unknown[]): unknown[] {
+  const options = args[2];
+  if (!options || typeof options !== "object" || !("approval" in options)) return args;
+  const { approval: _dropped, ...rest } = options as Record<string, unknown>;
+  const out = [...args];
+  out[2] = rest;
+  return out;
 }
 
 /**
