@@ -109,6 +109,12 @@ it("sends approval requests with an approval object, through the approval templa
   expect((await approvals.dispatchFetch(`${local}/approve?token=${token}`)).status).toBe(200);
   expect((await (await approvals.dispatchFetch(`${local}/runs/${run.runId}`)).json<any>()).status).toBe("WAITING");
 
+  // A question: "Input needed", with the answer link.
+  await start(approvals, "ask");
+  const asked = JSON.parse(got.at(-1)!.body);
+  expect(asked).toMatchObject({ subject: "Input needed: reply", approval: { kind: "input", step: "why", message: "Why?" } });
+  expect(asked.approval.answerUrl).toMatch(/\/approve\?token=/);
+
   // Actuator code's own sends never carry an approval.
   await start(approvals, "fake");
   expect(JSON.parse(got.at(-1)!.body)).not.toHaveProperty("approval");

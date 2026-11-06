@@ -158,14 +158,8 @@ export function idempotencyKeyProblems(inputSchema: unknown, fields: readonly st
   if (!Array.isArray(fields) || fields.length === 0) return ["idempotencyKey lists no fields. List the input fields that identify a request, or leave it out."];
   const root = (inputSchema && typeof inputSchema === "object" ? inputSchema : {}) as Record<string, unknown>;
   type ObjectSchema = { properties?: Record<string, Record<string, unknown>>; required?: unknown };
-  let schema: ObjectSchema;
   // The input itself may be a $ref (zod's `.meta({ id })` on the object): `{"$ref":"#/$defs/Order","$defs":{...}}`.
-  try {
-    schema = (resolveLocalRef(root, root) ?? {}) as ObjectSchema;
-  } catch (err) {
-    if (err instanceof UnreadableRefError) return [err.message];
-    throw err;
-  }
+  const schema = (resolveLocalRef(root, root) ?? {}) as ObjectSchema;
   const properties = schema.properties && typeof schema.properties === "object" ? schema.properties : {};
   const required = Array.isArray(schema.required) ? schema.required : [];
   const problems: string[] = [];
@@ -177,14 +171,7 @@ export function idempotencyKeyProblems(inputSchema: unknown, fields: readonly st
       continue;
     }
     seen.add(name);
-    let prop: Record<string, unknown> | undefined;
-    try {
-      prop = Object.prototype.hasOwnProperty.call(properties, name) ? resolveLocalRef(root, properties[name]) : undefined;
-    } catch (err) {
-      if (!(err instanceof UnreadableRefError)) throw err;
-      problems.push(`idempotencyKey field "${name}": ${err.message}`);
-      continue;
-    }
+    const prop = Object.prototype.hasOwnProperty.call(properties, name) ? resolveLocalRef(root, properties[name]) : undefined;
     if (typeof field !== "string" || !prop) {
       problems.push(`idempotencyKey field "${name}" is not a top-level field of the input schema.`);
       continue;
@@ -201,36 +188,36 @@ export function idempotencyKeyProblems(inputSchema: unknown, fields: readonly st
   return problems;
 }
 
-/** A `$ref` whose pointer can't be decoded (bad percent-encoding such as `%E0`). */
-class UnreadableRefError extends Error {
-  constructor(ref: string) {
-    super(`The input schema has a $ref that can't be read (${JSON.stringify(ref.slice(0, 100))}).`);
-    this.name = "UnreadableRefError";
-  }
-}
-
 /**
  * Follow a local `$ref` (`#/$defs/<id>` or `#/definitions/<id>`, as zod emits for a schema with `.meta({ id })`),
- * keeping the referring node's own keywords. Anything else is returned as it is. Throws UnreadableRefError for a
- * pointer that can't be decoded.
+ * keeping the referring node's own keywords. Anything else, and a ref that names no definition, is returned as it is.
+ *
+ * zod writes ids as they are (`#/$defs/50%`), while JSON Pointer percent-encodes them (`#/$defs/a%20b`), so the
+ * segment is looked up raw first, then JSON-Pointer-unescaped (`~1` is `/`, `~0` is `~`), then percent-decoded and
+ * unescaped. A segment that can't be percent-decoded simply has no decoded candidate.
  */
 function resolveLocalRef(root: { $defs?: unknown; definitions?: unknown }, node: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   let current = node;
   for (let i = 0; current && typeof current.$ref === "string" && i < 16; i++) {
     const m = /^#\/(\$defs|definitions)\/(.+)$/.exec(current.$ref);
     const defs = m ? (root[m[1] as "$defs" | "definitions"] as Record<string, Record<string, unknown>> | undefined) : undefined;
-    let name = "";
-    try {
-      name = m ? decodeURIComponent(m[2]!).replace(/~1/g, "/").replace(/~0/g, "~") : "";
-    } catch {
-      throw new UnreadableRefError(current.$ref);
-    }
-    const target = defs && typeof defs === "object" && Object.prototype.hasOwnProperty.call(defs, name) ? defs[name] : undefined;
+    const target = m && defs && typeof defs === "object" ? refCandidates(m[2]!).map((n) => (Object.prototype.hasOwnProperty.call(defs, n) ? defs[n] : undefined)).find(Boolean) : undefined;
     if (!target || typeof target !== "object") return current;
     const { $ref: _ref, ...own } = current;
     current = { ...target, ...own };
   }
   return current;
+}
+
+function refCandidates(segment: string): string[] {
+  const unescape = (v: string) => v.replace(/~1/g, "/").replace(/~0/g, "~");
+  const out = [segment, unescape(segment)];
+  try {
+    out.push(unescape(decodeURIComponent(segment)));
+  } catch {
+    // Not percent-encoded (e.g. a raw "50%"): the raw candidates are all there is.
+  }
+  return [...new Set(out)];
 }
 
 export function formatIssues(issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey>; message: string }>): string {

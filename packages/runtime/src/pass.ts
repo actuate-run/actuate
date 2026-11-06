@@ -566,10 +566,13 @@ class Pass {
   }
 }
 
-/** `messaging.send` arguments with `options.approval` removed (a copy; the caller's options are left alone). */
+/**
+ * `messaging.send` arguments with `options.approval` removed: always a plain copy (the caller's options are left
+ * alone), never an `in` test a Proxy could answer falsely.
+ */
 function withoutApproval(args: unknown[]): unknown[] {
   const options = args[2];
-  if (!options || typeof options !== "object" || !("approval" in options)) return args;
+  if (!options || typeof options !== "object") return args;
   const { approval: _dropped, ...rest } = options as Record<string, unknown>;
   const out = [...args];
   out[2] = rest;

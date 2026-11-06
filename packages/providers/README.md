@@ -35,7 +35,7 @@ const reply = await ctx.step.waitForEvent("reply", { event: "message.custom-webh
 | `CUSTOM_WEBHOOK_HEADERS` | Optional extra headers, one `Name: value` per line (at most 20), e.g. `Authorization: Bearer ...`, `X-Gotify-Key: ...`. `Host`, `Content-Length`, `Transfer-Encoding`, `Connection` and `webhook-*` are refused. |
 | `CUSTOM_WEBHOOK_FORMAT` | `standard`, `text` or `template`. Leave empty for automatic: `template` when a JSON template is set, otherwise `standard`. |
 | `CUSTOM_WEBHOOK_TEMPLATE` | JSON for the `template` format, with `{{text}}`, `{{html}}`, `{{subject}}`, `{{to}}`, `{{id}}`, `{{replyUrl}}` inside JSON strings (and the approval placeholders below, empty on ordinary messages). |
-| `CUSTOM_WEBHOOK_APPROVAL_TEMPLATE` | Optional JSON used instead, whatever the format, for approval requests only (`waitForApproval` with `notify`): the same placeholders plus `{{approveUrl}}`, `{{rejectUrl}}` and `{{expiresAt}}` (ISO 8601). Questions (`waitForInput`) use the body format, where `{{answerUrl}}` and the standard body's `approval.answerUrl` carry the answer link. Without it, approvals use the body format too. |
+| `CUSTOM_WEBHOOK_APPROVAL_TEMPLATE` | Optional JSON used instead, whatever the format, for approval requests only (`waitForApproval` with `notify`): the same placeholders plus `{{approveUrl}}`, `{{rejectUrl}}` and `{{expiresAt}}` (ISO 8601). It must use at least one of `{{approveUrl}}`, `{{rejectUrl}}` or `{{text}}` (the text holds the links), so the links always reach the receiver. Questions (`waitForInput`) use the body format, where `{{answerUrl}}` and the standard body's `approval.answerUrl` carry the answer link. Without it, approvals use the body format too. |
 
 Body formats:
 
@@ -47,11 +47,11 @@ Approval and input requests carry an `approval` object in the `standard` body: `
 
 Approval templates for chat apps whose incoming webhooks show cards with link buttons:
 
-Microsoft Teams (Workflows, "When a Teams webhook request is received"; Office 365 connectors are retired), an Adaptive Card with `Action.OpenUrl` buttons:
+Microsoft Teams (Workflows, "When a Teams webhook request is received"; Office 365 connectors are retired), an Adaptive Card with `Action.OpenUrl` buttons (the workflow's schema requires `"contentUrl": null` on the attachment):
 
 <!-- preset: teams -->
 ```json
-{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"$schema":"http://adaptivecards.io/schemas/adaptive-card.json","type":"AdaptiveCard","version":"1.4","body":[{"type":"TextBlock","text":"{{subject}}","weight":"Bolder","wrap":true},{"type":"TextBlock","text":"{{text}}","wrap":true},{"type":"TextBlock","text":"Links expire {{expiresAt}}","isSubtle":true,"size":"Small","wrap":true}],"actions":[{"type":"Action.OpenUrl","title":"Approve","url":"{{approveUrl}}"},{"type":"Action.OpenUrl","title":"Reject","url":"{{rejectUrl}}"}]}}]}
+{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","contentUrl":null,"content":{"$schema":"http://adaptivecards.io/schemas/adaptive-card.json","type":"AdaptiveCard","version":"1.4","body":[{"type":"TextBlock","text":"{{subject}}","weight":"Bolder","wrap":true},{"type":"TextBlock","text":"{{text}}","wrap":true},{"type":"TextBlock","text":"Links expire {{expiresAt}}","isSubtle":true,"size":"Small","wrap":true}],"actions":[{"type":"Action.OpenUrl","title":"Approve","url":"{{approveUrl}}"},{"type":"Action.OpenUrl","title":"Reject","url":"{{rejectUrl}}"}]}}]}
 ```
 
 Google Chat, a `cardsV2` card with link buttons. Test it in your space first: Google's documentation doesn't say that incoming webhooks accept `cardsV2` (they are known to work, and other tools send them, but it isn't promised). If the space shows nothing, use `{"text":"{{text}}"}`, which carries the same links.

@@ -87,6 +87,9 @@ describe("MessagingSendOptions.approval", () => {
       async run(ctx) {
         await ctx.step.do("send", () => ctx.messaging.send("boss", "Approve?", options));
         await ctx.step.do("keyed", () => ctx.messaging.send("boss", "Again", { ...options, idempotencyKey: "mine" }));
+        // A Proxy that hides `approval` from `in` but still hands it out when read.
+        const sneaky = new Proxy({ subject: "Hi", idempotencyKey: "p", approval } as Record<string, unknown>, { has: (t, k) => k !== "approval" && k in t });
+        await ctx.step.do("proxy", () => ctx.messaging.send("boss", "Sneaky", sneaky as never));
         return options.approval === approval;
       },
     });
@@ -103,6 +106,8 @@ describe("MessagingSendOptions.approval", () => {
     expect(seen).toEqual([
       { subject: "Hi", idempotencyKey: expect.stringMatching(/:send:send:0$/) },
       { subject: "Hi", idempotencyKey: "mine" },
+      { subject: "Hi", idempotencyKey: "p" },
     ]);
+    for (const o of seen) expect(Object.keys(o as object)).not.toContain("approval");
   });
 });

@@ -96,6 +96,13 @@ describe('notify: "owner" on the self-hosted runtime', () => {
     expect((await get(`/runs/${started.body.runId}`)).output).toEqual({ approved: true });
   });
 
+  it('gives a question the subject "Input needed"', async () => {
+    const started = await post("/run", { orderId: "O-3", mode: "ask" });
+    expect(started.body.status).toBe("WAITING");
+    const run = await get(`/runs/${started.body.runId}`);
+    expect(run.logs.at(-1)).toMatchObject({ level: "warn", message: expect.stringMatching(/^Input link for "ok" not sent: Input needed: e2e_keyed \/ message \/ no links \/ keyed$/) });
+  });
+
   it("prints the links to the console when no notifier is configured, and says so on the run", async () => {
     const started = await post("/run", { orderId: "O-2", mode: "approve" }, auth, bare);
     expect(started.body.status).toBe("WAITING");

@@ -131,7 +131,12 @@ const schema = z
       if (problem) ctx.addIssue({ code: "custom", path: ["template"], message: problem });
     }
     if (c.approvalTemplate) {
-      const problem = templateProblem(c.approvalTemplate, "approvalTemplate");
+      const used = new Set([...c.approvalTemplate.matchAll(PLACEHOLDER)].map(([, raw]) => raw!.trim()));
+      const problem =
+        templateProblem(c.approvalTemplate, "approvalTemplate") ??
+        (["approveUrl", "rejectUrl", "text"].some((p) => used.has(p))
+          ? null
+          : "approvalTemplate must use {{approveUrl}}, {{rejectUrl}} or {{text}} (which holds the links): otherwise the approval links never reach the receiver");
       if (problem) ctx.addIssue({ code: "custom", path: ["approvalTemplate"], message: problem });
     }
   });
@@ -238,7 +243,7 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
       secret: false,
       optional: true,
       multiline: true,
-      help: 'For the template format. Placeholders go inside JSON strings: {"text":"{{text}}"}. Also {{subject}}, {{html}}, {{to}}, {{id}}, {{replyUrl}}.',
+      help: 'For the template format. Placeholders go inside JSON strings: {"text":"{{text}}"}. Also {{subject}}, {{html}}, {{to}}, {{id}}, {{replyUrl}}, and on approval and input requests {{approveUrl}}, {{rejectUrl}}, {{answerUrl}}, {{expiresAt}} (empty otherwise).',
     },
     {
       key: "approvalTemplate",

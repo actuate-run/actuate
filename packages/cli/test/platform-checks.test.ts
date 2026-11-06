@@ -117,11 +117,17 @@ describe("platform deploy checks", () => {
     expect(idempotencyKeyProblems(order.inputSchema, ["orderId"])).toEqual([]);
     expect(idempotencyKeyProblems(order.inputSchema, ["n"])).toEqual([expect.stringContaining('"n" must be required')]);
     expect(idempotencyKeyProblems(order.inputSchema, ["nope"])).toEqual(['idempotencyKey field "nope" is not a top-level field of the input schema.']);
-    // A ref that can't be decoded is a problem, not a crash.
-    expect(idempotencyKeyProblems({ $ref: "#/$defs/%E0", $defs: {} }, ["k"])).toEqual(['The input schema has a $ref that can\'t be read ("#/$defs/%E0").']);
-    expect(idempotencyKeyProblems({ properties: { k: { $ref: "#/$defs/%E0" }, j: { type: "string" } }, required: ["k", "j"] }, ["k", "j"])).toEqual([
-      'idempotencyKey field "k": The input schema has a $ref that can\'t be read ("#/$defs/%E0").',
-    ]);
+    // zod writes ids raw: looked up raw first, then percent-decoded. A segment that can't be decoded never throws.
+    const raw = describeActuator(defineActuator({ ...base, input: z.object({ k: z.string().meta({ id: "50%" }), s: z.string().meta({ id: "a b" }) }), idempotencyKey: ["k", "s"] } as never));
+    expect(JSON.stringify(raw.inputSchema)).toContain('"$ref":"#/$defs/50%"');
+    expect(idempotencyKeyProblems(raw.inputSchema, ["k", "s"])).toEqual([]);
+    const defs = { $defs: { "a b": { type: "string" }, "%E0": { type: "string" }, "x/y": { type: "number" } } };
+    const one = (ref: string) => idempotencyKeyProblems({ properties: { k: { $ref: ref } }, required: ["k"], ...defs }, ["k"]);
+    expect(one("#/$defs/a%20b")).toEqual([]);
+    expect(one("#/$defs/%E0")).toEqual([]);
+    expect(one("#/$defs/x~1y")).toEqual([]);
+    expect(one("#/$defs/%E1")).toEqual(['idempotencyKey field "k" must be a string, number, integer or boolean.']);
+    expect(idempotencyKeyProblems({ $ref: "#/$defs/%E1", $defs: {} }, ["k"])).toEqual(['idempotencyKey field "k" is not a top-level field of the input schema.']);
     // Without a declaration, the metadata has no idempotencyKey at all (deploys of older actuators are unchanged).
     expect("idempotencyKey" in describeActuator(actuator)).toBe(false);
     expect(describeActuator(defineActuator({ ...base, input, idempotencyKey: ["orderId"] } as never)).idempotencyKey).toEqual(["orderId"]);

@@ -458,6 +458,11 @@ describe("custom-webhook approvals", () => {
     expect(problem({ url: URL_, approvalTemplate: '{"a":"{{approve}}"}' })).toMatch(/approvalTemplate: unknown placeholder \{\{approve\}\}.*\{\{approveUrl\}\}, \{\{rejectUrl\}\}, \{\{answerUrl\}\}, \{\{expiresAt\}\}/);
     expect(problem({ url: URL_, format: "template", template: '{"a":"{{nope}}"}' })).toMatch(/\{\{expiresAt\}\}/);
     expect(() => parse({ approvalTemplate: '{"a":"{{approveUrl}}","e":"{{expiresAt}}"}' })).not.toThrow();
+    expect(() => parse({ approvalTemplate: '{"m":"{{ text }}"}' })).not.toThrow();
+    expect(() => parse({ approvalTemplate: '{"r":"{{rejectUrl}}"}' })).not.toThrow();
+    expect(problem({ url: URL_, approvalTemplate: '{"s":"{{subject}}","q":"{{answerUrl}}","e":"{{expiresAt}}"}' })).toMatch(
+      /approvalTemplate: approvalTemplate must use \{\{approveUrl\}\}, \{\{rejectUrl\}\} or \{\{text\}\} \(which holds the links\)/,
+    );
   });
 
   it("ships presets that are valid approval templates: Teams Adaptive Card and Google Chat card", async () => {
@@ -472,6 +477,7 @@ describe("custom-webhook approvals", () => {
       expect(json).toContain(approval.rejectUrl);
       if (name === "teams") {
         expect(body.attachments[0].contentType).toBe("application/vnd.microsoft.card.adaptive");
+        expect(body.attachments[0]).toHaveProperty("contentUrl", null);
         expect(body.attachments[0].content.actions.map((a: { type: string; title: string; url: string }) => [a.type, a.title, a.url])).toEqual([
           ["Action.OpenUrl", "Approve", approval.approveUrl],
           ["Action.OpenUrl", "Reject", approval.rejectUrl],

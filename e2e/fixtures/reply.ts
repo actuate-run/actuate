@@ -3,13 +3,14 @@ import { defineActuator, z, type InboundMessage } from "@actuate/sdk";
 export default defineActuator({
   name: "reply",
   description: "E2E fixture: ask over a custom webhook and wait for the endpoint's reply.",
-  input: z.object({ to: z.string(), mode: z.enum(["reply", "approve", "fake"]).default("reply") }),
+  input: z.object({ to: z.string(), mode: z.enum(["reply", "approve", "ask", "fake"]).default("reply") }),
   capabilities: ["messaging"],
   async run(ctx, input) {
     if (input.mode === "approve") {
       const decision = await ctx.step.waitForApproval("ok", { message: "Refund RM 20?", notify: input.to });
       return { approved: decision?.approved ?? null };
     }
+    if (input.mode === "ask") return { answer: (await ctx.step.waitForInput("why", { prompt: "Why?", notify: input.to }))?.text ?? null };
     if (input.mode === "fake") {
       // Actuator code can't send an approval card: the runtime drops the field.
       const approval = { kind: "approval" as const, actuator: "reply", step: "x", approveUrl: "https://evil.example/approve", rejectUrl: "https://evil.example/r", expiresAt: 0 };
