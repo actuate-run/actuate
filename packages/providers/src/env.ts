@@ -1,8 +1,9 @@
-import type { MessagingProvider, Providers } from "@actuate/sdk";
+import type { MessagingProvider, ProviderInteractions, Providers } from "@actuate/sdk";
 import { combineMessaging } from "./multi.js";
 import type { ProviderCapability, ProviderContext, ProviderEvent, ProviderWebhookResult } from "./contract.js";
 import { WebhookVerificationError } from "./contract.js";
 import { PROVIDERS, getProvider, type AnyProviderDefinition } from "./registry.js";
+import type { ProviderDefinition } from "./contract.js";
 
 /** `botToken` → `BOT_TOKEN`, `xSignatureKey` → `X_SIGNATURE_KEY`. */
 export function envName(kind: string, field: string): string {
@@ -107,4 +108,34 @@ export async function parseProviderWebhookFromEnv(
   return configured.definition.parseWebhook(request, configured.credentials, {
     fetch: fetchImpl,
   });
+}
+
+/**
+ * A provider's button-click handling bound to its credentials, or null when the provider takes no clicks
+ * (no `parseInteraction` or `respondInteraction`). A provider without `isApprover` lets everyone decide.
+ */
+export function providerInteractions<C>(
+  definition: ProviderDefinition<C, ProviderCapability>,
+  credentials: C,
+  fetchImpl: typeof fetch = fetch,
+): ProviderInteractions | null {
+  const { parseInteraction, respondInteraction, isApprover } = definition;
+  if (!parseInteraction || !respondInteraction) return null;
+  const ctx = { fetch: fetchImpl };
+  return {
+    kind: definition.kind,
+    parse: (request) => parseInteraction.call(definition, request, credentials, ctx),
+    isApprover: (actor) => (isApprover ? isApprover.call(definition, actor, credentials) : true),
+    respond: (click, outcome) => respondInteraction.call(definition, click, outcome, credentials, ctx),
+  };
+}
+
+/**
+ * {@link providerInteractions} for the provider of `kind` configured in the environment (see
+ * {@link configuredFromEnv}), or null when it isn't configured or takes no clicks. For `createRuntime`'s
+ * `providerInteractions` option.
+ */
+export function providerInteractionsFromEnv(env: Record<string, unknown>, kind: string, fetchImpl: typeof fetch = fetch): ProviderInteractions | null {
+  const configured = configuredFromEnv(env).find((p) => p.definition.kind === kind);
+  return configured ? providerInteractions(configured.definition, configured.credentials, fetchImpl) : null;
 }

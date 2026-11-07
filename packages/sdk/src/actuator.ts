@@ -169,10 +169,13 @@ export interface ApprovalResult {
   /**
    * Who decided. From the dashboard or API it is the signed-in account (email or
    * token name); from a signed link it is the name the person typed, if any (self-reported).
+   * From a chat button (`via: "chat"`) it is verified by the chat provider: `<channel>:<user id>`, plus
+   * ` (<display name>)` when the provider gives one, e.g. `telegram:123456789 (Alice)` or `slack:U0123ABCD (alice)`.
+   * The user ID is checked by the provider's signature; the display name is whatever the person set in the chat app.
    */
   by?: string;
-  /** Where the decision came from. */
-  via?: "link" | "dashboard" | "api";
+  /** Where the decision came from: a signed link, the dashboard, the API, or a chat button (Telegram, Slack, Discord). */
+  via?: "link" | "dashboard" | "api" | "chat";
 }
 
 /**

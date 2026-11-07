@@ -1,3 +1,5 @@
+import type { Json } from "./actuator.js";
+
 /**
  * Capability provider interfaces. A tenant configures each with their own
  * credentials; the host injects a typed client into `ctx`.
@@ -50,6 +52,74 @@ export interface ApprovalPrompt {
   answerUrl?: string;
   /** When the links stop working, epoch ms. */
   expiresAt: number;
+  /**
+   * Present on approvals (never on input) when the runtime made a button nonce for this request: a provider that
+   * can take button clicks (Telegram with a webhook secret token, Slack with a signing secret, Discord with a bot
+   * token and public key) puts `encodeButtonPayload({ route, nonce, action })` from `@actuate/providers` on its
+   * Approve and Reject buttons. `route` names the actuator that owns the request ("local" when self-hosted, the
+   * actuator ID on the hosted platform); `nonce` is random, single-use and expires with the links. The nonce alone
+   * decides nothing: a click must also be verified by the provider and come from an allowed approver.
+   */
+  buttons?: { route: string; nonce: string };
+}
+
+// ---------------------------------------------------------------- interactive approval buttons
+// The contract between chat provider adapters (`@actuate/providers`) and the runtimes that receive button clicks.
+// Actuator code never sees these.
+
+/** An HTTP reply a provider needs sent back verbatim (a Discord PONG, a Telegram method call, a Slack ack). */
+export interface ProviderReply {
+  status: number;
+  /** Default `text/plain; charset=utf-8`. */
+  contentType?: string;
+  body: string;
+}
+
+/** The person who clicked, as the provider verified them. */
+export interface ButtonActor {
+  /** The provider's user ID: a Telegram numeric user ID, a Slack member ID (U.../W...), a Discord user ID. */
+  id: string;
+  /** Display name, when the provider gives one. Not verified: the person chose it. */
+  name?: string;
+  /** Role IDs, when the provider gives them (Discord guild members), for `role:<id>` approver entries. */
+  roles?: string[];
+}
+
+/** A verified Approve or Reject click, from `ProviderDefinition.parseInteraction`. */
+export interface ButtonClick {
+  /** From the button payload: the actuator the request belongs to ("local" when self-hosted). */
+  route: string;
+  nonce: string;
+  action: "approve" | "reject";
+  actor: ButtonActor;
+  /** Provider data respondInteraction needs (message ids, response_url, interaction token...). Never logged. */
+  context: Json;
+}
+
+/**
+ * What became of a click, for `ProviderDefinition.respondInteraction`: "decided" (this click decided), "already"
+ * (decided before, by a button, a link or the dashboard), "expired" or "unknown" (expired, or no longer waiting),
+ * "not-approver" (the clicker isn't on the provider's approver list) or "foreign" (the button belongs to another
+ * actuator). `by` is a verified approver label (`<channel>:<user id> (<name>)`) or, for a decision made another
+ * way, what that decision recorded; `at` is ISO 8601.
+ */
+export type ClickOutcome =
+  | { status: "decided" | "already"; decision: "approved" | "rejected"; by: string; at: string }
+  | { status: "expired" | "unknown" | "not-approver" | "foreign" };
+
+/**
+ * One configured chat provider's click handling, bound to its credentials: what a runtime calls on
+ * `POST /providers/<kind>/webhook`. `@actuate/providers` builds one with `providerInteractions(definition,
+ * credentials)` or `providerInteractionsFromEnv(env, kind)`.
+ */
+export interface ProviderInteractions {
+  kind: string;
+  /** `ProviderDefinition.parseInteraction`: leaves `request`'s body unread, so on null it can go to parseWebhook. */
+  parse(request: Request): Promise<{ reply: ProviderReply } | { click: ButtonClick } | null>;
+  /** `ProviderDefinition.isApprover`, true when the provider has no approver list. */
+  isApprover(actor: ButtonActor): boolean;
+  /** `ProviderDefinition.respondInteraction`: the reply to send now, and work to run after it (in `waitUntil`). */
+  respond(click: ButtonClick, outcome: ClickOutcome): { reply: ProviderReply; after?: () => Promise<void> };
 }
 
 export interface MessageReceipt {
