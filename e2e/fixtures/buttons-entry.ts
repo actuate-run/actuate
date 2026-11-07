@@ -67,6 +67,9 @@ export const fakechat: ProviderDefinition<FakeCredentials, "messaging"> = {
   },
   isApprover: (actor, credentials) => isListedApprover(parseApprovers(credentials.approvers, rules), actor),
   respondInteraction(click, outcome, _credentials, ctx) {
+    // Test hooks: a reply that throws, and a follow-up that throws synchronously.
+    if (click.actor.id === "500") throw new Error("reply failed for https://chat.example.test/secret-url");
+    if (click.actor.id === "501") return { reply: jsonReply({ text: clickOutcomeText(outcome) }), after: (() => { throw new Error("sync"); }) as never };
     const message = (click.context as { message: { id: string; text: string } | null }).message;
     return {
       reply: jsonReply({ text: clickOutcomeText(outcome) }),

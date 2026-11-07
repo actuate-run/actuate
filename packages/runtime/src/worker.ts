@@ -228,8 +228,8 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
               ? Promise.resolve({ status: "failed", error: { name: "ConfigError", message: this.configError } })
               : executePass(actuator, request, { journal, config: this.config, providers: this.getProviders(), ...this.getOwner() }),
           notifyApproval: (req) => this.notifyApproval(req),
-          // One actuator per worker: every button it sends routes back here.
-          buttonRoute: LOCAL_BUTTON_ROUTE,
+          // One actuator per worker: every button it sends routes back here. No messaging, no buttons to show.
+          buttonRoute: () => (this.getProviders().messaging ? LOCAL_BUTTON_ROUTE : undefined),
           scheduleWake: async (at) => {
             if (at === null) await state.storage.deleteAlarm();
             else await state.storage.setAlarm(Math.max(at, Date.now()));
@@ -557,10 +557,23 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
       if (click.route !== LOCAL_BUTTON_ROUTE) outcome = { status: "foreign" };
       else if (!interactions.isApprover(click.actor)) outcome = { status: "not-approver" };
       else outcome = this.manager.decideByButton(click.nonce, click.action, { by: chatApproverLabel(kind, click.actor) });
-      const { reply, after } = interactions.respond(click, outcome);
+      // The decision is committed by now: a failure below must not answer 500 (the provider would retry the
+      // click). Never log the error itself: a provider's reply or follow-up may hold a response_url or a token.
+      const errorName = (err: unknown) => (err instanceof Error ? err.name : typeof err);
+      let responded: ReturnType<ProviderInteractions["respond"]>;
+      try {
+        responded = interactions.respond(click, outcome);
+      } catch (err) {
+        console.error(`[actuate] ${kind} button reply failed: ${errorName(err)}`);
+        return new Response(null, { status: 200 });
+      }
+      const { reply, after } = responded;
       if (after) {
-        // Never log the error itself: a provider's follow-up may hold a response_url or a token.
-        this.ctx.waitUntil(after().catch((err) => console.error(`[actuate] ${kind} button follow-up failed: ${err instanceof Error ? err.name : typeof err}`)));
+        this.ctx.waitUntil(
+          Promise.resolve()
+            .then(after)
+            .catch((err) => console.error(`[actuate] ${kind} button follow-up failed: ${errorName(err)}`)),
+        );
       }
       return replyResponse(reply);
     }

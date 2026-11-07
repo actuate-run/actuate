@@ -77,6 +77,20 @@ describe("button nonces", () => {
     expect(h.approvals[1]).not.toHaveProperty("buttons");
   });
 
+  it("are not made for the owner, or while a route getter says none", async () => {
+    const h = harness();
+    await h.start({ notify: "owner" });
+    expect(h.approvals[0]).toMatchObject({ notify: "owner" });
+    expect(h.approvals[0]).not.toHaveProperty("buttons");
+    let messaging = false;
+    const g = harness(gate, { buttonRoute: () => (messaging ? "local" : undefined) });
+    await g.start();
+    messaging = true;
+    await g.start();
+    expect(g.approvals.map((r) => r.buttons?.route ?? null)).toEqual([null, "local"]);
+    expect(Number((g.db.prepare(`SELECT count(*) AS n FROM _actuate_approval_buttons`).get() as { n: number }).n)).toBe(1);
+  });
+
   it("are not made without a buttonRoute, and the route is checked", async () => {
     const h = harness(gate, { buttonRoute: undefined });
     await h.start();
@@ -251,6 +265,57 @@ describe("decideByButton", () => {
     await inFlight;
     await new Promise((r) => setTimeout(r, 10));
     expect(manager.getRun(run.runId)).toMatchObject({ status: "COMPLETED", output: { approved: true, via: "chat", by } });
+  });
+});
+
+describe("a click while a pass is in flight", () => {
+  it("leaves the run due and the alarm set, so it resumes even if the queued pass is lost", async () => {
+    let release!: () => void;
+    let hold = false;
+    let lost = false;
+    const approvals: ApprovalRequest[] = [];
+    const wakes: Array<number | null> = [];
+    const db = new DatabaseSync(":memory:");
+    const now = () => T0;
+    const manager = new RunManager({
+      sql: nodeSqlite(db),
+      approvalSecret: "s",
+      approvalUrl: "https://example.test/approve",
+      consoleLogs: false,
+      now,
+      buttonRoute: "local",
+      notifyApproval: async (r) => void approvals.push(r),
+      scheduleWake: (w) => void wakes.push(w),
+      invoke: async (request, journal) => {
+        if (lost) await new Promise(() => {}); // the isolate went away before the queued pass ran
+        const steps = await journal.loadSteps();
+        if (hold) await new Promise<void>((r) => (release = r));
+        return executePass(gate, request, { journal: { ...journal, loadSteps: async () => steps }, config: {} });
+      },
+    });
+    const { run } = await manager.start({ input: {}, trigger: { kind: "api" } });
+    hold = true;
+    const inFlight = manager.resume(run.runId);
+    await new Promise((r) => setTimeout(r, 5));
+    hold = false;
+    expect(manager.decideByButton(approvals[0]!.buttons!.nonce, "approve", { by: "telegram:1" })).toMatchObject({ status: "decided" });
+    lost = true;
+    release();
+    await inFlight;
+    // The in-flight pass settled without the step's wake time, yet the run stays due and the alarm is set for it.
+    expect(db.prepare(`SELECT status, wake_at FROM _actuate_runs`).get()).toEqual({ status: "WAITING", wake_at: T0 });
+    expect(wakes.at(-1)).toBe(T0);
+    // A new isolate on the same storage: its alarm resumes the run.
+    const fresh = new RunManager({
+      sql: nodeSqlite(db),
+      approvalSecret: "s",
+      approvalUrl: "https://example.test/approve",
+      consoleLogs: false,
+      now,
+      invoke: (request, journal) => executePass(gate, request, { journal, config: {} }),
+    });
+    await fresh.alarm();
+    expect(fresh.getRun(run.runId)).toMatchObject({ status: "COMPLETED", output: { approved: true, via: "chat", by: "telegram:1" } });
   });
 });
 

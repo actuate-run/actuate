@@ -1,4 +1,4 @@
-import type { DbStatement, Json, NotifyOwnerResult, Row, SqlValue, Trigger, WaitForApprovalOptions } from "@actuate/sdk";
+import { NOTIFY_OWNER, type DbStatement, type Json, type NotifyOwnerResult, type Row, type SqlValue, type Trigger, type WaitForApprovalOptions } from "@actuate/sdk";
 import { isButtonNonce, isButtonRoute, newButtonNonce, type ButtonDecision } from "./buttons.js";
 import {
   fromJson,
@@ -70,7 +70,7 @@ export interface ApprovalRequest {
   answerUrl?: string;
   expiresAt: number;
   /**
-   * Approvals with `notify`, when the manager has a `buttonRoute`: the button nonce, for
+   * Approvals with a `notify` other than "owner", when the manager has a `buttonRoute`: the button nonce, for
    * `MessagingSendOptions.approval.buttons`. Only the messaging send may carry it: never log it or show it to the
    * actuator, a run token or a receipt.
    */
@@ -96,9 +96,10 @@ export interface RunManagerOptions {
   /**
    * The route Approve and Reject buttons carry, so a click finds this actuator: `"local"` self-hosted
    * (`LOCAL_BUTTON_ROUTE`), the actuator ID on the hosted platform. 1-24 characters of `[A-Za-z0-9_-]`. Unset: no
-   * button nonces are made, and approval notifications carry only links.
+   * button nonces are made, and approval notifications carry only links. A getter is asked per approval, so a
+   * host can return undefined while no messaging channel is configured.
    */
-  buttonRoute?: string;
+  buttonRoute?: string | (() => string | undefined);
   /** Called whenever the earliest wake time changes, so the host can set its alarm. */
   scheduleWake?: (wakeAt: number | null) => void | Promise<void>;
   now?: () => number;
@@ -171,12 +172,14 @@ export class RunManager {
   private readonly sql: SqlDriver;
   private readonly now: () => number;
   private readonly locks = new Map<string, Promise<unknown>>();
+  /** Runs with a wait completed (by a button) while a pass was in flight: that pass's settle leaves them due now. */
+  private readonly dueAfterPass = new Set<string>();
   private seq = 0;
 
   constructor(private readonly options: RunManagerOptions) {
     this.sql = options.sql;
     this.now = options.now ?? Date.now;
-    if (options.buttonRoute !== undefined && !isButtonRoute(options.buttonRoute)) {
+    if (typeof options.buttonRoute === "string" && !isButtonRoute(options.buttonRoute)) {
       throw new Error("RunManager buttonRoute must be 1-24 characters of A-Z, a-z, 0-9, _ and -");
     }
     applySchema(this.sql);
@@ -291,6 +294,7 @@ export class RunManager {
       // Cancelled while the pass was running: leave it cancelled.
       const current = this.sql.exec(`SELECT status FROM _actuate_runs WHERE run_id = ?`, [runId])[0];
       if (current?.status === "CANCELLED") {
+        this.dueAfterPass.delete(runId);
         this.flushLogs(runId, passes);
         return;
       }
@@ -304,6 +308,8 @@ export class RunManager {
   /** One write for the run row per pass, plus one for that pass's logs. */
   private settle(runId: string, passes: number, outcome: PassOutcome): void {
     const now = this.now();
+    // A wait completed while this pass ran (a button click): the run is due now, whatever the pass saw.
+    const due = this.dueAfterPass.delete(runId);
     if (outcome.status === "completed") {
       this.sql.exec(
         `UPDATE _actuate_runs SET status = 'COMPLETED', output_json = ?, wake_at = NULL, passes = ?, updated_at = ? WHERE run_id = ?`,
@@ -321,7 +327,7 @@ export class RunManager {
         [runId],
       )[0];
       this.sql.exec(`UPDATE _actuate_runs SET status = 'WAITING', wake_at = ?, passes = ?, updated_at = ? WHERE run_id = ?`, [
-        (wake?.wake_at as number | null) ?? null,
+        due ? now : ((wake?.wake_at as number | null) ?? null),
         passes,
         now,
         runId,
@@ -461,10 +467,18 @@ export class RunManager {
     return outcome;
   }
 
+  /** The route for new button nonces, or undefined for none (unset, a getter saying none, or an invalid route). */
+  private buttonRoute(): string | undefined {
+    const route = typeof this.options.buttonRoute === "function" ? this.options.buttonRoute() : this.options.buttonRoute;
+    return isButtonRoute(route) ? route : undefined;
+  }
+
   /** Have the run's next pass start soon, without waiting for it: from the alarm, or (no alarm) in the background. */
   private resumeSoon(runId: string, now: number): void {
     const schedule = this.options.scheduleWake;
-    // A pass already in flight read the step before it was decided, and settles without its wake time: queue another.
+    // A pass already in flight read the step before it was decided. Its settle keeps the run due (and the
+    // reschedule after it sets the alarm), so the decision survives the isolate going away; another pass is queued too.
+    if (this.locks.has(runId)) this.dueAfterPass.add(runId);
     if (!schedule || this.locks.has(runId)) void this.execute(runId);
     if (!schedule) return;
     const failed = (err: unknown) => console.error(`[actuate] could not schedule run ${runId} after a button decision`, err);
@@ -761,13 +775,15 @@ export class RunManager {
     };
     // Approve and Reject buttons, for a request that goes out: a random single-use nonce, kept here and handed to
     // the notifier only. Questions (kind "input") get no nonce: their button is the answer link.
-    if (kind === "approval" && request.notify && this.options.buttonRoute) {
+    // Not for the owner: "owner" never goes through a messaging provider that could show buttons.
+    const route = request.notify && request.notify !== NOTIFY_OWNER ? this.buttonRoute() : undefined;
+    if (kind === "approval" && route) {
       const nonce = newButtonNonce();
       const added = this.sql.exec(
         `INSERT INTO _actuate_approval_buttons (nonce, run_id, step, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT (nonce) DO NOTHING RETURNING nonce`,
         [nonce, runId, step, opts.expiresAt],
       );
-      if (added.length) request.buttons = { route: this.options.buttonRoute, nonce };
+      if (added.length) request.buttons = { route, nonce };
     }
     // Never log the links: run logs are readable by anything holding a run token (e.g. the agent being gated).
     await this.writeLog(runId, "info", kind === "input" ? `Input requested for "${step}"` : `Approval requested for "${step}"`, {

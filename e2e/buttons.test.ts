@@ -27,7 +27,7 @@ beforeAll(async () => {
     compatibilityDate: "2025-09-01",
     compatibilityFlags: ["nodejs_compat"],
     durableObjects: { ACTUATOR: { className: "ActuatorObject", useSQLite: true } },
-    bindings: { ACTUATE_DEV: "1", ACTUATE_PUBLIC_URL: "http://self.test", FAKE_SECRET: SECRET, FAKE_APPROVERS: "42, 43" },
+    bindings: { ACTUATE_DEV: "1", ACTUATE_PUBLIC_URL: "http://self.test", FAKE_SECRET: SECRET, FAKE_APPROVERS: "42, 43 500 501" },
     outboundService: async (req: Request) => {
       const url = new URL(req.url);
       const body = JSON.parse(await req.text());
@@ -130,4 +130,21 @@ it("routes notify { to, channel } to that messaging channel", async () => {
   await start({ to: "room-3", channel: "fakechat" });
   expect(sent.at(-1)).toMatchObject({ to: "room-3", channel: "fakechat" });
   expect(sent.at(-1)!.buttons).toHaveLength(2);
+}, 60_000);
+
+it("answers 200 when the provider's reply or follow-up throws after the decision", async () => {
+  const a = await start({ to: "room-4" });
+  const failing = await mf.dispatchFetch(hook, {
+    method: "POST",
+    headers: { "x-fake-signature": await hmacSha256Hex(SECRET, JSON.stringify({ callback: sent.at(-1)!.buttons[0], from: { id: "500" } })) },
+    body: JSON.stringify({ callback: sent.at(-1)!.buttons[0], from: { id: "500" } }),
+  });
+  expect(failing.status).toBe(200);
+  expect(await failing.text()).toBe("");
+  expect((await until(() => getRun(a.runId), (r) => r.status === "COMPLETED")).output).toMatchObject({ approved: true, by: "fakechat:500" });
+
+  const b = await start({ to: "room-5" });
+  const res = await click(sent.at(-1)!.buttons[1]!, { id: "501" });
+  expect(res).toMatchObject({ status: 200, body: { text: expect.stringMatching(/^Rejected by fakechat:501 at/) } });
+  expect((await until(() => getRun(b.runId), (r) => r.status === "COMPLETED")).output).toMatchObject({ approved: false, via: "chat" });
 }, 60_000);
