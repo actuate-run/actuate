@@ -88,6 +88,28 @@ Helpers in the contract, so every provider words and validates things the same w
 
 An `approvers` list restricts buttons, not links: the signed links in the message still work for whoever holds them.
 
+### Telegram
+
+| Credentials | Approval message |
+| --- | --- |
+| `botToken` + `webhookSecretToken` | Approve and Reject callback buttons (`callback_data` is the button payload). |
+| `botToken` only | Approve and Reject URL buttons that open the confirm pages. Clicks can't be verified without the secret token, so they aren't taken. |
+
+`waitForInput` gets an "Answer" URL button either way. The text keeps its links. URL buttons need an `http(s)` link on a public-looking host, so `actuate dev` on `localhost` sends the links as text only. If Telegram still refuses a button URL, the message goes again without buttons.
+
+Clicks arrive on the bot's one webhook with its messages, at `/providers/telegram/webhook` when self-hosted. Register it once with your secret token and both update types:
+
+```sh
+curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+  -d url="$ACTUATE_PUBLIC_URL/providers/telegram/webhook" \
+  -d secret_token="$TELEGRAM_WEBHOOK_SECRET_TOKEN" \
+  -d allowed_updates='["message","callback_query"]'
+```
+
+The secret token is 1-256 characters of `A-Z a-z 0-9 _ -`. Every update must carry it in `X-Telegram-Bot-Api-Secret-Token` (compared in constant time); a missing or wrong one gets 401. A `callback_query` with our payload is a click, and anything else goes on to `parseWebhook`, which never turns a callback query into a message event.
+
+The click is answered in the webhook response (`{"method":"answerCallbackQuery","callback_query_id":…,"text":…}`, so no API call is made). A deciding click then edits the message through `editMessageText`: the link lines are removed, "Approved by Wei Tan at 14:02 UTC" is added, the buttons are removed and the text is plain. Other outcomes answer only the clicker. `TELEGRAM_APPROVERS` (optional) takes numeric user IDs (`42 43`), not chat IDs or @usernames. The clicker is recorded as `telegram:<user id> (<first last name or @username>)`; the name is whatever the user set.
+
 `npx actuate providers` lists every provider and its variables. Adding one? Implement the contract in [`src/contract.ts`](src/contract.ts) and see [CONTRIBUTING.md](../../CONTRIBUTING.md). Guide: [Capabilities and providers](https://actuate.run/docs/concepts/capabilities/).
 
 ---
