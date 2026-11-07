@@ -121,7 +121,8 @@ export function providerInteractions<C>(
 ): ProviderInteractions | null {
   const { parseInteraction, respondInteraction, isApprover } = definition;
   if (!parseInteraction || !respondInteraction) return null;
-  const ctx = { fetch: fetchImpl };
+  // Called unbound: workerd's fetch throws "Illegal invocation" when called as a method of another object.
+  const ctx = { fetch: ((input, init) => fetchImpl(input, init)) as typeof fetch };
   return {
     kind: definition.kind,
     parse: (request) => parseInteraction.call(definition, request, credentials, ctx),

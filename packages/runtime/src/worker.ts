@@ -1,5 +1,19 @@
 import { DurableObject } from "cloudflare:workers";
-import { NOTIFY_OWNER, NOTIFY_OWNER_MAX_TEXT, z, type Actuator, type ApprovalPrompt, type Json, type NotifyOwnerResult, type OwnerNotifier, type Providers } from "@actuate/sdk";
+import {
+  NOTIFY_OWNER,
+  NOTIFY_OWNER_MAX_TEXT,
+  z,
+  type Actuator,
+  type ApprovalPrompt,
+  type ClickOutcome,
+  type Json,
+  type NotifyOwnerResult,
+  type OwnerNotifier,
+  type ProviderInteractions,
+  type ProviderReply,
+  type Providers,
+} from "@actuate/sdk";
+import { LOCAL_BUTTON_ROUTE, chatApproverLabel } from "./buttons.js";
 import { RunManager, type ApprovalRequest, type RunManagerOptions, type RunStatus } from "./manager.js";
 import { executePass } from "./pass.js";
 import { createHttpProvider } from "./providers.js";
@@ -46,6 +60,13 @@ export interface RuntimeOptions<E extends RuntimeEnv = RuntimeEnv> {
    * `@actuate/providers` provides `parseProviderWebhookFromEnv` for this.
    */
   providerWebhook?: (kind: string, request: Request, env: E) => Promise<ProviderWebhookOutcome>;
+  /**
+   * Approve and Reject button clicks for a chat provider (Telegram, Slack, Discord), on the same
+   * `POST /providers/:kind/webhook`: return the provider's click handling bound to its credentials, or null when
+   * it takes none. `@actuate/providers` provides `providerInteractionsFromEnv` for this. Each POST goes to its
+   * `parse` first; anything that isn't a click or a reply the provider needs falls through to `providerWebhook`.
+   */
+  providerInteractions?: (kind: string, env: E) => ProviderInteractions | null | undefined;
   /**
    * Deliver `ctx.notifyOwner` messages (email, chat), and the signed links of approvals and questions that set
    * `notify: "owner"`. Without one, a message goes to the run's log and the call resolves to `{ sent: false }`,
@@ -152,12 +173,22 @@ function approvalPrompt(req: ApprovalRequest, actuatorName: string): ApprovalPro
     ...(req.message !== undefined ? { message: req.message } : {}),
     ...(req.kind === "input" ? { answerUrl: req.answerUrl! } : { approveUrl: req.approveUrl!, rejectUrl: req.rejectUrl! }),
     expiresAt: req.expiresAt,
+    ...(req.buttons ? { buttons: req.buttons } : {}),
   };
 }
 
 type ProviderWebhookEvent = { event: string; payload: Json };
-/** What a provider webhook handler returns: events to deliver, none, or a plain-text handshake reply. */
-export type ProviderWebhookOutcome = ProviderWebhookEvent | ProviderWebhookEvent[] | { reply: string } | null;
+/**
+ * What a provider webhook handler returns: events to deliver, none, or a reply to send back as is: a string is
+ * a plain-text 200 (a subscription handshake), a {@link ProviderReply} sets the status and content type too.
+ */
+export type ProviderWebhookOutcome = ProviderWebhookEvent | ProviderWebhookEvent[] | { reply: string | ProviderReply } | null;
+
+/** A {@link ProviderReply} as a Response. */
+function replyResponse(reply: string | ProviderReply): Response {
+  if (typeof reply === "string") return new Response(reply, { headers: { "content-type": "text/plain; charset=utf-8" } });
+  return new Response(reply.body, { status: reply.status, headers: { "content-type": reply.contentType ?? "text/plain; charset=utf-8" } });
+}
 
 export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actuator, options: RuntimeOptions<E> = {}): Runtime<E> {
   const configSchema = actuator.config ?? z.object({});
@@ -197,6 +228,8 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
               ? Promise.resolve({ status: "failed", error: { name: "ConfigError", message: this.configError } })
               : executePass(actuator, request, { journal, config: this.config, providers: this.getProviders(), ...this.getOwner() }),
           notifyApproval: (req) => this.notifyApproval(req),
+          // One actuator per worker: every button it sends routes back here.
+          buttonRoute: LOCAL_BUTTON_ROUTE,
           scheduleWake: async (at) => {
             if (at === null) await state.storage.deleteAlarm();
             else await state.storage.setAlarm(Math.max(at, Date.now()));
@@ -280,7 +313,9 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
       }
       const text = `${message}\n\n${links}`;
       const messaging = this.getProviders().messaging;
-      if (req.notify && messaging) await messaging.send(req.notify, text, { subject, approval: approvalPrompt(req, actuator.name) });
+      if (req.notify && messaging) {
+        await messaging.send(req.notify, text, { subject, approval: approvalPrompt(req, actuator.name), ...(req.channel ? { channel: req.channel } : {}) });
+      }
       else console.log(`\n🔐  [approval requested] ${text}\n`);
     }
 
@@ -359,10 +394,17 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
           return html(approvalPage(actuator.name, "", null, message), result.ok ? 200 : 410);
         }
         const providerHook = /^\/providers\/([a-z0-9-]+)\/webhook$/.exec(path);
-        if (providerHook && options.providerWebhook) {
+        if (providerHook && (options.providerWebhook || options.providerInteractions)) {
           try {
-            const out = await options.providerWebhook(providerHook[1]!, request, this.env);
-            if (out && "reply" in out) return new Response(out.reply, { headers: { "content-type": "text/plain; charset=utf-8" } });
+            const kind = providerHook[1]!;
+            const interactions = method === "POST" ? options.providerInteractions?.(kind, this.env) : null;
+            if (interactions) {
+              const handled = await this.interaction(kind, interactions, request);
+              if (handled) return handled;
+            }
+            if (!options.providerWebhook) return json({ ignored: true });
+            const out = await options.providerWebhook(kind, request, this.env);
+            if (out && "reply" in out) return replyResponse(out.reply);
             const events = out ? (Array.isArray(out) ? out : [out]) : [];
             if (events.length === 0) return json({ ignored: true });
             const delivered = [];
@@ -499,6 +541,28 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
       } catch (err) {
         return json({ error: m.redact(err instanceof Error ? err.message : String(err)) }, 500);
       }
+    }
+
+    /**
+     * A button click or a reply the provider needs, or null for the ordinary webhook path. A click's route must be
+     * "local", its clicker on the provider's approver list; then decideByButton decides without waiting for the
+     * run, the provider builds the reply, and its follow-up (an edit through the API) runs after the response.
+     */
+    private async interaction(kind: string, interactions: ProviderInteractions, request: Request): Promise<Response | null> {
+      const parsed = await interactions.parse(request);
+      if (!parsed) return null;
+      if ("reply" in parsed) return replyResponse(parsed.reply);
+      const { click } = parsed;
+      let outcome: ClickOutcome;
+      if (click.route !== LOCAL_BUTTON_ROUTE) outcome = { status: "foreign" };
+      else if (!interactions.isApprover(click.actor)) outcome = { status: "not-approver" };
+      else outcome = this.manager.decideByButton(click.nonce, click.action, { by: chatApproverLabel(kind, click.actor) });
+      const { reply, after } = interactions.respond(click, outcome);
+      if (after) {
+        // Never log the error itself: a provider's follow-up may hold a response_url or a token.
+        this.ctx.waitUntil(after().catch((err) => console.error(`[actuate] ${kind} button follow-up failed: ${err instanceof Error ? err.name : typeof err}`)));
+      }
+      return replyResponse(reply);
     }
 
     private async startRun(request: Request, kind: "api" | "webhook", signedKey?: string): Promise<Response> {

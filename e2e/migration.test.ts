@@ -1,4 +1,4 @@
-/** A 0.4.x database on a real SQLite-backed Durable Object gets the 0.5.0 input_key column and index. */
+/** A 0.4.x database on a real SQLite-backed Durable Object gets the 0.5.0 input_key column and index, and the button nonce table. */
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { Miniflare } from "miniflare";
@@ -24,6 +24,7 @@ it("adds input_key and its index to an existing _actuate_runs table, keeping its
   expect(res.status).toBe(200);
   const body = (await res.json()) as any;
   expect(body.columns.filter((c: string) => c === "input_key")).toHaveLength(1);
+  expect(body.buttons).toEqual(["_actuate_approval_buttons", "_actuate_approval_buttons_run"]);
   expect(body.index).toContain("CREATE UNIQUE INDEX _actuate_runs_input ON _actuate_runs (input_key) WHERE input_key IS NOT NULL");
   expect(body).toMatchObject({ old: { status: "COMPLETED", idempotencyKey: "old-key" }, first: { created: true, status: "COMPLETED" }, sameRun: true, explicit: "run_old" });
 }, 60_000);

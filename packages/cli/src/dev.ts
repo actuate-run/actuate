@@ -143,7 +143,7 @@ export function wranglerConfig(meta: { name: string; cron: string[] }, vars: Rec
 export function devEntry(actuatorPath: string, port: number, plan: PlanId | null = null, opts: { refuseCapabilities?: boolean } = {}): string {
   return `import { createDevRuntime } from ${JSON.stringify(ownModule("dev-runtime"))};
 import { consoleOwnerNotifier, devProviders } from ${JSON.stringify(cliResolve("@actuate/runtime"))};
-import { providersFromEnv, parseProviderWebhookFromEnv } from ${JSON.stringify(cliResolve("@actuate/providers"))};
+import { providersFromEnv, parseProviderWebhookFromEnv, providerInteractionsFromEnv } from ${JSON.stringify(cliResolve("@actuate/providers"))};
 import actuator from ${JSON.stringify(actuatorPath)};
 
 // Real providers where .dev.vars selects them (ACTUATE_MESSAGING=telegram, ...); console and fake payments otherwise.
@@ -155,6 +155,8 @@ const runtime = createDevRuntime(actuator, {
     return { ...devProviders(base), ...providersFromEnv(env, base) };
   },
   providerWebhook: (kind, request, env) => parseProviderWebhookFromEnv(env, kind, request),
+  // Approve and Reject button clicks (Telegram, Slack, Discord), on the same /providers/<kind>/webhook.
+  providerInteractions: (kind, env) => providerInteractionsFromEnv(env, kind),
   // ctx.notifyOwner prints here; the hosted platform emails the account.
   notifyOwner: () => consoleOwnerNotifier(),
 });

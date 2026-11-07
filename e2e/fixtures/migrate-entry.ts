@@ -26,6 +26,7 @@ export class OldObject extends DurableObject {
     open(); // opening it again changes nothing
     const columns = s.exec(`SELECT name FROM pragma_table_info('_actuate_runs')`).toArray().map((r) => r.name);
     const index = s.exec(`SELECT sql FROM sqlite_master WHERE name = '_actuate_runs_input'`).toArray()[0]?.sql ?? null;
+    const buttons = s.exec(`SELECT name FROM sqlite_master WHERE name LIKE '_actuate_approval_buttons%' ORDER BY name`).toArray().map((r) => r.name);
     const old = manager.getRun("run_old");
     const inputKey = await deriveInputKey(actuator.idempotencyKey, { orderId: "O-1" });
     const first = await manager.start({ input: { orderId: "O-1", mode: "done" }, trigger: { kind: "api" }, ...(inputKey ? { inputKey } : {}) });
@@ -34,6 +35,7 @@ export class OldObject extends DurableObject {
     return Response.json({
       columns,
       index,
+      buttons,
       old: old && { status: old.status, idempotencyKey: old.idempotencyKey },
       first: { created: first.created, status: first.run.status },
       sameRun: second.run.runId === first.run.runId && !second.created,
