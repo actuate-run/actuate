@@ -170,8 +170,9 @@ describe("decideByButton", () => {
       expect(h.manager.decideByButton(nonce, action, { by: "telegram:2 (Bob)", kind })).toEqual({
         status: "already",
         decision: "rejected",
-        by,
         at: new Date(T0).toISOString(),
+        via: "chat",
+        by,
         runId: run.runId,
         step: "ok",
       });
@@ -194,26 +195,50 @@ describe("decideByButton", () => {
     expect(b).toMatchObject({ decision: "approved", by: "slack:U1 (A)" });
   });
 
-  it("reports a decision made through a link or the dashboard as 'already'", async () => {
+  it("reports a decision made through a link, the dashboard or the API as 'already', without its by", async () => {
     const h = harness();
     const first = await h.start();
     await h.manager.decide(tokenOf(h.approvals[0]!.rejectUrl!), { by: "Aina" });
     expect(h.manager.decideByButton(h.approvals[0]!.buttons!.nonce, "approve", { by, kind })).toEqual({
       status: "already",
       decision: "rejected",
-      by: "Aina",
       at: new Date(T0).toISOString(),
+      via: "link",
       runId: first.run.runId,
       step: "ok",
     });
     // A link decision with no name typed.
     await h.start();
     await h.manager.decide(tokenOf(h.approvals[1]!.approveUrl!));
-    expect(h.manager.decideByButton(h.approvals[1]!.buttons!.nonce, "reject", { by, kind })).toMatchObject({ status: "already", decision: "approved", by: "someone via link" });
-    // The dashboard.
-    const { run } = await h.start();
-    await h.manager.decideDirect(run.runId, "ok", true, undefined, { by: "owner@example.com", via: "dashboard" });
-    expect(h.manager.decideByButton(h.approvals[2]!.buttons!.nonce, "reject", { by, kind })).toMatchObject({ status: "already", decision: "approved", by: "owner@example.com" });
+    const link = h.manager.decideByButton(h.approvals[1]!.buttons!.nonce, "reject", { by, kind });
+    expect(link).toMatchObject({ status: "already", decision: "approved", via: "link" });
+    expect(link).not.toHaveProperty("by");
+    // The dashboard: the account email stays out of the outcome and the provider's reply.
+    const dash = await h.start();
+    await h.manager.decideDirect(dash.run.runId, "ok", true, undefined, { by: "owner@example.com", via: "dashboard" });
+    const dashboard = h.manager.decideByButton(h.approvals[2]!.buttons!.nonce, "reject", { by, kind });
+    expect(dashboard).toMatchObject({ status: "already", decision: "approved", via: "dashboard" });
+    expect(dashboard).not.toHaveProperty("by");
+    expect(clickOutcome(dashboard)).toEqual({ status: "already", decision: "approved", at: new Date(T0).toISOString(), via: "dashboard" });
+    // The API, with a token's name.
+    const api = await h.start();
+    await h.manager.decideDirect(api.run.runId, "ok", false, undefined, { by: "owner@example.com (ci)", via: "api" });
+    const viaApi = h.manager.decideByButton(h.approvals[3]!.buttons!.nonce, "approve", { by, kind });
+    expect(clickOutcome(viaApi)).toEqual({ status: "already", decision: "rejected", at: new Date(T0).toISOString(), via: "api" });
+  });
+
+  it("keeps by in 'already' for a chat decision", async () => {
+    const h = harness();
+    await h.start();
+    const nonce = h.approvals[0]!.buttons!.nonce;
+    h.manager.decideByButton(nonce, "approve", { by, kind });
+    expect(clickOutcome(h.manager.decideByButton(nonce, "reject", { by: "telegram:2 (Bob)", kind }))).toEqual({
+      status: "already",
+      decision: "approved",
+      at: new Date(T0).toISOString(),
+      via: "chat",
+      by,
+    });
   });
 
   it("is 'expired' past the expiry, before and after the wait times out", async () => {

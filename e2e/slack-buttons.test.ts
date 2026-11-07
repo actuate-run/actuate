@@ -168,5 +168,5 @@ it("says 'already' for a step decided through its link", async () => {
   expect((await getRun(run.runId)).output).toMatchObject({ approved: false, via: "link", by: "Aina" });
   const late = await click(blocks[1]!.elements![0]!, { id: "U01ALICE", name: "alice" });
   expect(late).toMatchObject({ status: 200, body: "" });
-  expect((await responseTo(late.responseUrl))!.body).toEqual({ response_type: "ephemeral", replace_original: false, text: "Already rejected by Aina" });
+  expect((await responseTo(late.responseUrl))!.body).toEqual({ response_type: "ephemeral", replace_original: false, text: "Already rejected with a link" });
 }, 60_000);

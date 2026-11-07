@@ -445,8 +445,12 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
   },
   isApprover: (actor, credentials) => isListedApprover(parseApprovers(credentials.approvers, APPROVER_RULES), actor),
   respondInteraction(_click, outcome) {
-    // For the receiver to update its own UI: what happened and who decided, never a link or the payload.
-    const decided = outcome.status === "decided" || outcome.status === "already" ? { decision: outcome.decision, by: outcome.by, at: outcome.at } : {};
+    // For the receiver to update its own UI: what happened and who decided (a chat decision's `by` only, never a
+    // dashboard or API account), never a link or the payload.
+    const decided =
+      outcome.status === "decided" || outcome.status === "already"
+        ? { decision: outcome.decision, ...("by" in outcome ? { by: outcome.by } : {}), at: outcome.at }
+        : {};
     return { reply: jsonReply({ status: outcome.status, ...decided, message: clickOutcomeText(outcome) }) };
   },
 };

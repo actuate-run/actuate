@@ -27,8 +27,11 @@ export function isButtonNonce(nonce: unknown): nonce is string {
 
 /** A decision as a provider's `respondInteraction` gets it: without the run and step, which are the host's. */
 export function clickOutcome(decision: ButtonDecision): ClickOutcome {
-  if (decision.status !== "decided" && decision.status !== "already") return decision;
-  return { status: decision.status, decision: decision.decision, by: decision.by, at: decision.at };
+  if (decision.status === "decided") return { status: "decided", decision: decision.decision, by: decision.by, at: decision.at };
+  if (decision.status !== "already") return decision;
+  if (decision.via === "chat") return { status: "already", decision: decision.decision, at: decision.at, via: "chat", by: decision.by };
+  // A dashboard, API or link decision's `by` (an account email, a token name) is not for the clicker.
+  return { status: "already", decision: decision.decision, at: decision.at, via: decision.via };
 }
 
 /**
@@ -63,12 +66,15 @@ export function chatApproverLabel(channel: string, actor: { id: string; name?: s
 
 /**
  * What became of a button click, from `RunManager.decideByButton`. "decided": this click decided. "already": the
- * step was decided before (by a button, a link or the dashboard), with that decision. Both name the run and step
- * the nonce belongs to. "expired": too late. "unknown": no such nonce, another provider's click, or the step or run
- * is no longer waiting for another reason (timed out, cancelled). Assignable to `ClickOutcome`, which adds the
- * provider-side "not-approver" and "foreign"; `clickOutcome` drops `runId` and `step` for a provider's reply.
+ * step was decided before (by a button, a link, the dashboard or the API), with that decision and its `via`; `by`
+ * only for a chat decision. Both name the run and step the nonce belongs to. "expired": too late. "unknown": no
+ * such nonce, another provider's click, or the step or run is no longer waiting for another reason (timed out,
+ * cancelled). Assignable to `ClickOutcome`, which adds the provider-side "not-approver" and "foreign";
+ * `clickOutcome` drops `runId` and `step` for a provider's reply.
  */
 export type ButtonDecision =
-  | { status: "decided" | "already"; decision: "approved" | "rejected"; by: string; at: string; runId: string; step: string }
+  | { status: "decided"; decision: "approved" | "rejected"; by: string; at: string; runId: string; step: string }
+  | { status: "already"; decision: "approved" | "rejected"; at: string; via: "chat"; by: string; runId: string; step: string }
+  | { status: "already"; decision: "approved" | "rejected"; at: string; via: "link" | "dashboard" | "api"; runId: string; step: string }
   | { status: "expired" }
   | { status: "unknown" };

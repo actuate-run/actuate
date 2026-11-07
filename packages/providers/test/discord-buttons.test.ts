@@ -191,8 +191,8 @@ describe("discord replies", () => {
   });
 
   it("tells only the clicker otherwise", () => {
-    expect(reply({ status: "already", decision: "approved", by: `discord:${ALICE} (Alice)`, at })).toEqual(ephemeral("Already approved by Alice"));
-    expect(reply({ status: "already", decision: "rejected", by: "Aina" , at })).toEqual(ephemeral("Already rejected by Aina"));
+    expect(reply({ status: "already", decision: "approved", via: "chat", by: `discord:${ALICE} (Alice)`, at })).toEqual(ephemeral("Already approved by Alice"));
+    expect(reply({ status: "already", decision: "rejected", via: "link", at })).toEqual(ephemeral("Already rejected with a link"));
     expect(reply({ status: "expired" })).toEqual(ephemeral("This request has expired or was already decided."));
     expect(reply({ status: "unknown" })).toEqual(ephemeral("This request has expired or was already decided."));
     expect(reply({ status: "not-approver" })).toEqual(ephemeral("You're not on the approver list for this."));

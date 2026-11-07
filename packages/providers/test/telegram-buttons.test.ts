@@ -272,8 +272,8 @@ describe("telegram respondInteraction", () => {
   const replies: Array<[ClickOutcome, string]> = [
     [{ status: "decided", decision: "approved", by: "telegram:42 (Wei Tan)", at }, "Approved by Wei Tan at 14:02 UTC"],
     [{ status: "decided", decision: "rejected", by: "telegram:42 (Wei Tan)", at }, "Rejected by Wei Tan at 14:02 UTC"],
-    [{ status: "already", decision: "approved", by: "telegram:43 (Bob)", at }, "Already approved by Bob"],
-    [{ status: "already", decision: "rejected", by: "Aina", at }, "Already rejected by Aina"],
+    [{ status: "already", decision: "approved", via: "chat", by: "telegram:43 (Bob)", at }, "Already approved by Bob"],
+    [{ status: "already", decision: "rejected", via: "dashboard", at }, "Already rejected in the dashboard"],
     [{ status: "expired" }, "This request has expired or was already decided."],
     [{ status: "unknown" }, "This request has expired or was already decided."],
     [{ status: "not-approver" }, "You're not on the approver list for this."],

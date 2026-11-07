@@ -88,7 +88,7 @@ curl -X POST "$REPLY_URL" -H "Authorization: Bearer $CUSTOM_WEBHOOK_SECRET" -H "
 | Status | Body |
 | --- | --- |
 | 200 | `{ "status": "decided", "decision": "approved" \| "rejected", "by": "custom-webhook:alice (Alice Tan)", "at": "<ISO 8601>", "message": "Approved by Alice Tan at 14:02 UTC" }` |
-| 200 | `{ "status": "already", "decision", "by", "at", "message": "Already approved by Alice Tan" }`: decided before (by another decision, a link or the dashboard) |
+| 200 | `{ "status": "already", "decision", "by", "at", "message": "Already approved by Alice Tan" }`: decided before by another decision. After a link, the dashboard or the API, `by` is left out and `message` reads "Already approved with a link", "Already approved in the dashboard" or "Already approved through the API" |
 | 200 | `{ "status": "expired" \| "unknown", "message": "This request has expired or was already decided." }` |
 | 200 | `{ "status": "not-approver", "message": "You're not on the approver list for this." }` (`by.id` isn't in `CUSTOM_WEBHOOK_APPROVERS`) |
 | 200 | `{ "status": "foreign", "message": "This button belongs to another actuator." }` |
@@ -110,9 +110,9 @@ A chat provider can put Approve and Reject buttons on approval messages. When `s
 | `respondInteraction(click, outcome, credentials, ctx)` | The reply to send now, and an optional `after()` run once it is sent (editing the message). |
 | `routeHint(body, contentType)` | The unverified route in a raw body, for the hosted platform's tenant-level interactions URL. |
 
-Helpers in the contract, so every provider words and validates things the same way: `parseApprovers` (an `approvers` credential: IDs separated by spaces or commas, with `role:<id>` entries where the provider has roles), `isListedApprover`, `formatApprovers`, `approversCredentialField`, `clickOutcomeText` ("Approved by Alice at 14:02 UTC", "Already approved by Alice", "This request has expired or was already decided.", "You're not on the approver list for this.", "This button belongs to another actuator."), `withoutLinkLines` and `decidedMessageText` for the edited message, and `jsonReply` / `textReply`. `providerInteractions(definition, credentials)` and `providerInteractionsFromEnv(env, kind)` bind them for a runtime (`createRuntime`'s `providerInteractions`).
+Helpers in the contract, so every provider words and validates things the same way: `parseApprovers` (an `approvers` credential: IDs separated by spaces or commas, with `role:<id>` entries where the provider has roles, at most 100 entries, `MAX_APPROVERS`), `isListedApprover`, `formatApprovers`, `approversCredentialField`, `clickOutcomeText` ("Approved by Alice at 14:02 UTC", "Already approved by Alice" after a chat decision, "Already approved in the dashboard", "Already approved through the API" or "Already approved with a link" after any other, never naming who decided, "This request has expired or was already decided.", "You're not on the approver list for this.", "This button belongs to another actuator."), `withoutLinkLines` and `decidedMessageText` for the edited message, and `jsonReply` / `textReply`. `providerInteractions(definition, credentials)` and `providerInteractionsFromEnv(env, kind)` bind them for a runtime (`createRuntime`'s `providerInteractions`).
 
-An `approvers` list restricts buttons, not links: the signed links in the message still work for whoever holds them. A button decides only through the provider that sent it, so a payload copied from a Slack message can't be replayed through the custom webhook's Reply URL, whose `by` your receiver asserts.
+An `approvers` list (at most 100 entries) restricts buttons, not links: the signed links in the message still work for whoever holds them. A button decides only through the provider that sent it, so a payload copied from a Slack message can't be replayed through the custom webhook's Reply URL, whose `by` your receiver asserts.
 
 ### Telegram
 

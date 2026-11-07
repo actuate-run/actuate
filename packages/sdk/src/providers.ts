@@ -102,13 +102,16 @@ export interface ButtonClick {
 
 /**
  * What became of a click, for `ProviderDefinition.respondInteraction`: "decided" (this click decided), "already"
- * (decided before, by a button, a link or the dashboard), "expired" or "unknown" (expired, or no longer waiting),
- * "not-approver" (the clicker isn't on the provider's approver list) or "foreign" (the button belongs to another
- * actuator). `by` is a verified approver label (`<channel>:<user id> (<name>)`) or, for a decision made another
- * way, what that decision recorded; `at` is ISO 8601.
+ * (decided before, by a button, a link, the dashboard or the API), "expired" or "unknown" (expired, or no longer
+ * waiting), "not-approver" (the clicker isn't on the provider's approver list) or "foreign" (the button belongs to
+ * another actuator). `by` is a verified approver label (`<channel>:<user id> (<name>)`); "already" has it only when
+ * `via` is "chat", so a decision made in the dashboard, through the API or with a link never shows the clicker who
+ * made it (an account email or token name). `at` is ISO 8601.
  */
 export type ClickOutcome =
-  | { status: "decided" | "already"; decision: "approved" | "rejected"; by: string; at: string }
+  | { status: "decided"; decision: "approved" | "rejected"; by: string; at: string }
+  | { status: "already"; decision: "approved" | "rejected"; at: string; via: "chat"; by: string }
+  | { status: "already"; decision: "approved" | "rejected"; at: string; via: "link" | "dashboard" | "api" }
   | { status: "expired" | "unknown" | "not-approver" | "foreign" };
 
 /**

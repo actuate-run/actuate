@@ -428,8 +428,8 @@ describe("slack responses", () => {
 
   it("tells only the clicker about every other outcome", async () => {
     const cases: Array<[ClickOutcome, string]> = [
-      [{ status: "already", decision: "approved", by: "slack:U02 (Bob)", at }, "Already approved by Bob"],
-      [{ status: "already", decision: "rejected", by: "someone via link", at }, "Already rejected by someone via link"],
+      [{ status: "already", decision: "approved", via: "chat", by: "slack:U02 (Bob)", at }, "Already approved by Bob"],
+      [{ status: "already", decision: "rejected", via: "link", at }, "Already rejected with a link"],
       [{ status: "expired" }, "This request has expired or was already decided."],
       [{ status: "unknown" }, "This request has expired or was already decided."],
       [{ status: "not-approver" }, "You're not on the approver list for this."],

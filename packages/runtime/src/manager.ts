@@ -476,8 +476,9 @@ export class RunManager {
         return {
           status: "already",
           decision: row.decision === "rejected" ? "rejected" : "approved",
-          by: String(row.used_by ?? "someone"),
           at: new Date(Number(row.used_at)).toISOString(),
+          via: "chat",
+          by: String(row.used_by ?? "someone"),
           runId,
           step,
         };
@@ -1043,20 +1044,22 @@ function withoutLinks(text: string, request: ApprovalRequest): string {
   return out.replace(/[^\s"'<>()]*[?&]token=[^\s"'<>()&]*/gi, "[link]");
 }
 
-/** A waiting step's result as the click on its button sees it: decided before (with that decision), timed out, or neither. */
+/**
+ * A waiting step's result as the click on its button sees it: decided before (with that decision), timed out, or
+ * neither. Only a chat decision carries its `by`: a dashboard or API decision's is an account email or token name.
+ */
 function decidedElsewhere(outputJson: string | null, runId: string, step: string): ButtonDecision {
   const result = fromJson<{ approved?: unknown; at?: unknown; by?: unknown; via?: unknown } | null>(outputJson);
   if (result === null) return { status: "expired" }; // timed out
   if (!result || typeof result !== "object" || typeof result.approved !== "boolean") return { status: "unknown" };
-  const via = typeof result.via === "string" ? result.via : "link";
-  return {
-    status: "already",
-    decision: result.approved ? "approved" : "rejected",
-    by: typeof result.by === "string" && result.by ? result.by : `someone via ${via}`,
-    at: typeof result.at === "string" ? result.at : "",
-    runId,
-    step,
-  };
+  const decision = result.approved ? "approved" : "rejected";
+  const at = typeof result.at === "string" ? result.at : "";
+  if (result.via === "chat") {
+    const by = typeof result.by === "string" && result.by ? result.by : "someone";
+    return { status: "already", decision, at, via: "chat", by, runId, step };
+  }
+  const via = result.via === "dashboard" || result.via === "api" ? result.via : "link";
+  return { status: "already", decision, at, via, runId, step };
 }
 
 /** Time-sortable, URL-safe run ID: `run_` + 12 hex chars of ms timestamp + 16 random hex chars. */

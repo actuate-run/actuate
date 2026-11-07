@@ -765,7 +765,8 @@ describe("custom-webhook decisions", () => {
     const outcomes = [
       [{ status: "decided", decision: "approved", by: "custom-webhook:alice (Alice)", at }, "Approved by Alice at 14:02 UTC"],
       [{ status: "decided", decision: "rejected", by: "custom-webhook:alice", at }, "Rejected by custom-webhook:alice at 14:02 UTC"],
-      [{ status: "already", decision: "approved", by: "custom-webhook:bob (Bob)", at }, "Already approved by Bob"],
+      [{ status: "already", decision: "approved", via: "chat", by: "custom-webhook:bob (Bob)", at }, "Already approved by Bob"],
+      [{ status: "already", decision: "rejected", via: "dashboard", at }, "Already rejected in the dashboard"],
       [{ status: "expired" }, "This request has expired or was already decided."],
       [{ status: "unknown" }, "This request has expired or was already decided."],
       [{ status: "not-approver" }, "You're not on the approver list for this."],
@@ -778,7 +779,9 @@ describe("custom-webhook decisions", () => {
       const body = JSON.parse(out.reply.body);
       expect(body.message).toBe(message);
       expect(body.message).toBe(clickOutcomeText(outcome));
-      if ("decision" in outcome) expect(body).toEqual({ status: outcome.status, decision: outcome.decision, by: outcome.by, at, message });
+      // A dashboard, API or link decision has no `by`: the JSON leaves it out.
+      if ("by" in outcome) expect(body).toEqual({ status: outcome.status, decision: outcome.decision, by: outcome.by, at, message });
+      else if ("decision" in outcome) expect(body).toEqual({ status: outcome.status, decision: outcome.decision, at, message });
       else expect(body).toEqual({ status: outcome.status, message });
       expect(out.reply.body).not.toContain(NONCE);
       expect(out.reply.body).not.toMatch(/https?:/);

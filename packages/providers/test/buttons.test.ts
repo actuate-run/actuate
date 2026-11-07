@@ -120,8 +120,11 @@ describe("what the clicker sees", () => {
   it("words each outcome", () => {
     expect(clickOutcomeText({ status: "decided", decision: "approved", by: "telegram:123 (Alice)", at })).toBe("Approved by Alice at 14:02 UTC");
     expect(clickOutcomeText({ status: "decided", decision: "rejected", by: "slack:U01ABC", at })).toBe("Rejected by slack:U01ABC at 14:02 UTC");
-    expect(clickOutcomeText({ status: "already", decision: "approved", by: "discord:1 (Bo (the) Boss)", at })).toBe("Already approved by Bo (the) Boss");
-    expect(clickOutcomeText({ status: "already", decision: "rejected", by: "owner@example.com", at })).toBe("Already rejected by owner@example.com");
+    expect(clickOutcomeText({ status: "already", decision: "approved", via: "chat", by: "discord:1 (Bo (the) Boss)", at })).toBe("Already approved by Bo (the) Boss");
+    // Any other route never names who decided (an account email, a token name).
+    expect(clickOutcomeText({ status: "already", decision: "rejected", via: "dashboard", at })).toBe("Already rejected in the dashboard");
+    expect(clickOutcomeText({ status: "already", decision: "approved", via: "api", at })).toBe("Already approved through the API");
+    expect(clickOutcomeText({ status: "already", decision: "approved", via: "link", at })).toBe("Already approved with a link");
     expect(clickOutcomeText({ status: "expired" })).toBe("This request has expired or was already decided.");
     expect(clickOutcomeText({ status: "unknown" })).toBe("This request has expired or was already decided.");
     expect(clickOutcomeText({ status: "not-approver" })).toBe("You're not on the approver list for this.");

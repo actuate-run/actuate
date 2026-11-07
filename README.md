@@ -74,7 +74,7 @@ The MCP endpoint is part of the hosted platform, not the open-source runtime. A 
 
 - **Exactly once.** `ctx.step.do` journals each step. Replays and retried tool calls get the stored result back.
 - **Free waits.** `sleep`, `sleepUntil` and `waitForEvent` hibernate the run. Nothing runs, and nothing is billed, until it wakes.
-- **People in the loop.** `waitForApproval` and `waitForInput` send a signed, single-use link and resume when someone answers.
+- **People in the loop.** `waitForApproval` and `waitForInput` send a signed, single-use link, with Approve and Reject buttons in Telegram, Slack and Discord, and resume when someone answers.
 - **Its own database.** A SQLite database per actuator, with parameterised queries, migrations, and CSV and `.sql` export.
 - **Your accounts.** Telegram, WhatsApp, Slack, Discord, email, or any URL through a custom webhook; Stripe, Chip, ToyyibPay and Billplz; Anthropic, OpenAI, Google or any OpenAI-compatible API. Credentials are yours and never reach the model.
 - **Schema-checked tools.** Input is validated before anything runs. The hosted platform generates MCP tools and OpenAPI from your Zod schemas.

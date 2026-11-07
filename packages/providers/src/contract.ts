@@ -265,11 +265,20 @@ function hhmmUtc(at: string): string {
   return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} UTC`;
 }
 
+/** How "already" names a decision made without a chat button: never by who made it. */
+const ALREADY_VIA: Record<"link" | "dashboard" | "api", string> = {
+  dashboard: "in the dashboard",
+  api: "through the API",
+  link: "with a link",
+};
+
 /**
  * The short plain-text line a click's outcome shows (no links, no markup: escape it for the channel's format):
  *
  * - decided: "Approved by Alice at 14:02 UTC" / "Rejected by Alice at 14:02 UTC" (for the edited message)
- * - already: "Already approved by Alice" / "Already rejected by Alice" (to the clicker only)
+ * - already: "Already approved by Alice" / "Already rejected by Alice" after a chat decision, "Already approved in
+ *   the dashboard", "Already approved through the API" or "Already approved with a link" after any other (to the
+ *   clicker only, never naming who decided that way)
  * - expired, unknown: "This request has expired or was already decided."
  * - not-approver: "You're not on the approver list for this."
  * - foreign: "This button belongs to another actuator."
@@ -281,7 +290,8 @@ export function clickOutcomeText(outcome: ClickOutcome): string {
       return `${outcome.decision === "approved" ? "Approved" : "Rejected"} by ${approverDisplayName(outcome.by)}${at ? ` at ${at}` : ""}`;
     }
     case "already":
-      return `Already ${outcome.decision} by ${approverDisplayName(outcome.by)}`;
+      if (outcome.via === "chat") return `Already ${outcome.decision} by ${approverDisplayName(outcome.by)}`;
+      return `Already ${outcome.decision} ${ALREADY_VIA[outcome.via] ?? ALREADY_VIA.link}`;
     case "not-approver":
       return "You're not on the approver list for this.";
     case "foreign":

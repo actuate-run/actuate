@@ -117,7 +117,7 @@ it("says 'already' for a step decided through its link", async () => {
   const form = new URLSearchParams({ token: new URL(token).searchParams.get("token")!, by: "Aina" });
   expect((await mf.dispatchFetch(`${local}/approve`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: form.toString() })).status).toBe(200);
   expect((await getRun(run.runId)).output).toMatchObject({ approved: false, via: "link", by: "Aina" });
-  expect((await click(buttons[0]!, { id: "42" })).body).toEqual({ text: "Already rejected by Aina" });
+  expect((await click(buttons[0]!, { id: "42" })).body).toEqual({ text: "Already rejected with a link" });
 }, 60_000);
 
 it("sends a provider's own reply verbatim, and passes other requests to the webhook", async () => {
