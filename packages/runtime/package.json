@@ -1,6 +1,6 @@
 {
   "name": "@actuate/runtime",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Single-tenant Actuate step engine for workerd and SQLite: durable steps, sleeps, events and approvals.",
   "license": "Apache-2.0",
   "type": "module",

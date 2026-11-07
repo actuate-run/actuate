@@ -1,6 +1,6 @@
 {
   "name": "@actuate/providers",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Bring-your-own-credentials provider adapters for Actuate: Telegram, WhatsApp Cloud, Resend, Stripe, Chip, ToyyibPay, Billplz, Anthropic, OpenAI, Google.",
   "license": "Apache-2.0",
   "type": "module",
