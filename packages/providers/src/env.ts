@@ -1,8 +1,9 @@
-import type { MessagingProvider, Providers } from "@actuate/sdk";
+import type { MessagingProvider, ProviderInteractions, Providers } from "@actuate/sdk";
 import { combineMessaging } from "./multi.js";
 import type { ProviderCapability, ProviderContext, ProviderEvent, ProviderWebhookResult } from "./contract.js";
 import { WebhookVerificationError } from "./contract.js";
 import { PROVIDERS, getProvider, type AnyProviderDefinition } from "./registry.js";
+import type { ProviderDefinition } from "./contract.js";
 
 /** `botToken` → `BOT_TOKEN`, `xSignatureKey` → `X_SIGNATURE_KEY`. */
 export function envName(kind: string, field: string): string {
@@ -92,7 +93,10 @@ export function providersFromEnv(env: Record<string, unknown>, baseUrl: string, 
 /**
  * Verify an inbound provider webhook (e.g. POST /providers/billplz/webhook) and
  * translate it into an actuator event. Returns null for valid but irrelevant
- * webhooks; throws WebhookVerificationError for bad signatures.
+ * webhooks, and for a configured provider that takes no webhooks of its own
+ * (Slack, Discord: their requests are button clicks, which `parseInteraction`
+ * verified and answered before this); throws WebhookVerificationError for bad
+ * signatures and for a provider that isn't configured.
  */
 export async function parseProviderWebhookFromEnv(
   env: Record<string, unknown>,
@@ -101,10 +105,43 @@ export async function parseProviderWebhookFromEnv(
   fetchImpl: typeof fetch = fetch,
 ): Promise<ProviderWebhookResult | { reply: string }> {
   const configured = configuredFromEnv(env).find((p) => p.definition.kind === kind);
-  if (!configured?.definition.parseWebhook) throw new WebhookVerificationError(`No ${kind} provider is configured.`);
+  if (!configured) throw new WebhookVerificationError(`No ${kind} provider is configured.`);
   const reply = configured.definition.handshake?.(request, configured.credentials);
   if (reply != null) return { reply };
+  if (!configured.definition.parseWebhook) return null;
   return configured.definition.parseWebhook(request, configured.credentials, {
     fetch: fetchImpl,
   });
+}
+
+/**
+ * A provider's button-click handling bound to its credentials, or null when the provider takes no clicks: it
+ * needs `parseInteraction`, `isApprover` and `respondInteraction` all three, so a provider never fails open by
+ * leaving out the approver check (its own `isApprover` says true when no list is configured).
+ */
+export function providerInteractions<C>(
+  definition: ProviderDefinition<C, ProviderCapability>,
+  credentials: C,
+  fetchImpl: typeof fetch = fetch,
+): ProviderInteractions | null {
+  const { parseInteraction, respondInteraction, isApprover } = definition;
+  if (!parseInteraction || !respondInteraction || !isApprover) return null;
+  // Called unbound: workerd's fetch throws "Illegal invocation" when called as a method of another object.
+  const ctx = { fetch: ((input, init) => fetchImpl(input, init)) as typeof fetch };
+  return {
+    kind: definition.kind,
+    parse: (request) => parseInteraction.call(definition, request, credentials, ctx),
+    isApprover: (actor) => isApprover.call(definition, actor, credentials),
+    respond: (click, outcome) => respondInteraction.call(definition, click, outcome, credentials, ctx),
+  };
+}
+
+/**
+ * {@link providerInteractions} for the provider of `kind` configured in the environment (see
+ * {@link configuredFromEnv}), or null when it isn't configured or takes no clicks. For `createRuntime`'s
+ * `providerInteractions` option.
+ */
+export function providerInteractionsFromEnv(env: Record<string, unknown>, kind: string, fetchImpl: typeof fetch = fetch): ProviderInteractions | null {
+  const configured = configuredFromEnv(env).find((p) => p.definition.kind === kind);
+  return configured ? providerInteractions(configured.definition, configured.credentials, fetchImpl) : null;
 }

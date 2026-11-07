@@ -8,7 +8,7 @@ describe("registry", () => {
       expect(def.label).toBeTruthy();
       expect(def.credentialFields.length).toBeGreaterThan(0);
     }
-    expect(Object.keys(PROVIDERS).sort()).toEqual(["anthropic", "billplz", "chip", "discord", "google", "openai", "openai-compatible", "resend", "slack", "stripe", "telegram", "toyyibpay", "whatsapp"]);
+    expect(Object.keys(PROVIDERS).sort()).toEqual(["anthropic", "billplz", "chip", "custom-webhook", "discord", "google", "openai", "openai-compatible", "resend", "slack", "stripe", "telegram", "toyyibpay", "whatsapp"]);
   });
 
   it("looks providers up", () => {
@@ -18,7 +18,7 @@ describe("registry", () => {
   });
 
   it("groups by capability; every payment provider handles webhooks", () => {
-    expect(providersFor("messaging").map((p) => p.kind)).toEqual(["telegram", "whatsapp", "slack", "discord", "resend"]);
+    expect(providersFor("messaging").map((p) => p.kind)).toEqual(["telegram", "whatsapp", "slack", "discord", "resend", "custom-webhook"]);
     expect(providersFor("llm").map((p) => p.kind)).toEqual(["anthropic", "openai", "google", "openai-compatible"]);
     for (const p of providersFor("payment")) expect(typeof p.parseWebhook).toBe("function");
   });

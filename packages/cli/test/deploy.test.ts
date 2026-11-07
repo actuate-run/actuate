@@ -40,6 +40,25 @@ describe("actuate deploy", () => {
     expect(await deploy("actuator.ts", fixture, { config: true, dryRun: true, plan: "sandbox", log: quiet })).toBe(1);
   });
 
+  it("--dry-run prints the MCP tool entry agents will see", async () => {
+    const tool = {
+      name: "fixture_greeter",
+      title: "fixture greeter",
+      description: "Greets someone and waits for a manager. A fixture for the CLI's tests.",
+      inputSchema: { type: "object", properties: { name: { type: "string", minLength: 1 } }, required: ["name"] },
+      annotations: { title: "fixture greeter", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    };
+    const json: string[] = [];
+    await deploy("actuator.ts", fixture, { config: true, dryRun: true, json: true, plan: "maker", log: (l) => json.push(l) });
+    expect(JSON.parse(json.join("\n")).mcpTool).toEqual(tool);
+    const text: string[] = [];
+    await deploy("actuator.ts", fixture, { config: true, dryRun: true, plan: "maker", log: (l) => text.push(l) });
+    const at = text.indexOf("\nMCP tool entry (tools/list), as agents will see it:");
+    expect(at).toBeGreaterThan(0);
+    expect(JSON.parse(text[at - 1]!)).toMatchObject({ name: "fixture_greeter", capabilities: ["messaging"] });
+    expect(text[at + 1]).toBe(JSON.stringify(tool, null, 2));
+  });
+
   it("stops before uploading when the account can't take the deploy", async () => {
     const srv = await fakeServer({
       "GET /v1/me": me(),

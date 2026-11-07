@@ -1,10 +1,25 @@
 import { DurableObject } from "cloudflare:workers";
-import { z, type Actuator, type Json, type OwnerNotifier, type Providers } from "@actuate/sdk";
+import {
+  NOTIFY_OWNER,
+  NOTIFY_OWNER_MAX_TEXT,
+  z,
+  type Actuator,
+  type ApprovalPrompt,
+  type ClickOutcome,
+  type Json,
+  type NotifyOwnerResult,
+  type OwnerNotifier,
+  type ProviderInteractions,
+  type ProviderReply,
+  type Providers,
+} from "@actuate/sdk";
+import { LOCAL_BUTTON_ROUTE, buttonKindOfChannel, chatApproverLabel, clickOutcome } from "./buttons.js";
 import { RunManager, type ApprovalRequest, type RunManagerOptions, type RunStatus } from "./manager.js";
 import { executePass } from "./pass.js";
 import { createHttpProvider } from "./providers.js";
 import { describeJsonError } from "./json-error.js";
 import { collectSecrets, mergeSecrets, redactSecrets } from "./secrets.js";
+import { deriveInputKey } from "./run-key.js";
 import { durableObjectSql } from "./sql.js";
 import { approvalPage, toCsv } from "./http-util.js";
 
@@ -46,9 +61,17 @@ export interface RuntimeOptions<E extends RuntimeEnv = RuntimeEnv> {
    */
   providerWebhook?: (kind: string, request: Request, env: E) => Promise<ProviderWebhookOutcome>;
   /**
-   * Deliver `ctx.notifyOwner` messages (email, chat). Without one, a message goes to the run's log and the
-   * call resolves to `{ sent: false }`. `actuate dev` prints them. Secret config values are redacted before
-   * the notifier sees the text.
+   * Approve and Reject button clicks for a chat provider (Telegram, Slack, Discord), on the same
+   * `POST /providers/:kind/webhook`: return the provider's click handling bound to its credentials, or null when
+   * it takes none. `@actuate/providers` provides `providerInteractionsFromEnv` for this. Each POST goes to its
+   * `parse` first; anything that isn't a click or a reply the provider needs falls through to `providerWebhook`.
+   */
+  providerInteractions?: (kind: string, env: E) => ProviderInteractions | null | undefined;
+  /**
+   * Deliver `ctx.notifyOwner` messages (email, chat), and the signed links of approvals and questions that set
+   * `notify: "owner"`. Without one, a message goes to the run's log and the call resolves to `{ sent: false }`,
+   * and links for the owner are printed to the worker's console. `actuate dev` prints both. Secret config values
+   * are redacted before the notifier sees the text.
    */
   notifyOwner?: (env: E) => OwnerNotifier | undefined;
   /** Runtime guards passed to the RunManager (wait/retry limits, pass admission, event caps, max passes). */
@@ -141,9 +164,31 @@ function configJsonSchema(schema: z.ZodType): unknown {
   }
 }
 
+/** The request as `MessagingSendOptions.approval` describes it, for providers that render approvals. */
+function approvalPrompt(req: ApprovalRequest, actuatorName: string): ApprovalPrompt {
+  return {
+    kind: req.kind,
+    actuator: actuatorName,
+    step: req.step,
+    ...(req.message !== undefined ? { message: req.message } : {}),
+    ...(req.kind === "input" ? { answerUrl: req.answerUrl! } : { approveUrl: req.approveUrl!, rejectUrl: req.rejectUrl! }),
+    expiresAt: req.expiresAt,
+    ...(req.buttons ? { buttons: req.buttons } : {}),
+  };
+}
+
 type ProviderWebhookEvent = { event: string; payload: Json };
-/** What a provider webhook handler returns: events to deliver, none, or a plain-text handshake reply. */
-export type ProviderWebhookOutcome = ProviderWebhookEvent | ProviderWebhookEvent[] | { reply: string } | null;
+/**
+ * What a provider webhook handler returns: events to deliver, none, or a reply to send back as is: a string is
+ * a plain-text 200 (a subscription handshake), a {@link ProviderReply} sets the status and content type too.
+ */
+export type ProviderWebhookOutcome = ProviderWebhookEvent | ProviderWebhookEvent[] | { reply: string | ProviderReply } | null;
+
+/** A {@link ProviderReply} as a Response. */
+function replyResponse(reply: string | ProviderReply): Response {
+  if (typeof reply === "string") return new Response(reply, { headers: { "content-type": "text/plain; charset=utf-8" } });
+  return new Response(reply.body, { status: reply.status, headers: { "content-type": reply.contentType ?? "text/plain; charset=utf-8" } });
+}
 
 export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actuator, options: RuntimeOptions<E> = {}): Runtime<E> {
   const configSchema = actuator.config ?? z.object({});
@@ -183,6 +228,8 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
               ? Promise.resolve({ status: "failed", error: { name: "ConfigError", message: this.configError } })
               : executePass(actuator, request, { journal, config: this.config, providers: this.getProviders(), ...this.getOwner() }),
           notifyApproval: (req) => this.notifyApproval(req),
+          // One actuator per worker: every button it sends routes back here. No messaging, no buttons to show.
+          buttonRoute: () => (this.getProviders().messaging ? LOCAL_BUTTON_ROUTE : undefined),
           scheduleWake: async (at) => {
             if (at === null) await state.storage.deleteAlarm();
             else await state.storage.setAlarm(Math.max(at, Date.now()));
@@ -249,13 +296,28 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
       return this.owner ? { owner: this.owner } : {};
     }
 
-    private async notifyApproval(req: ApprovalRequest): Promise<void> {
-      const text =
-        req.kind === "input"
-          ? `${req.message ?? `${actuator.name} needs your input`}\n\nAnswer: ${req.answerUrl}`
-          : `${req.message ?? `Approval needed: ${actuator.name} / ${req.step}`}\n\nApprove: ${req.approveUrl}\nReject: ${req.rejectUrl}`;
+    private async notifyApproval(req: ApprovalRequest): Promise<void | NotifyOwnerResult> {
+      const links = req.kind === "input" ? `Answer: ${req.answerUrl}` : `Approve: ${req.approveUrl}\nReject: ${req.rejectUrl}`;
+      const message = req.message ?? (req.kind === "input" ? `${actuator.name} needs your input` : `Approval needed: ${actuator.name} / ${req.step}`);
+      const subject = req.kind === "input" ? `Input needed: ${actuator.name}` : `Approval needed: ${actuator.name}`;
+      if (req.notify === NOTIFY_OWNER) {
+        // Reserved: never a messaging recipient. The message is cut, never the links, to fit a notifyOwner text.
+        const room = NOTIFY_OWNER_MAX_TEXT - links.length - 2;
+        const text = `${message.length > room ? `${message.slice(0, Math.max(room - 1, 0))}…` : message}\n\n${links}`;
+        const owner = this.getOwner().owner;
+        if (owner) {
+          return owner.notify({ text, subject, runId: req.runId, actuator: actuator.name, idempotencyKey: `approval:${req.runId}:${req.step}` });
+        }
+        console.log(`\n🔐  [approval requested for the owner] ${text}\n`);
+        return { sent: false, reason: "no owner notifier is configured (createRuntime notifyOwner), so the links were printed to the worker's console" };
+      }
+      const text = `${message}\n\n${links}`;
       const messaging = this.getProviders().messaging;
-      if (req.notify && messaging) await messaging.send(req.notify, text, { subject: `Approval needed: ${actuator.name}` });
+      if (req.notify && messaging) {
+        const receipt = await messaging.send(req.notify, text, { subject, approval: approvalPrompt(req, actuator.name), ...(req.channel ? { channel: req.channel } : {}) });
+        // Only the provider that delivered the buttons may decide with them (see decideByButton).
+        if (req.buttons && typeof receipt?.channel === "string") this.manager.bindButtonKind(req.buttons.nonce, buttonKindOfChannel(receipt.channel));
+      }
       else console.log(`\n🔐  [approval requested] ${text}\n`);
     }
 
@@ -334,10 +396,17 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
           return html(approvalPage(actuator.name, "", null, message), result.ok ? 200 : 410);
         }
         const providerHook = /^\/providers\/([a-z0-9-]+)\/webhook$/.exec(path);
-        if (providerHook && options.providerWebhook) {
+        if (providerHook && (options.providerWebhook || options.providerInteractions)) {
           try {
-            const out = await options.providerWebhook(providerHook[1]!, request, this.env);
-            if (out && "reply" in out) return new Response(out.reply, { headers: { "content-type": "text/plain; charset=utf-8" } });
+            const kind = providerHook[1]!;
+            const interactions = method === "POST" ? options.providerInteractions?.(kind, this.env) : null;
+            if (interactions) {
+              const handled = await this.interaction(kind, interactions, request);
+              if (handled) return handled;
+            }
+            if (!options.providerWebhook) return json({ ignored: true });
+            const out = await options.providerWebhook(kind, request, this.env);
+            if (out && "reply" in out) return replyResponse(out.reply);
             const events = out ? (Array.isArray(out) ? out : [out]) : [];
             if (events.length === 0) return json({ ignored: true });
             const delivered = [];
@@ -476,16 +545,56 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
       }
     }
 
+    /**
+     * A button click or a reply the provider needs, or null for the ordinary webhook path. A click's route must be
+     * "local", its clicker on the provider's approver list; then decideByButton decides without waiting for the
+     * run (only with a nonce this provider delivered: notifyApproval binds it after the send), the provider builds
+     * the reply, and its follow-up (an edit through the API) runs after the response.
+     */
+    private async interaction(kind: string, interactions: ProviderInteractions, request: Request): Promise<Response | null> {
+      const parsed = await interactions.parse(request);
+      if (!parsed) return null;
+      if ("reply" in parsed) return replyResponse(parsed.reply);
+      const { click } = parsed;
+      let outcome: ClickOutcome;
+      if (click.route !== LOCAL_BUTTON_ROUTE) outcome = { status: "foreign" };
+      else if (!interactions.isApprover(click.actor)) outcome = { status: "not-approver" };
+      else outcome = clickOutcome(this.manager.decideByButton(click.nonce, click.action, { by: chatApproverLabel(kind, click.actor), kind: interactions.kind }));
+      // The decision is committed by now: a failure below must not answer 500 (the provider would retry the
+      // click). Never log the error itself: a provider's reply or follow-up may hold a response_url or a token.
+      const errorName = (err: unknown) => (err instanceof Error ? err.name : typeof err);
+      let responded: ReturnType<ProviderInteractions["respond"]>;
+      try {
+        responded = interactions.respond(click, outcome);
+      } catch (err) {
+        console.error(`[actuate] ${kind} button reply failed: ${errorName(err)}`);
+        return new Response(null, { status: 200 });
+      }
+      const { reply, after } = responded;
+      if (after) {
+        this.ctx.waitUntil(
+          Promise.resolve()
+            .then(after)
+            .catch((err) => console.error(`[actuate] ${kind} button follow-up failed: ${errorName(err)}`)),
+        );
+      }
+      return replyResponse(reply);
+    }
+
     private async startRun(request: Request, kind: "api" | "webhook", signedKey?: string): Promise<Response> {
       const body = await request.json().catch(() => undefined);
       if (body === undefined) return json({ error: "Request body must be JSON." }, 400);
       const parsed = actuator.input.safeParse(body);
       if (!parsed.success) return json({ error: "Invalid input", issues: parsed.error.issues }, 400);
       const idempotencyKey = signedKey ?? request.headers.get("idempotency-key") ?? request.headers.get("x-github-delivery") ?? undefined;
+      // Without a key of the caller's own, a run API call gets one from the idempotencyKey input fields, computed
+      // from the body as sent (before zod's defaults and transforms). Webhooks never do.
+      const inputKey = !idempotencyKey && kind === "api" ? await deriveInputKey(actuator.idempotencyKey, body) : undefined;
       const { run, created } = await this.manager.start({
         input: parsed.data as Json,
         trigger: { kind },
         ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(inputKey ? { inputKey } : {}),
       });
       return json(run, created ? 201 : 200);
     }

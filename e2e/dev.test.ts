@@ -106,6 +106,17 @@ describe("actuate dev --no-guards", () => {
     expect(dev.output.text).not.toContain("sk_dev_secret_value");
   });
 
+  it('prints notify: "owner" approval links in the terminal, secrets redacted, and keeps them out of the run', async () => {
+    const run = await dev.call("/run", { mode: "ask-owner" });
+    expect(run).toMatchObject({ status: "WAITING" });
+    for (let i = 0; i < 50 && !dev.output.text.includes("Ship it?"); i++) await new Promise((r) => setTimeout(r, 50));
+    expect(dev.output.text).toMatch(/📣 {2}\[owner notification: Approval needed: e2e_guarded\]\nShip it\? \(\[secret\]\)\n\nApprove: http:\/\/localhost\/approve\?token=\S+\nReject: http:\/\/localhost\/approve\?token=\S+\n/);
+    expect(dev.output.text).not.toContain("sk_dev_secret_value");
+    const read = await dev.call(`/runs/${run.runId}`);
+    expect(read.logs.map((l: { level: string }) => l.level)).toEqual(["info"]); // sent: no warning
+    expect(JSON.stringify(read)).not.toContain("token=");
+  });
+
   it("allows what the guards refuse, and still meters rows", async () => {
     expect(await dev.call("/run", { mode: "pragma" })).toMatchObject({ status: "COMPLETED", output: 2 });
     expect(await dev.call("/run", { mode: "big" })).toMatchObject({ status: "COMPLETED", output: 1_100_000 });

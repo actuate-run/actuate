@@ -50,7 +50,8 @@ export const PLATFORM_RULES: ReadonlyArray<{ rule: string; checks: string; needs
   { rule: "bundle-size", checks: "the bundle is at most 5 MB" },
   { rule: "name", checks: "the name is lowercase letters, digits and underscores (at most 64), not starting with actuate_" },
   { rule: "cron", checks: "cron syntax, how many schedules, and how often they fire (alone and together)", needs: "plan" },
-  { rule: "cron-input", checks: "the input schema accepts {}, the input every cron run gets (warning)" },
+  { rule: "cron-input", checks: "the input schema accepts {}, the input every cron run gets; with idempotencyKey it can't, and cron runs never use the key (warning)" },
+  { rule: "idempotency-key", checks: "every idempotencyKey field is a required, top-level string, number, integer or boolean input field" },
   { rule: "http-allow", checks: "http.allow: at most 20 hostnames, no IP addresses, no actuate.run, no wildcard over a shared zone" },
   { rule: "input-regex", checks: "no regex in the input schema with nested quantifiers such as (a+)+" },
   { rule: "plan-capability", checks: "every required capability is on the plan (optional ones get a warning)", needs: "plan" },
@@ -95,9 +96,14 @@ export function platformChecks(input: PlatformCheckInput): PlatformIssue[] {
       ? cronProblem(m.cron, plan.limits.cronsPerActuator, plan.limits.minCronIntervalMinutes)
       : cronProblem(parsable, plan.limits.cronsPerActuator, plan.limits.minCronIntervalMinutes);
   if (cron) planRule("cron", `${cron} The ${plan.name} plan allows ${plan.limits.cronsPerActuator} schedules, at least ${plan.limits.minCronIntervalMinutes} min apart.`);
-  if (m.cron.length && input.actuator && !input.actuator.input.safeParse({}).success) {
+  const keyed = (m.idempotencyKey?.length ?? 0) > 0;
+  const cronRejects = m.cron.length > 0 && !!input.actuator && !input.actuator.input.safeParse({}).success;
+  if (cronRejects && keyed) {
+    warn("cron-input", "Every cron run starts with the input {}, which the input schema rejects (the idempotencyKey fields are required), so every firing fails. Cron runs never use idempotencyKey: move the schedule to an actuator of its own.");
+  } else if (cronRejects) {
     warn("cron-input", "Every cron run starts with the input {}, which the input schema rejects, so every firing fails. Make the fields optional or give them defaults.");
   }
+  for (const problem of idempotencyKeyProblems(m.inputSchema, m.idempotencyKey)) error("idempotency-key", problem);
 
   for (const problem of httpAllowProblems(m.httpAllow)) error("http-allow", problem);
   for (const problem of regexProblems(m.inputSchema)) error("input-regex", problem);
@@ -136,6 +142,82 @@ export function platformChecks(input: PlatformCheckInput): PlatformIssue[] {
     }
   }
   return issues;
+}
+
+const KEY_TYPES = new Set(["string", "number", "integer", "boolean"]);
+const isScalar = (v: unknown) => typeof v === "string" || typeof v === "number" || typeof v === "boolean";
+
+/**
+ * What is wrong with an actuator's `idempotencyKey`, judged on the input's JSON Schema (input side), as the
+ * platform judges it: each field must be a top-level property listed in `required`, of type string, number,
+ * integer or boolean (or an enum or const of those). A field with a default is not required: the key is computed
+ * from the input as sent, so it must always be there.
+ */
+export function idempotencyKeyProblems(inputSchema: unknown, fields: readonly string[] | undefined): string[] {
+  if (fields === undefined) return [];
+  if (!Array.isArray(fields) || fields.length === 0) return ["idempotencyKey lists no fields. List the input fields that identify a request, or leave it out."];
+  const root = (inputSchema && typeof inputSchema === "object" ? inputSchema : {}) as Record<string, unknown>;
+  type ObjectSchema = { properties?: Record<string, Record<string, unknown>>; required?: unknown };
+  // The input itself may be a $ref (zod's `.meta({ id })` on the object): `{"$ref":"#/$defs/Order","$defs":{...}}`.
+  const schema = (resolveLocalRef(root, root) ?? {}) as ObjectSchema;
+  const properties = schema.properties && typeof schema.properties === "object" ? schema.properties : {};
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  const problems: string[] = [];
+  const seen = new Set<string>();
+  for (const field of fields) {
+    const name = String(field);
+    if (seen.has(name)) {
+      problems.push(`idempotencyKey lists "${name}" twice.`);
+      continue;
+    }
+    seen.add(name);
+    const prop = Object.prototype.hasOwnProperty.call(properties, name) ? resolveLocalRef(root, properties[name]) : undefined;
+    if (typeof field !== "string" || !prop) {
+      problems.push(`idempotencyKey field "${name}" is not a top-level field of the input schema.`);
+      continue;
+    }
+    const scalar =
+      (typeof prop.type === "string" && KEY_TYPES.has(prop.type)) ||
+      (Array.isArray(prop.enum) && prop.enum.length > 0 && prop.enum.every(isScalar)) ||
+      ("const" in prop && isScalar(prop.const));
+    if (!scalar) problems.push(`idempotencyKey field "${name}" must be a string, number, integer or boolean.`);
+    else if (!required.includes(name)) {
+      problems.push(`idempotencyKey field "${name}" must be required in the input schema (not optional, no default): the run key is computed from the input as sent.`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * Follow a local `$ref` (`#/$defs/<id>` or `#/definitions/<id>`, as zod emits for a schema with `.meta({ id })`),
+ * keeping the referring node's own keywords. Anything else, and a ref that names no definition, is returned as it is.
+ *
+ * zod writes ids as they are (`#/$defs/50%`), while JSON Pointer percent-encodes them (`#/$defs/a%20b`), so the
+ * segment is looked up raw first, then JSON-Pointer-unescaped (`~1` is `/`, `~0` is `~`), then percent-decoded and
+ * unescaped. A segment that can't be percent-decoded simply has no decoded candidate.
+ */
+function resolveLocalRef(root: { $defs?: unknown; definitions?: unknown }, node: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  let current = node;
+  for (let i = 0; current && typeof current.$ref === "string" && i < 16; i++) {
+    const m = /^#\/(\$defs|definitions)\/(.+)$/.exec(current.$ref);
+    const defs = m ? (root[m[1] as "$defs" | "definitions"] as Record<string, Record<string, unknown>> | undefined) : undefined;
+    const target = m && defs && typeof defs === "object" ? refCandidates(m[2]!).map((n) => (Object.prototype.hasOwnProperty.call(defs, n) ? defs[n] : undefined)).find(Boolean) : undefined;
+    if (!target || typeof target !== "object") return current;
+    const { $ref: _ref, ...own } = current;
+    current = { ...target, ...own };
+  }
+  return current;
+}
+
+function refCandidates(segment: string): string[] {
+  const unescape = (v: string) => v.replace(/~1/g, "/").replace(/~0/g, "~");
+  const out = [segment, unescape(segment)];
+  try {
+    out.push(unescape(decodeURIComponent(segment)));
+  } catch {
+    // Not percent-encoded (e.g. a raw "50%"): the raw candidates are all there is.
+  }
+  return [...new Set(out)];
 }
 
 export function formatIssues(issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey>; message: string }>): string {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { defineActuator, secret, z } from "@actuate/sdk";
 import { describeActuator } from "../src/load.js";
-import { httpAllowProblems, platformChecks, regexProblems } from "../src/platform-checks.js";
+import { httpAllowProblems, idempotencyKeyProblems, platformChecks, regexProblems } from "../src/platform-checks.js";
 import { PLANS, planFromAccount } from "../src/plans.js";
 
 const base = {
@@ -81,6 +81,68 @@ describe("platform deploy checks", () => {
       "warning:cron-input:Every cron run starts with the input {}, which the input schema rejects, so every firing fails. Make the fields optional or give them defaults.",
     ]);
     expect(check({ ...def, input: z.object({ id: z.string().optional() }) }, { plan: PLANS.maker })).toEqual([]);
+  });
+
+  it("refuses an idempotencyKey field that isn't a required scalar of the input", () => {
+    const input = z.object({ orderId: z.string(), n: z.int(), kind: z.enum(["a", "b"]), maybe: z.string().optional(), dflt: z.string().default("x") });
+    expect(check({ ...base, input, idempotencyKey: ["orderId", "n", "kind"] } as never)).toEqual([]);
+    expect(check({ ...base, input, idempotencyKey: ["maybe", "dflt"] } as never)).toEqual([
+      'error:idempotency-key:idempotencyKey field "maybe" must be required in the input schema (not optional, no default): the run key is computed from the input as sent.',
+      'error:idempotency-key:idempotencyKey field "dflt" must be required in the input schema (not optional, no default): the run key is computed from the input as sent.',
+    ]);
+    // What defineActuator already refuses is refused here too: the platform can't trust an old SDK's bundle to have checked.
+    const actuator = defineActuator({ ...base, input: z.object({ id: z.string(), items: z.array(z.string()) }) } as never);
+    const keyed = (idempotencyKey: string[]) =>
+      platformChecks({ metadata: { ...describeActuator(actuator), idempotencyKey }, actuator, plan: PLANS.sandbox }).map((i) => `${i.rule}:${i.message}`);
+    expect(keyed(["items", "nope", "id", "id"])).toEqual([
+      'idempotency-key:idempotencyKey field "items" must be a string, number, integer or boolean.',
+      'idempotency-key:idempotencyKey field "nope" is not a top-level field of the input schema.',
+      'idempotency-key:idempotencyKey lists "id" twice.',
+    ]);
+    expect(keyed([])).toEqual(["idempotency-key:idempotencyKey lists no fields. List the input fields that identify a request, or leave it out."]);
+    expect(idempotencyKeyProblems({ type: "object", properties: { v: { type: "number", const: 3 } }, required: ["v"] }, ["v"])).toEqual([]);
+    expect(idempotencyKeyProblems(undefined, undefined)).toEqual([]);
+    // A field with a registered id is a $ref into $defs: followed before the type check.
+    const OrderId = z.string().meta({ id: "OrderId" });
+    const reffed = describeActuator(defineActuator({ ...base, input: z.object({ orderId: OrderId, other: OrderId, items: z.array(z.string()).meta({ id: "Items" }) }), idempotencyKey: ["orderId", "other"] } as never));
+    expect(JSON.stringify(reffed.inputSchema)).toContain('"$ref":"#/$defs/OrderId"');
+    expect(idempotencyKeyProblems(reffed.inputSchema, ["orderId", "other"])).toEqual([]);
+    expect(idempotencyKeyProblems(reffed.inputSchema, ["items"])).toEqual(['idempotencyKey field "items" must be a string, number, integer or boolean.']);
+    expect(idempotencyKeyProblems({ properties: { k: { $ref: "#/definitions/K" } }, definitions: { K: { type: "integer" } }, required: ["k"] }, ["k"])).toEqual([]);
+    expect(idempotencyKeyProblems({ properties: { k: { $ref: "#/$defs/Missing" } }, required: ["k"] }, ["k"])).toHaveLength(1);
+    expect(idempotencyKeyProblems({ properties: { k: { $ref: "https://example.com/k" } }, required: ["k"] }, ["k"])).toHaveLength(1);
+    // The input object itself may be a $ref (.meta({ id }) on the object).
+    const order = describeActuator(defineActuator({ ...base, input: z.object({ orderId: z.string(), n: z.number().optional() }).meta({ id: "Order" }), idempotencyKey: ["orderId"] } as never));
+    expect((order.inputSchema as { $ref?: string }).$ref).toBe("#/$defs/Order");
+    expect(idempotencyKeyProblems(order.inputSchema, ["orderId"])).toEqual([]);
+    expect(idempotencyKeyProblems(order.inputSchema, ["n"])).toEqual([expect.stringContaining('"n" must be required')]);
+    expect(idempotencyKeyProblems(order.inputSchema, ["nope"])).toEqual(['idempotencyKey field "nope" is not a top-level field of the input schema.']);
+    // zod writes ids raw: looked up raw first, then percent-decoded. A segment that can't be decoded never throws.
+    const raw = describeActuator(defineActuator({ ...base, input: z.object({ k: z.string().meta({ id: "50%" }), s: z.string().meta({ id: "a b" }) }), idempotencyKey: ["k", "s"] } as never));
+    expect(JSON.stringify(raw.inputSchema)).toContain('"$ref":"#/$defs/50%"');
+    expect(idempotencyKeyProblems(raw.inputSchema, ["k", "s"])).toEqual([]);
+    const defs = { $defs: { "a b": { type: "string" }, "%E0": { type: "string" }, "x/y": { type: "number" } } };
+    const one = (ref: string) => idempotencyKeyProblems({ properties: { k: { $ref: ref } }, required: ["k"], ...defs }, ["k"]);
+    expect(one("#/$defs/a%20b")).toEqual([]);
+    expect(one("#/$defs/%E0")).toEqual([]);
+    expect(one("#/$defs/x~1y")).toEqual([]);
+    expect(one("#/$defs/%E1")).toEqual(['idempotencyKey field "k" must be a string, number, integer or boolean.']);
+    expect(idempotencyKeyProblems({ $ref: "#/$defs/%E1", $defs: {} }, ["k"])).toEqual(['idempotencyKey field "k" is not a top-level field of the input schema.']);
+    // Without a declaration, the metadata has no idempotencyKey at all (deploys of older actuators are unchanged).
+    expect("idempotencyKey" in describeActuator(actuator)).toBe(false);
+    expect(describeActuator(defineActuator({ ...base, input, idempotencyKey: ["orderId"] } as never)).idempotencyKey).toEqual(["orderId"]);
+  });
+
+  it("extends the cron-input warning when the actuator also declares idempotencyKey", () => {
+    const def = { ...base, input: z.object({ id: z.string() }), cron: ["0 9 * * *"], idempotencyKey: ["id"] };
+    expect(check(def as never, { plan: PLANS.maker })).toEqual([
+      "warning:cron-input:Every cron run starts with the input {}, which the input schema rejects (the idempotencyKey fields are required), so every firing fails. Cron runs never use idempotencyKey: move the schedule to an actuator of its own.",
+    ]);
+    // A cron run's input can only parse when a key field isn't required, which is refused on its own.
+    const lenient = check({ ...def, input: z.object({ id: z.string().default("daily") }) } as never, { plan: PLANS.maker });
+    expect(lenient).toEqual([
+      'error:idempotency-key:idempotencyKey field "id" must be required in the input schema (not optional, no default): the run key is computed from the input as sent.',
+    ]);
   });
 
   it("checks http.allow like the platform", () => {

@@ -296,9 +296,9 @@ Also warns when actuate.config.json sets a secret config field (secret() in the 
 3. If the deployed version already runs this exact code, updates only the configuration (no deploy used), or does nothing.
 4. Uploads the bundle with actuate.config.json and prints the URLs.
 
---dry-run stops before step 3 and prints the metadata. It uploads nothing and doesn't count as a deploy; logged in, it still reads your account to run its checks.`,
+--dry-run stops before step 3 and prints the metadata, then the MCP tool entry (name, title, description, schemas and annotations) as agents will see it in tools/list. It uploads nothing and doesn't count as a deploy; logged in, it still reads your account to run its checks.`,
     options: {
-      "dry-run": { type: "boolean", help: "Check and bundle; print the metadata; upload nothing" },
+      "dry-run": { type: "boolean", help: "Check and bundle; print the metadata and the MCP tool entry; upload nothing" },
       "no-config": { type: "boolean", help: "Don't send actuate.config.json" },
       ...PLAN_OPT,
       force: { type: "boolean", help: "Deploy even if the local checks find errors or nothing changed" },

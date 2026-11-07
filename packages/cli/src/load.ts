@@ -88,6 +88,8 @@ export interface ActuatorMetadata {
   httpAllow: string[];
   cron: string[];
   hints: { readOnly?: boolean; idempotent?: boolean; destructive?: boolean; openWorld?: boolean };
+  /** Input fields that derive a run key (`ActuatorDefinition.idempotencyKey`). Present only when declared. */
+  idempotencyKey?: string[];
   inputSchema: unknown;
   configSchema: unknown;
   outputSchema: unknown | null;
@@ -103,6 +105,7 @@ export function describeActuator(actuator: Actuator): ActuatorMetadata {
     httpAllow: [...(actuator.http?.allow ?? [])],
     cron: [...(actuator.cron ?? [])],
     hints: { ...(actuator.hints ?? {}) },
+    ...(actuator.idempotencyKey ? { idempotencyKey: [...actuator.idempotencyKey] } : {}),
     inputSchema: z.toJSONSchema(actuator.input, opts),
     configSchema: z.toJSONSchema(actuator.config ?? z.object({}), opts),
     outputSchema: actuator.output ? z.toJSONSchema(actuator.output, { ...opts, io: "output" }) : null,

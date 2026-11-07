@@ -1,5 +1,6 @@
 import {
   ActuatorError,
+  NOTIFY_OWNER,
   NOTIFY_OWNER_MAX_SUBJECT,
   NOTIFY_OWNER_MAX_TEXT,
   NonRetryableError,
@@ -310,6 +311,7 @@ class Pass {
     },
 
     waitForApproval: async (name: string, options: WaitForApprovalOptions = {}): Promise<ApprovalResult | null> => {
+      checkNotify(`ctx.step.waitForApproval("${name}")`, options?.notify);
       this.enter("waitForApproval", name);
       const existing = this.rows.get(name);
       const resolved = await this.resolveWait(name, existing);
@@ -331,6 +333,7 @@ class Pass {
 
     waitForInput: async (name: string, options: WaitForInputOptions): Promise<InputResult | null> => {
       if (!options?.prompt) throw new ActuatorError(`ctx.step.waitForInput("${name}") needs a prompt.`);
+      checkNotify(`ctx.step.waitForInput("${name}")`, options.notify);
       this.enter("waitForInput", name);
       const existing = this.rows.get(name);
       const resolved = await this.resolveWait(name, existing);
@@ -552,6 +555,8 @@ class Pass {
                 `ctx.${cap}.${prop}() must be called inside ctx.step.do(...); otherwise it repeats on every replay.`,
               );
             }
+            // Only Actuate's approval notifications describe an approval: actuator code can't fake an "Approve" card.
+            if (cap === "messaging" && prop === "send") args = withoutApproval(args);
             const keyed = KEYED_METHODS[cap];
             const at = keyed && Object.hasOwn(keyed, prop) ? keyed[prop] : undefined;
             if (at !== undefined) return this.withIdempotencyKey(prop, at, args).then((keyed) => Reflect.apply(value as (...a: unknown[]) => unknown, provider, keyed));
@@ -562,6 +567,19 @@ class Pass {
       },
     );
   }
+}
+
+/**
+ * `messaging.send` arguments with `options.approval` removed: always a plain copy (the caller's options are left
+ * alone), never an `in` test a Proxy could answer falsely.
+ */
+function withoutApproval(args: unknown[]): unknown[] {
+  const options = args[2];
+  if (!options || typeof options !== "object") return args;
+  const { approval: _dropped, ...rest } = options as Record<string, unknown>;
+  const out = [...args];
+  out[2] = rest;
+  return out;
 }
 
 /**
@@ -600,6 +618,28 @@ async function fitKey(key: string): Promise<string> {
   if (key.length <= MAX_IDEMPOTENCY_KEY) return key;
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)));
   return `${key.slice(0, 190)}~${Array.from(digest.slice(0, 16), (b) => b.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** A `notify` that `notifyTarget` refuses fails the step's call, before anything is waited for. */
+function checkNotify(call: string, notify: unknown): void {
+  const target = notifyTarget(notify);
+  if ("error" in target) throw new ActuatorError(`${call}: ${target.error}.`);
+}
+
+/**
+ * A wait's `notify` as a recipient and an optional channel, or why it can't be used. `{ to: "owner" }` is refused:
+ * "owner" is reserved for the string form, which never goes through messaging.
+ */
+export function notifyTarget(notify: unknown): { to?: string; channel?: string } | { error: string } {
+  if (notify === undefined || notify === null || notify === "") return {};
+  if (typeof notify === "string") return { to: notify };
+  if (typeof notify !== "object" || Array.isArray(notify)) return { error: "notify must be a string or { to, channel }" };
+  const { to, channel } = notify as { to?: unknown; channel?: unknown };
+  if (typeof to !== "string" || !to.trim()) return { error: "notify.to must be a non-empty string" };
+  if (to === NOTIFY_OWNER) return { error: 'notify: { to: "owner" } is not allowed; use notify: "owner"' };
+  if (channel === undefined || channel === null || channel === "") return { to };
+  if (typeof channel !== "string" || !/^[a-z0-9-]{1,32}$/i.test(channel.trim())) return { error: "notify.channel must be a channel name, e.g. \"slack\"" };
+  return { to, channel: channel.trim() };
 }
 
 export function approvalEventKey(runId: string, stepName: string): string {

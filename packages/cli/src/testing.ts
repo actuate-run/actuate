@@ -45,6 +45,8 @@ import {
   RunManager,
   collectSecrets,
   createHttpProvider,
+  deriveInputKey,
+  triggerDerivesInputKey,
   executePass,
   mergeSecrets,
   meteredNodeSqlite,
@@ -243,16 +245,24 @@ export class ActuatorTest<A extends Actuator = Actuator> {
     return this.clock;
   }
 
-  /** Start a run. The input is validated with the input schema first, as the platform does. */
+  /**
+   * Start a run. The input is validated with the input schema first, as the platform does. The trigger is "api"
+   * unless you pass one. Without an `idempotencyKey`, an "api" or "mcp" run gets the key derived from the actuator's
+   * `idempotencyKey` fields, as on the platform and the self-hosted runtime: starting the same order twice returns
+   * the first run (unless it failed or was cancelled, or completed more than 24 hours ago on the test clock).
+   */
   async start(input: unknown = {}, opts: { trigger?: Trigger | TriggerKind; idempotencyKey?: string } = {}): Promise<TestRun<OutputOf<A>>> {
     this.activate();
     const parsed = this.actuator.input.safeParse(input);
     if (!parsed.success) throw new Error(`Invalid input:${formatIssues(parsed.error.issues)}`);
     const trigger = typeof opts.trigger === "string" ? { kind: opts.trigger } : (opts.trigger ?? { kind: "api" as const });
+    // From the input as given, before zod's defaults and transforms, as the hosts compute it.
+    const inputKey = !opts.idempotencyKey && triggerDerivesInputKey(trigger.kind) ? await deriveInputKey(this.actuator.idempotencyKey, input) : undefined;
     const { run } = await this.manager.start({
       input: parsed.data as Json,
       trigger,
       ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
+      ...(inputKey ? { inputKey } : {}),
     });
     return run as TestRun<OutputOf<A>>;
   }

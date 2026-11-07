@@ -104,11 +104,37 @@ export interface WaitForEventOptions {
   until?: Date | number;
 }
 
+/**
+ * The `notify` value that sends approval and input links to the actuator's owner instead of through
+ * `ctx.messaging`. Reserved: it is never passed to a messaging provider as a recipient.
+ */
+export const NOTIFY_OWNER = "owner";
+
+/**
+ * Who a `waitForApproval` or `waitForInput` notifies: a messaging recipient, `"owner"` (reserved, see
+ * {@link NOTIFY_OWNER}), or a recipient on a named messaging channel.
+ */
+export type Notify = string | { to: string; channel?: string };
+
 export interface WaitForInputOptions {
   /** The question shown on the form. */
   prompt: string;
-  /** Who gets the signed link: a chat ID, phone or email understood by the messaging provider. */
-  notify?: string;
+  /**
+   * Who gets the signed link: a chat ID, phone or email understood by the messaging provider, or `"owner"`.
+   *
+   * `"owner"` (reserved, never a default) sends the link to the actuator's owner the way `ctx.notifyOwner` does,
+   * with no messaging provider needed: on the hosted platform, an email to the account, and the account's alert
+   * channel when it is Telegram, Slack, Discord or email (never a custom webhook, so the link never reaches
+   * another agent); self-hosted, the `notifyOwner` notifier given to `createRuntime`, else the worker's console;
+   * under `actuate dev`, the terminal. When it can't go out (a daily cap reached), the step still waits, the
+   * request is in the approval queue, and the run's log gets a warning.
+   *
+   * `{ to, channel }` picks the messaging channel that sends it when several are configured ("telegram",
+   * "slack", "discord", ...; see `MessagingSendOptions.channel`), e.g. `{ to: "C0123", channel: "slack" }`.
+   * Without `channel`, the default (first) channel sends. A channel that isn't configured is logged on the run
+   * as a delivery error, and the step still waits. `"owner"` can't be given as `to`: use the string `"owner"`.
+   */
+  notify?: Notify;
   /** Pre-filled text, e.g. a draft to edit. */
   initial?: string;
   /** Longest answer accepted, characters. Default 4,000. */
@@ -129,8 +155,26 @@ export interface InputResult {
 export interface WaitForApprovalOptions {
   /** Shown to the approver. */
   message?: string;
-  /** Who gets the signed link: a chat ID, phone or email understood by the messaging provider. */
-  notify?: string;
+  /**
+   * Who gets the signed approve and reject links: a chat ID, phone or email understood by the messaging
+   * provider, or `"owner"`.
+   *
+   * `"owner"` (reserved, never a default) sends the links to the actuator's owner the way `ctx.notifyOwner` does,
+   * with no messaging provider needed: on the hosted platform, an email to the account, and the account's alert
+   * channel when it is Telegram, Slack, Discord or email (never a custom webhook, so the links never reach
+   * another agent); self-hosted, the `notifyOwner` notifier given to `createRuntime`, else the worker's console;
+   * under `actuate dev`, the terminal. When they can't go out (a daily cap reached), the step still waits, the
+   * approval is in the approval queue, and the run's log gets a warning.
+   *
+   * `{ to, channel }` picks the messaging channel that sends it when several are configured ("telegram",
+   * "slack", "discord", ...; see `MessagingSendOptions.channel`), e.g. `{ to: "C0123", channel: "slack" }`.
+   * Without `channel`, the default (first) channel sends. A channel that isn't configured is logged on the run
+   * as a delivery error, and the step still waits. `"owner"` can't be given as `to`: use the string `"owner"`.
+   *
+   * Telegram, Slack and Discord can show Approve and Reject buttons on the message when their credentials allow
+   * it; the links stay in the text too. A button decision comes back with `via: "chat"` and a verified `by`.
+   */
+  notify?: Notify;
   /** Give up after this long and resolve to `null`. Default "7 days". */
   timeout?: Duration;
 }
@@ -144,10 +188,13 @@ export interface ApprovalResult {
   /**
    * Who decided. From the dashboard or API it is the signed-in account (email or
    * token name); from a signed link it is the name the person typed, if any (self-reported).
+   * From a chat button (`via: "chat"`) it is verified by the chat provider: `<channel>:<user id>`, plus
+   * ` (<display name>)` when the provider gives one, e.g. `telegram:123456789 (Alice)` or `slack:U0123ABCD (alice)`.
+   * The user ID is checked by the provider's signature; the display name is whatever the person set in the chat app.
    */
   by?: string;
-  /** Where the decision came from. */
-  via?: "link" | "dashboard" | "api";
+  /** Where the decision came from: a signed link, the dashboard, the API, or a chat button (Telegram, Slack, Discord). */
+  via?: "link" | "dashboard" | "api" | "chat";
 }
 
 /**
@@ -312,9 +359,29 @@ export interface ActuatorDefinition<
   cron?: readonly string[];
   /**
    * Hints for MCP clients about what calling this tool does (they shape how agents
-   * and people approve tool calls). Defaults: not read-only, not idempotent.
+   * and people approve tool calls). Defaults: not read-only, not idempotent (idempotent when
+   * {@link ActuatorDefinition.idempotencyKey} is set, unless `idempotent` is `false`).
    */
   hints?: ToolHints;
+  /**
+   * Input fields that say which request a call is, e.g. `["orderId"]`. A call over MCP or the run API (`POST /run`)
+   * without an idempotency key of its own gets one derived from these fields' values, so a retried tool call
+   * returns the first call's run instead of starting a second one, even when the agent sends no key.
+   *
+   * Each name is a top-level, required field of the input schema whose type is a string, number, integer or
+   * boolean (an enum or literal of those too). The key is `input:` plus the SHA-256 of the fields' values in this
+   * order, as the caller sent them: zod defaults, coercion and transforms don't apply, so `"A-1"` and `"a-1"` are
+   * different keys. It matches a run with the same values that is still running or waiting, or that completed in
+   * the last 24 hours. A failed or cancelled run never matches, so the same call can be tried again. A call
+   * whose input lacks one of the fields gets no derived key (the deploy checks require them, but self-hosted
+   * runs and tests don't check).
+   *
+   * An idempotency key the caller sends (MCP `_meta["run.actuate/idempotencyKey"]`, the `Idempotency-Key`
+   * header) takes its place and works as before: send a new one to force a new run. Cron runs and webhooks
+   * never get a derived key. Declaring it also tells MCP clients the tool is idempotent (`idempotentHint`),
+   * unless `hints.idempotent` is `false`.
+   */
+  idempotencyKey?: readonly string[];
   run(ctx: Context<K, P>, input: z.output<I>, config: z.output<C>): Promise<O> | O;
 }
 
@@ -355,7 +422,49 @@ export function defineActuator<
   if (definition.capabilities?.includes("http" as K) && !definition.http?.allow?.length) {
     throw new ActuatorError(`Actuator "${definition.name}" declares "http" but no http.allow domains.`);
   }
+  if (definition.idempotencyKey !== undefined) checkIdempotencyKey(definition.name, definition.input, definition.idempotencyKey);
   return Object.freeze({ ...definition, __actuate: 1 as const });
+}
+
+/** zod's internal definition of a schema: enough to read its shape without converting it to JSON Schema. */
+type ZodDef = { type?: string; shape?: Record<string, { _zod?: { def?: ZodDef } }>; innerType?: { _zod?: { def?: ZodDef } }; in?: { _zod?: { def?: ZodDef } }; entries?: Record<string, unknown>; values?: unknown[] };
+const defOf = (schema: unknown): ZodDef | undefined => (schema as { _zod?: { def?: ZodDef } } | undefined)?._zod?.def;
+
+/** Wrappers whose input side is the schema they wrap (`optional`, `default` and the like; a pipe's input). */
+function unwrap(def: ZodDef | undefined): ZodDef | undefined {
+  for (let i = 0; def && i < 32; i++) {
+    if (def.type === "optional" || def.type === "default" || def.type === "prefault" || def.type === "readonly" || def.type === "nonoptional") def = defOf(def.innerType);
+    else if (def.type === "pipe") def = defOf(def.in);
+    else return def;
+  }
+  return def;
+}
+
+const SCALAR_TYPES = new Set(["string", "number", "boolean", "template_literal"]);
+const isScalarValue = (v: unknown) => typeof v === "string" || typeof v === "number" || typeof v === "boolean";
+
+/** The checks on `idempotencyKey` that need only the schema. Required-ness is checked at deploy (`actuate check --platform`). */
+function checkIdempotencyKey(name: string, input: unknown, fields: readonly string[]): void {
+  const where = `Actuator "${name}": idempotencyKey`;
+  if (typeof fields === "string") throw new ActuatorError(`${where} must be an array of input field names: idempotencyKey: ["${fields}"].`);
+  if (!Array.isArray(fields) || fields.length === 0) throw new ActuatorError(`${where} lists no fields. List the input fields that identify a request, e.g. ["orderId"], or leave it out.`);
+  const object = unwrap(defOf(input));
+  if (object?.type !== "object" || !object.shape) throw new ActuatorError(`${where} needs an object input schema (z.object({ ... })).`);
+  const seen = new Set<string>();
+  for (const field of fields) {
+    if (typeof field !== "string" || !Object.prototype.hasOwnProperty.call(object.shape, field)) {
+      throw new ActuatorError(`${where}: "${String(field)}" is not a top-level field of the input schema.`);
+    }
+    if (seen.has(field)) throw new ActuatorError(`${where} lists "${field}" twice.`);
+    seen.add(field);
+    const def = unwrap(defOf(object.shape[field]));
+    const type = def?.type ?? "unknown";
+    const scalar =
+      SCALAR_TYPES.has(type) ||
+      (type === "enum" && Object.values(def?.entries ?? {}).every(isScalarValue)) ||
+      (type === "literal" && (def?.values ?? []).length > 0 && (def?.values ?? []).every(isScalarValue));
+    if (!scalar) throw new ActuatorError(`${where}: "${field}" must be a string, number, integer or boolean field (it is ${type === "unknown" ? "not one" : `${/^[aeiou]/.test(type) ? "an" : "a"} ${type}`}).`);
+  }
 }
 
 export function isActuator(value: unknown): value is Actuator {
