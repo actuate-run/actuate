@@ -41,6 +41,22 @@ async function sent(creds: typeof plain, text: string, options: Parameters<Retur
 }
 
 describe("telegram credentials", () => {
+  it("checks the webhook secret token against Telegram's rule, never repeating it", () => {
+    expect(telegram.parseCredentials({ botToken: BOT_TOKEN, webhookSecretToken: " a-Z_9 " }).webhookSecretToken).toBe("a-Z_9");
+    expect(telegram.parseCredentials({ botToken: BOT_TOKEN, webhookSecretToken: "x".repeat(256) }).webhookSecretToken).toHaveLength(256);
+    expect(telegram.parseCredentials({ botToken: BOT_TOKEN, webhookSecretToken: "  " }).webhookSecretToken).toBeUndefined();
+    for (const bad of ["x".repeat(257), "has space", "s3cret!", "émoji", "a.b"]) {
+      let message = "";
+      try {
+        telegram.parseCredentials({ botToken: BOT_TOKEN, webhookSecretToken: bad });
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toMatch(/webhookSecretToken must be 1-256 characters of A-Z, a-z, 0-9, _ and -/);
+      expect(message).not.toContain(bad);
+    }
+  });
+
   it("takes an optional approvers list of numeric user IDs", () => {
     expect(listed.approvers).toBe("42 43 44");
     expect(interactive.approvers).toBeUndefined();

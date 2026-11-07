@@ -200,6 +200,11 @@ export function slackResponseBody(outcome: ClickOutcome, originalText: string): 
 /** The ack Slack needs within 3 seconds: 200 with an empty body. */
 const ACK: ProviderReply = textReply("");
 
+/** Slack's errors for blocks it refused, posting nothing: chat.postMessage's `error`, or an incoming webhook's 400 body. */
+function blockRejection(error: unknown): boolean {
+  return typeof error === "string" && /\b(?:invalid_blocks(?:_format)?|msg_blocks_too_long)\b/.test(error);
+}
+
 export const slack: ProviderDefinition<SlackCredentials, "messaging"> = {
   kind: "slack",
   capability: "messaging",
@@ -247,26 +252,33 @@ export const slack: ProviderDefinition<SlackCredentials, "messaging"> = {
         const blocks = approval ? slackApprovalBlocks(body, approval, Boolean(credentials.signingSecret)) : undefined;
         const channel = (to ?? "").trim() || credentials.defaultChannel;
         if (credentials.botToken && channel) {
-          const res = await requestJson<{ ok: boolean; ts?: string; channel?: string; error?: string }>(
-            "Slack",
-            ctx.fetch,
-            "https://slack.com/api/chat.postMessage",
-            {
+          const post = (withBlocks: boolean) =>
+            requestJson<{ ok: boolean; ts?: string; channel?: string; error?: string }>("Slack", ctx.fetch, "https://slack.com/api/chat.postMessage", {
               method: "POST",
               headers: { authorization: `Bearer ${credentials.botToken}`, "content-type": "application/json; charset=utf-8" },
-              body: JSON.stringify({ channel, text: body, ...(blocks ? { blocks } : {}), unfurl_links: false }),
-            },
-          );
+              body: JSON.stringify({ channel, text: body, ...(withBlocks && blocks ? { blocks } : {}), unfurl_links: false }),
+            });
+          let res = await post(true);
+          // Slack refused the blocks and posted nothing: send the text alone, links and all, once.
+          if (blocks && !res?.ok && blockRejection(res?.error)) res = await post(false);
           if (!res?.ok || !res.ts) throw new ProviderApiError("Slack", 200, res?.error ?? "chat.postMessage failed");
           return { id: `${res.channel ?? channel}:${res.ts}`, channel: "slack" };
         }
         if (!credentials.webhookUrl) throw new Error("Slack send needs `to` as a channel ID (or set a default channel)");
         // The webhook URL is a secret: requestJson strips URLs from network errors.
-        await requestJson("Slack", ctx.fetch, credentials.webhookUrl, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ text: body, ...(blocks ? { blocks } : {}) }),
-        });
+        const post = (withBlocks: boolean) =>
+          requestJson("Slack", ctx.fetch, credentials.webhookUrl!, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ text: body, ...(withBlocks && blocks ? { blocks } : {}) }),
+          });
+        try {
+          await post(true);
+        } catch (err) {
+          // An incoming webhook answers 400 "invalid_blocks" (and the like) without posting: the text alone, once.
+          if (!(blocks && err instanceof ProviderApiError && err.status === 400 && blockRejection(err.message))) throw err;
+          await post(false);
+        }
         return { id: "webhook", channel: "slack" };
       },
     };

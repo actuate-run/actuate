@@ -112,7 +112,7 @@ A chat provider can put Approve and Reject buttons on approval messages. When `s
 
 Helpers in the contract, so every provider words and validates things the same way: `parseApprovers` (an `approvers` credential: IDs separated by spaces or commas, with `role:<id>` entries where the provider has roles), `isListedApprover`, `formatApprovers`, `approversCredentialField`, `clickOutcomeText` ("Approved by Alice at 14:02 UTC", "Already approved by Alice", "This request has expired or was already decided.", "You're not on the approver list for this.", "This button belongs to another actuator."), `withoutLinkLines` and `decidedMessageText` for the edited message, and `jsonReply` / `textReply`. `providerInteractions(definition, credentials)` and `providerInteractionsFromEnv(env, kind)` bind them for a runtime (`createRuntime`'s `providerInteractions`).
 
-An `approvers` list restricts buttons, not links: the signed links in the message still work for whoever holds them.
+An `approvers` list restricts buttons, not links: the signed links in the message still work for whoever holds them. A button decides only through the provider that sent it, so a payload copied from a Slack message can't be replayed through the custom webhook's Reply URL, whose `by` your receiver asserts.
 
 ### Telegram
 
@@ -132,7 +132,7 @@ curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
   -d allowed_updates='["message","callback_query"]'
 ```
 
-The secret token is 1-256 characters of `A-Z a-z 0-9 _ -`. Every update must carry it in `X-Telegram-Bot-Api-Secret-Token` (compared in constant time); a missing or wrong one gets 401. A `callback_query` with our payload is a click. Any other callback query gets a bare `answerCallbackQuery` with no text, which stops the clicker's spinner. Every other update goes on to `parseWebhook`, which never turns a callback query into a message event.
+The secret token is 1-256 characters of `A-Z a-z 0-9 _ -`, checked when the credentials are read. Every update must carry it in `X-Telegram-Bot-Api-Secret-Token` (compared in constant time); a missing or wrong one gets 401. A `callback_query` with our payload is a click. Any other callback query gets a bare `answerCallbackQuery` with no text, which stops the clicker's spinner. Every other update goes on to `parseWebhook`, which never turns a callback query into a message event.
 
 The click is answered in the webhook response (`{"method":"answerCallbackQuery","callback_query_id":…,"text":…}`, so no API call is made). A deciding click then edits the message through `editMessageText`: the link lines are removed, "Approved by Wei Tan at 14:02 UTC" is added, the buttons are removed and the text is plain. Other outcomes answer only the clicker. `TELEGRAM_APPROVERS` (optional) takes numeric user IDs (`42 43`), not chat IDs or @usernames. The clicker is recorded as `telegram:<user id> (<first last name or @username>)`; the name is whatever the user set.
 
@@ -143,7 +143,7 @@ Approvals and questions go out as Block Kit: a section with the message (links i
 - **With `signingSecret`** (`SLACK_SIGNING_SECRET`): interactive **Approve** (primary) and **Reject** (danger) buttons, with action IDs `actuate_approve` and `actuate_reject` and the button payload in `value`.
 - **Without it**, or with no button nonce: URL buttons that open the confirm pages.
 - **Questions** (`waitForInput`) get an **Answer** URL button.
-- **Limits:** a URL longer than Slack's 3000 characters gets no button, and a message longer than 3000 characters is split over several sections.
+- **Limits:** a URL longer than Slack's 3000 characters gets no button, and a message longer than 3000 characters is split over several sections. If Slack still refuses the blocks (`invalid_blocks`), the text is sent alone, once.
 
 Setup, in a Slack app used only by Actuate (an app has one Request URL):
 

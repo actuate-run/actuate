@@ -26,7 +26,10 @@ const schema = z.object({
     .trim()
     .regex(/^\d+:[A-Za-z0-9_-]{20,}$/, "botToken must look like 123456789:AA... (from @BotFather)"),
   /** Optional secret_token set via setWebhook; checked against X-Telegram-Bot-Api-Secret-Token. */
-  webhookSecretToken: optionalString(),
+  webhookSecretToken: optionalString().refine(
+    (v) => v === undefined || /^[A-Za-z0-9_-]{1,256}$/.test(v),
+    "webhookSecretToken must be 1-256 characters of A-Z, a-z, 0-9, _ and - (Telegram's rule for setWebhook's secret_token)",
+  ),
   /** Optional: Telegram user IDs allowed to press Approve and Reject (normalised by parseApprovers). */
   approvers: optionalString(),
 });

@@ -254,6 +254,37 @@ describe("slack approval rendering", () => {
     expect(body.text).toBe(text);
   });
 
+  it("sends the text alone, once, when Slack refuses the blocks", async () => {
+    const a = approval();
+    // chat.postMessage: 200 { ok: false, error: "invalid_blocks" }, nothing posted.
+    const bot = mockFetch(json({ ok: false, error: "invalid_blocks" }), json({ ok: true, channel: "C01", ts: "1.2" }));
+    expect(await slack.create(withSecret({ botToken: "xoxb-1" }), context(bot.fetch)).send("C01", textOf(a), { approval: a })).toEqual({ id: "C01:1.2", channel: "slack" });
+    expect(bot.calls).toHaveLength(2);
+    expect(JSON.parse(bot.calls[0]!.body)).toHaveProperty("blocks");
+    expect(JSON.parse(bot.calls[1]!.body)).toEqual({ channel: "C01", text: textOf(a), unfurl_links: false });
+    // An incoming webhook: 400 "invalid_blocks" as plain text.
+    const hook = mockFetch(() => new Response("invalid_blocks", { status: 400 }), () => new Response("ok"));
+    await slack.create(withSecret(), context(hook.fetch)).send("", textOf(a), { approval: a });
+    expect(hook.calls.map((c) => Object.keys(JSON.parse(c.body)))).toEqual([["text", "blocks"], ["text"]]);
+    // Refused again: the error, with no third try.
+    const twice = mockFetch(json({ ok: false, error: "invalid_blocks" }));
+    expect((await failure(slack.create(withSecret({ botToken: "xoxb-1" }), context(twice.fetch)).send("C01", textOf(a), { approval: a }))).message).toMatch(/invalid_blocks/);
+    expect(twice.calls).toHaveLength(2);
+  });
+
+  it("doesn't resend for other errors, or a message without blocks", async () => {
+    const a = approval();
+    const denied = mockFetch(json({ ok: false, error: "channel_not_found" }));
+    expect((await failure(slack.create(withSecret({ botToken: "xoxb-1" }), context(denied.fetch)).send("C01", textOf(a), { approval: a }))).message).toMatch(/channel_not_found/);
+    expect(denied.calls).toHaveLength(1);
+    const plain = mockFetch(() => new Response("invalid_blocks", { status: 400 }));
+    await failure(slack.create(withSecret(), context(plain.fetch)).send("", "hello"));
+    expect(plain.calls).toHaveLength(1);
+    const gone = mockFetch(() => new Response("no_service", { status: 404 }));
+    await failure(slack.create(withSecret(), context(gone.fetch)).send("", textOf(a), { approval: a }));
+    expect(gone.calls).toHaveLength(1);
+  });
+
   it("sends no blocks for an ordinary message", async () => {
     const { fetch, calls } = mockFetch(() => new Response("ok"));
     await slack.create(withSecret(), context(fetch)).send("", "hello");
