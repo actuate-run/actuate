@@ -26,7 +26,7 @@ export default defineActuator({
 | `ctx.step.do(name, fn)` | Run `fn` once; replays and retries get the stored result |
 | `ctx.step.sleep` / `sleepUntil` | Hibernate until a time |
 | `ctx.step.waitForEvent` | Resume on a webhook, payment, inbound message or posted event |
-| `ctx.step.waitForApproval` / `waitForInput` | Resume when a person approves or answers through a signed link; `notify: "owner"` sends the link to the actuator's owner, no messaging provider needed |
+| `ctx.step.waitForApproval` / `waitForInput` | Resume when a person approves or answers through a signed link, or approves with a chat button (`via: "chat"`, with a verified `by`); `notify: "owner"` sends the link to the actuator's owner, no messaging provider needed, and `notify: { to, channel }` picks the messaging channel |
 | `ctx.db` | The actuator's own SQLite database. `batch([...])` runs statements all-or-nothing; `commitWithStep([...])` applies them with the step's completion |
 | `ctx.messaging`, `ctx.payment`, `ctx.llm`, `ctx.http` | Declared capabilities, backed by your own accounts |
 | `ctx.notifyOwner(text, { subject })` | Message the actuator's owner (email on the platform, the terminal under `actuate dev`), inside a step |

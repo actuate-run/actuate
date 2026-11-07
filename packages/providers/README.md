@@ -73,6 +73,21 @@ curl -X POST "$REPLY_URL" -H "Authorization: Bearer $CUSTOM_WEBHOOK_SECRET" -H "
 
 `signStandardWebhook` and `verifyStandardWebhook` are exported for receivers written in TypeScript (WebCrypto only, so they run in Workers).
 
+## Approval buttons
+
+A chat provider can put Approve and Reject buttons on approval messages. When `send` gets `options.approval.buttons` (`{ route, nonce }`, set only by Actuate's own approval notifications), it puts `encodeButtonPayload({ route, nonce, action })` (`ap1:<route>:<nonce>:<a|r>`, at most 47 bytes) on its buttons; the text keeps the signed links either way. Clicks come back through four optional `ProviderDefinition` members:
+
+| Member | |
+| --- | --- |
+| `parseInteraction(request, credentials, ctx?)` | Verify the request and return `{ click }` (a `ButtonClick`, from `parseButtonPayload`), `{ reply }` for a request the provider needs answered as is (a PING), or null to fall through to `parseWebhook`. Throws `WebhookVerificationError` on a bad signature. Reads the body from `request.clone()`, so `parseWebhook` still has it. |
+| `isApprover(actor, credentials)` | Whether this person may decide with a button; true when no `approvers` list is configured. |
+| `respondInteraction(click, outcome, credentials, ctx)` | The reply to send now, and an optional `after()` run once it is sent (editing the message). |
+| `routeHint(body, contentType)` | The unverified route in a raw body, for the hosted platform's tenant-level interactions URL. |
+
+Helpers in the contract, so every provider words and validates things the same way: `parseApprovers` (an `approvers` credential: IDs separated by spaces or commas, with `role:<id>` entries where the provider has roles), `isListedApprover`, `formatApprovers`, `approversCredentialField`, `clickOutcomeText` ("Approved by Alice at 14:02 UTC", "Already approved by Alice", "This request has expired or was already decided.", "You're not on the approver list for this.", "This button belongs to another actuator."), `withoutLinkLines` and `decidedMessageText` for the edited message, and `jsonReply` / `textReply`. `providerInteractions(definition, credentials)` and `providerInteractionsFromEnv(env, kind)` bind them for a runtime (`createRuntime`'s `providerInteractions`).
+
+An `approvers` list restricts buttons, not links: the signed links in the message still work for whoever holds them.
+
 `npx actuate providers` lists every provider and its variables. Adding one? Implement the contract in [`src/contract.ts`](src/contract.ts) and see [CONTRIBUTING.md](../../CONTRIBUTING.md). Guide: [Capabilities and providers](https://actuate.run/docs/concepts/capabilities/).
 
 ---
