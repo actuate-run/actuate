@@ -213,8 +213,14 @@ export const telegram: ProviderDefinition<TelegramCredentials, "messaging"> = {
     checkSecret(request, credentials);
     // A clone: on null the same request goes on to parseWebhook, which reads the body itself.
     const query = parseJson(await request.clone().text())?.callback_query;
-    const payload = parseButtonPayload(query?.data);
-    if (!query || !payload || typeof query.id !== "string" || !query.id || typeof query.from?.id !== "number") return null;
+    if (!query || typeof query !== "object") return null;
+    const payload = parseButtonPayload(query.data);
+    if (!payload || typeof query.from?.id !== "number") {
+      // Not one of our buttons (another callback, a game): still answer it, without text, so the clicker's
+      // progress bar stops. parseWebhook would ignore it anyway.
+      return typeof query.id === "string" && query.id ? { reply: jsonReply({ method: "answerCallbackQuery", callback_query_id: query.id }) } : null;
+    }
+    if (typeof query.id !== "string" || !query.id) return null;
     const m = query.message;
     // An InaccessibleMessage has date 0 and no text: the click still decides, there is just nothing to edit.
     const accessible = Boolean(m && m.date !== 0 && m.chat?.id !== undefined && typeof m.message_id === "number");

@@ -176,9 +176,11 @@ it("still turns ordinary messages into events, and never a callback query", asyn
   });
   expect(msg.status).toBe(200);
   expect(msg.body).toMatchObject({ event: "message.telegram.5551234", buffered: true });
-  // Someone else's callback data: not a click, and not a message event either.
+  // Someone else's callback data: not a click, and not a message event either, but answered so the spinner stops.
   await start({ chat: String(CHAT) });
-  expect((await click("menu:page:2", { id: 42, first_name: "Wei" })).body).toEqual({ ignored: true });
+  const other = await click("menu:page:2", { id: 42, first_name: "Wei" });
+  expect(other).toMatchObject({ status: 200, type: "application/json" });
+  expect(other.body).toEqual({ method: "answerCallbackQuery", callback_query_id: `cbq-${updateId}` });
   // A message update with a wrong secret is still refused.
   expect((await post({ message: { message_id: 8, date: 1, chat: { id: 5551234 }, text: "x" } }, "wrong")).status).toBe(401);
 }, 60_000);

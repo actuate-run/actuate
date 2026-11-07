@@ -106,7 +106,7 @@ curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
   -d allowed_updates='["message","callback_query"]'
 ```
 
-The secret token is 1-256 characters of `A-Z a-z 0-9 _ -`. Every update must carry it in `X-Telegram-Bot-Api-Secret-Token` (compared in constant time); a missing or wrong one gets 401. A `callback_query` with our payload is a click, and anything else goes on to `parseWebhook`, which never turns a callback query into a message event.
+The secret token is 1-256 characters of `A-Z a-z 0-9 _ -`. Every update must carry it in `X-Telegram-Bot-Api-Secret-Token` (compared in constant time); a missing or wrong one gets 401. A `callback_query` with our payload is a click. Any other callback query gets a bare `answerCallbackQuery` with no text, which stops the clicker's spinner. Every other update goes on to `parseWebhook`, which never turns a callback query into a message event.
 
 The click is answered in the webhook response (`{"method":"answerCallbackQuery","callback_query_id":…,"text":…}`, so no API call is made). A deciding click then edits the message through `editMessageText`: the link lines are removed, "Approved by Wei Tan at 14:02 UTC" is added, the buttons are removed and the text is plain. Other outcomes answer only the clicker. `TELEGRAM_APPROVERS` (optional) takes numeric user IDs (`42 43`), not chat IDs or @usernames. The clicker is recorded as `telegram:<user id> (<first last name or @username>)`; the name is whatever the user set.
 

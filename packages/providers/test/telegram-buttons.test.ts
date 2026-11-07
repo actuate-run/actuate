@@ -200,11 +200,22 @@ describe("telegram parseInteraction", () => {
     expect(out.click.context).toEqual({ callbackQueryId: "4382bfdwdsb323b2d9", chatId: null, messageId: null, text: "" });
   });
 
-  it("returns null for anything that isn't one of our buttons", async () => {
+  it("answers a callback query that isn't one of our buttons with a bare answerCallbackQuery", async () => {
+    const bare = { reply: { status: 200, contentType: "application/json", body: '{"method":"answerCallbackQuery","callback_query_id":"4382bfdwdsb323b2d9"}' } };
     for (const data of ["approve", `ap1:local:${NONCE}:x`, `ap1:local:${NONCE}:a `, "AP1:local:" + NONCE + ":a", 42, undefined]) {
-      await expect(telegram.parseInteraction!(withSecret(callbackUpdate(data)), interactive)).resolves.toBeNull();
+      await expect(telegram.parseInteraction!(withSecret(callbackUpdate(data)), interactive)).resolves.toEqual(bare);
     }
-    await expect(telegram.parseInteraction!(withSecret(callbackUpdate(undefined, { game_short_name: "g" })), interactive)).resolves.toBeNull();
+    await expect(telegram.parseInteraction!(withSecret(callbackUpdate(undefined, { game_short_name: "g" })), interactive)).resolves.toEqual(bare);
+    // Our payload but no usable sender: answered, never a click.
+    await expect(telegram.parseInteraction!(withSecret(callbackUpdate(`ap1:local:${NONCE}:a`, { from: { first_name: "x" } })), interactive)).resolves.toEqual(bare);
+    // Still verified first, and still nothing without a secret token.
+    await expect(telegram.parseInteraction!(withSecret(callbackUpdate("other"), "wrong"), interactive)).rejects.toBeInstanceOf(WebhookVerificationError);
+    await expect(telegram.parseInteraction!(withSecret(callbackUpdate("other")), plain)).resolves.toBeNull();
+    // No query id to answer: nothing to reply with.
+    await expect(telegram.parseInteraction!(withSecret(callbackUpdate("other", { id: undefined })), interactive)).resolves.toBeNull();
+  });
+
+  it("returns null for updates that aren't callback queries", async () => {
     const message = JSON.stringify({ update_id: 1, message: { message_id: 1, date: 1, chat: { id: 5 }, text: "hi" } });
     await expect(telegram.parseInteraction!(withSecret(message), interactive)).resolves.toBeNull();
     await expect(telegram.parseInteraction!(withSecret("not json"), interactive)).resolves.toBeNull();
