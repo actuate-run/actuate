@@ -101,12 +101,14 @@ export const SCHEMA = [
     PRIMARY KEY (run_id, pass)
   ) WITHOUT ROWID`,
   // One row per approval request that got Approve and Reject buttons (added in 0.5.0): the random nonce the
-  // buttons carry, and once a click decides, who and what. Never shown to the actuator or a run token.
+  // buttons carry, the provider that delivered them, and once a click decides, who and what. Never shown to the
+  // actuator or a run token.
   `CREATE TABLE IF NOT EXISTS _actuate_approval_buttons (
     nonce      TEXT PRIMARY KEY,
     run_id     TEXT NOT NULL,
     step       TEXT NOT NULL,
     expires_at INTEGER NOT NULL,
+    kind       TEXT,                   -- the messaging provider kind that sent it (bindButtonKind); null: none yet
     used_at    INTEGER,
     used_by    TEXT,
     decision   TEXT                    -- approved | rejected, once used
@@ -122,5 +124,8 @@ export function applySchema(sql: SqlDriver): void {
     if (!columns.has("input_key")) sql.exec(`ALTER TABLE _actuate_runs ADD COLUMN input_key TEXT`);
     // Its own index, apart from idempotency_key: a derived key is released when a new run claims it (see RunManager.start).
     sql.exec(`CREATE UNIQUE INDEX IF NOT EXISTS _actuate_runs_input ON _actuate_runs (input_key) WHERE input_key IS NOT NULL`);
+    // A buttons table from before kinds were recorded: its nonces stay unbound, so no click decides with them.
+    const buttonColumns = new Set(sql.exec(`SELECT name FROM pragma_table_info('_actuate_approval_buttons')`).map((r) => String(r.name)));
+    if (!buttonColumns.has("kind")) sql.exec(`ALTER TABLE _actuate_approval_buttons ADD COLUMN kind TEXT`);
   });
 }

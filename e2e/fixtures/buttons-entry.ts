@@ -1,7 +1,8 @@
 /**
  * A self-hosted worker with a fake chat provider that takes Approve and Reject button clicks, the way Telegram,
  * Slack and Discord do: its API is https://chat.example.test (mocked by the test), and a click is a JSON POST to
- * /providers/fakechat/webhook signed with HMAC-SHA256 of the body.
+ * /providers/fakechat/webhook signed with HMAC-SHA256 of the body. "otherchat" is the same provider under another
+ * kind, which takes clicks but sends nothing.
  */
 import { defineActuator, z, type MessagingProvider } from "@actuate/sdk";
 import { createRuntime } from "@actuate/runtime/worker";
@@ -84,6 +85,9 @@ export const fakechat: ProviderDefinition<FakeCredentials, "messaging"> = {
   },
 };
 
+/** The same provider under another kind, with no approver list: a button from fakechat must not decide through it. */
+const otherchat: ProviderDefinition<FakeCredentials, "messaging"> = { ...fakechat, kind: "otherchat", label: "Other chat" };
+
 const actuator = defineActuator({
   name: "buttons",
   description: "E2E fixture: an approval with chat buttons.",
@@ -107,7 +111,12 @@ const runtime = createRuntime(actuator, {
     messaging: fakechat.create(credentials(env), { fetch: (input, init) => fetch(input, init), webhookUrl: `${publicUrl}/providers/fakechat/webhook`, defaultReturnUrl: publicUrl }),
   }),
   providerWebhook: async (kind, request, env) => (kind === "fakechat" ? fakechat.parseWebhook!(request, credentials(env)) : null),
-  providerInteractions: (kind, env) => (kind === "fakechat" ? providerInteractions(fakechat, credentials(env)) : null),
+  providerInteractions: (kind, env) =>
+    kind === "fakechat"
+      ? providerInteractions(fakechat, credentials(env))
+      : kind === "otherchat"
+        ? providerInteractions(otherchat, { secret: String(env.FAKE_SECRET) })
+        : null,
 });
 export default runtime.worker;
 export const ActuatorObject = runtime.ActuatorObject;

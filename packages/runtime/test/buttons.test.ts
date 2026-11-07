@@ -4,7 +4,9 @@ import { defineActuator, z, type Actuator } from "@actuate/sdk";
 import {
   LOCAL_BUTTON_ROUTE,
   RunManager,
+  buttonKindOfChannel,
   chatApproverLabel,
+  clickOutcome,
   executePass,
   newButtonNonce,
   nodeSqlite,
@@ -14,6 +16,8 @@ import {
 } from "../src/index.js";
 
 const T0 = Date.parse("2026-11-07T14:00:00Z");
+/** The provider every test notifier "delivers" through, and every click comes from unless it says otherwise. */
+const kind = "telegram";
 const tokenOf = (url: string) => new URL(url).searchParams.get("token")!;
 
 /** Waits for one approval and returns what the resumed pass saw. */
@@ -42,7 +46,10 @@ function harness(actuator: Actuator = gate, opts: Partial<RunManagerOptions> & {
     now: () => now,
     consoleLogs: false,
     buttonRoute: LOCAL_BUTTON_ROUTE,
-    notifyApproval: async (r) => void approvals.push(r),
+    notifyApproval: async (r) => {
+      approvals.push(r);
+      if (r.buttons) manager.bindButtonKind(r.buttons.nonce, kind);
+    },
     scheduleWake: (w) => void wakes.push(w),
     invoke,
     ...opts,
@@ -91,6 +98,21 @@ describe("button nonces", () => {
     expect(Number((g.db.prepare(`SELECT count(*) AS n FROM _actuate_approval_buttons`).get() as { n: number }).n)).toBe(1);
   });
 
+  it("take a route set after construction, checked the same way", async () => {
+    const h = harness(gate, { buttonRoute: undefined });
+    await h.start();
+    expect(() => h.manager.setButtonRoute("has space")).toThrow(/buttonRoute must be 1-24 characters/);
+    expect(() => h.manager.setButtonRoute(42 as never)).toThrow(/buttonRoute must be a string or a function/);
+    await h.start();
+    h.manager.setButtonRoute("act_0123456789abcdef");
+    await h.start();
+    h.manager.setButtonRoute(() => "not valid!"); // a getter's answer is checked per approval: no buttons
+    await h.start();
+    h.manager.setButtonRoute(undefined);
+    await h.start();
+    expect(h.approvals.map((r) => r.buttons?.route ?? null)).toEqual([null, null, "act_0123456789abcdef", null, null]);
+  });
+
   it("are not made without a buttonRoute, and the route is checked", async () => {
     const h = harness(gate, { buttonRoute: undefined });
     await h.start();
@@ -123,9 +145,10 @@ describe("decideByButton", () => {
     const nonce = h.approvals[0]!.buttons!.nonce;
     const before = h.passes();
     h.setNow(T0 + 60_000);
-    const outcome = h.manager.decideByButton(nonce, "approve", { by });
+    const outcome = h.manager.decideByButton(nonce, "approve", { by, kind });
     // Synchronous: a plain object, not a promise, and no pass ran.
-    expect(outcome).toEqual({ status: "decided", decision: "approved", by, at: "2026-11-07T14:01:00.000Z" });
+    expect(outcome).toEqual({ status: "decided", decision: "approved", by, at: "2026-11-07T14:01:00.000Z", runId: run.runId, step: "ok" });
+    expect(clickOutcome(outcome)).toEqual({ status: "decided", decision: "approved", by, at: "2026-11-07T14:01:00.000Z" });
     expect(h.passes()).toBe(before);
     expect(h.manager.getRun(run.runId)).toMatchObject({ status: "WAITING", wakeAt: T0 + 60_000 });
     expect(h.wakes.at(-1)).toBe(T0 + 60_000);
@@ -140,16 +163,23 @@ describe("decideByButton", () => {
 
   it("rejects, and a second click (either button) is 'already' with the first decision", async () => {
     const h = harness();
-    await h.start();
+    const { run } = await h.start();
     const nonce = h.approvals[0]!.buttons!.nonce;
-    expect(h.manager.decideByButton(nonce, "reject", { by })).toMatchObject({ status: "decided", decision: "rejected" });
+    expect(h.manager.decideByButton(nonce, "reject", { by, kind })).toMatchObject({ status: "decided", decision: "rejected" });
     for (const action of ["approve", "reject"] as const) {
-      expect(h.manager.decideByButton(nonce, action, { by: "telegram:2 (Bob)" })).toEqual({ status: "already", decision: "rejected", by, at: new Date(T0).toISOString() });
+      expect(h.manager.decideByButton(nonce, action, { by: "telegram:2 (Bob)", kind })).toEqual({
+        status: "already",
+        decision: "rejected",
+        by,
+        at: new Date(T0).toISOString(),
+        runId: run.runId,
+        step: "ok",
+      });
     }
     await h.advance(0);
     expect(h.manager.listRuns()[0]).toMatchObject({ status: "COMPLETED", output: { approved: false, via: "chat", by } });
     // Still "already" once the run has completed.
-    expect(h.manager.decideByButton(nonce, "approve", { by })).toMatchObject({ status: "already", decision: "rejected" });
+    expect(h.manager.decideByButton(nonce, "approve", { by, kind })).toMatchObject({ status: "already", decision: "rejected" });
   });
 
   it("gives 'already' to two clicks racing the first", async () => {
@@ -157,8 +187,8 @@ describe("decideByButton", () => {
     await h.start();
     const nonce = h.approvals[0]!.buttons!.nonce;
     const [a, b] = await Promise.all([
-      Promise.resolve().then(() => h.manager.decideByButton(nonce, "approve", { by: "slack:U1 (A)" })),
-      Promise.resolve().then(() => h.manager.decideByButton(nonce, "reject", { by: "slack:U2 (B)" })),
+      Promise.resolve().then(() => h.manager.decideByButton(nonce, "approve", { by: "slack:U1 (A)", kind })),
+      Promise.resolve().then(() => h.manager.decideByButton(nonce, "reject", { by: "slack:U2 (B)", kind })),
     ]);
     expect([a!.status, b!.status]).toEqual(["decided", "already"]);
     expect(b).toMatchObject({ decision: "approved", by: "slack:U1 (A)" });
@@ -166,22 +196,24 @@ describe("decideByButton", () => {
 
   it("reports a decision made through a link or the dashboard as 'already'", async () => {
     const h = harness();
-    await h.start();
+    const first = await h.start();
     await h.manager.decide(tokenOf(h.approvals[0]!.rejectUrl!), { by: "Aina" });
-    expect(h.manager.decideByButton(h.approvals[0]!.buttons!.nonce, "approve", { by })).toEqual({
+    expect(h.manager.decideByButton(h.approvals[0]!.buttons!.nonce, "approve", { by, kind })).toEqual({
       status: "already",
       decision: "rejected",
       by: "Aina",
       at: new Date(T0).toISOString(),
+      runId: first.run.runId,
+      step: "ok",
     });
     // A link decision with no name typed.
     await h.start();
     await h.manager.decide(tokenOf(h.approvals[1]!.approveUrl!));
-    expect(h.manager.decideByButton(h.approvals[1]!.buttons!.nonce, "reject", { by })).toMatchObject({ status: "already", decision: "approved", by: "someone via link" });
+    expect(h.manager.decideByButton(h.approvals[1]!.buttons!.nonce, "reject", { by, kind })).toMatchObject({ status: "already", decision: "approved", by: "someone via link" });
     // The dashboard.
     const { run } = await h.start();
     await h.manager.decideDirect(run.runId, "ok", true, undefined, { by: "owner@example.com", via: "dashboard" });
-    expect(h.manager.decideByButton(h.approvals[2]!.buttons!.nonce, "reject", { by })).toMatchObject({ status: "already", decision: "approved", by: "owner@example.com" });
+    expect(h.manager.decideByButton(h.approvals[2]!.buttons!.nonce, "reject", { by, kind })).toMatchObject({ status: "already", decision: "approved", by: "owner@example.com" });
   });
 
   it("is 'expired' past the expiry, before and after the wait times out", async () => {
@@ -189,23 +221,61 @@ describe("decideByButton", () => {
     const { run } = await h.start();
     const nonce = h.approvals[0]!.buttons!.nonce;
     h.setNow(T0 + 3_600_000);
-    expect(h.manager.decideByButton(nonce, "approve", { by })).toEqual({ status: "expired" });
+    expect(h.manager.decideByButton(nonce, "approve", { by, kind })).toEqual({ status: "expired" });
     await h.advance(0);
     expect(h.manager.getRun(run.runId)).toMatchObject({ status: "COMPLETED", output: null });
-    expect(h.manager.decideByButton(nonce, "approve", { by })).toEqual({ status: "expired" });
+    expect(h.manager.decideByButton(nonce, "approve", { by, kind })).toEqual({ status: "expired" });
   });
 
   it("is 'unknown' for another nonce, a bad one, and a run that stopped waiting", async () => {
     const h = harness();
     const { run } = await h.start();
-    expect(h.manager.decideByButton(newButtonNonce(), "approve", { by })).toEqual({ status: "unknown" });
+    expect(h.manager.decideByButton(newButtonNonce(), "approve", { by, kind })).toEqual({ status: "unknown" });
     for (const bad of ["", "short", `${h.approvals[0]!.buttons!.nonce}x`, 42 as never]) {
-      expect(h.manager.decideByButton(bad, "approve", { by })).toEqual({ status: "unknown" });
+      expect(h.manager.decideByButton(bad, "approve", { by, kind })).toEqual({ status: "unknown" });
     }
-    expect(h.manager.decideByButton(h.approvals[0]!.buttons!.nonce, "maybe" as never, { by })).toEqual({ status: "unknown" });
+    expect(h.manager.decideByButton(h.approvals[0]!.buttons!.nonce, "maybe" as never, { by, kind })).toEqual({ status: "unknown" });
     h.manager.cancel(run.runId);
-    expect(h.manager.decideByButton(h.approvals[0]!.buttons!.nonce, "approve", { by })).toEqual({ status: "unknown" });
+    expect(h.manager.decideByButton(h.approvals[0]!.buttons!.nonce, "approve", { by, kind })).toEqual({ status: "unknown" });
     expect(h.db.prepare(`SELECT used_at FROM _actuate_approval_buttons`).get()).toEqual({ used_at: null });
+  });
+
+  it("decides only through the provider that delivered the buttons", async () => {
+    const h = harness();
+    const { run } = await h.start();
+    const nonce = h.approvals[0]!.buttons!.nonce;
+    expect(h.db.prepare(`SELECT kind FROM _actuate_approval_buttons`).get()).toEqual({ kind });
+    // A nonce from a Telegram message replayed through another provider (say a custom webhook's Reply URL).
+    for (const other of ["custom-webhook", "slack", "Telegram", "", undefined as never]) {
+      expect(h.manager.decideByButton(nonce, "approve", { by: "custom-webhook:mallory", kind: other })).toEqual({ status: "unknown" });
+    }
+    expect(h.db.prepare(`SELECT used_at FROM _actuate_approval_buttons`).get()).toEqual({ used_at: null });
+    expect(h.manager.decideByButton(nonce, "reject", { by, kind })).toMatchObject({ status: "decided", decision: "rejected" });
+    // Even once decided, another provider learns nothing.
+    expect(h.manager.decideByButton(nonce, "approve", { by: "slack:U1", kind: "slack" })).toEqual({ status: "unknown" });
+    expect(h.manager.decideByButton(nonce, "approve", { by, kind })).toMatchObject({ status: "already", decision: "rejected" });
+    expect(h.manager.getRun(run.runId)!.status).toBe("WAITING");
+  });
+
+  it("refuses a nonce never bound to a provider (the send failed), and binds each nonce once", async () => {
+    const approvals: ApprovalRequest[] = [];
+    const h = harness(gate, { notifyApproval: async (r) => void approvals.push(r) });
+    await h.start();
+    const nonce = approvals[0]!.buttons!.nonce;
+    expect(h.manager.decideByButton(nonce, "approve", { by, kind })).toEqual({ status: "unknown" });
+    expect(h.manager.bindButtonKind(nonce, "Bad Kind")).toBe(false);
+    expect(h.manager.bindButtonKind("short", kind)).toBe(false);
+    expect(h.manager.bindButtonKind(newButtonNonce(), kind)).toBe(false);
+    expect(h.manager.bindButtonKind(nonce, kind)).toBe(true);
+    expect(h.manager.bindButtonKind(nonce, "custom-webhook")).toBe(false); // already bound: never rebound
+    expect(h.manager.decideByButton(nonce, "approve", { by: "custom-webhook:x", kind: "custom-webhook" })).toEqual({ status: "unknown" });
+    expect(h.manager.decideByButton(nonce, "approve", { by, kind })).toMatchObject({ status: "decided" });
+  });
+
+  it("maps a receipt's channel to its provider kind", () => {
+    expect(buttonKindOfChannel("telegram")).toBe("telegram");
+    expect(buttonKindOfChannel("custom-webhook")).toBe("custom-webhook");
+    expect(buttonKindOfChannel(" Email ")).toBe("resend");
   });
 
   it("never awaits the pass: without an alarm it starts it in the background", async () => {
@@ -219,14 +289,17 @@ describe("decideByButton", () => {
       approvalUrl: "https://example.test/approve",
       consoleLogs: false,
       buttonRoute: "local",
-      notifyApproval: async (r) => void approvals.push(r),
+      notifyApproval: async (r) => {
+        approvals.push(r);
+        if (r.buttons) manager.bindButtonKind(r.buttons.nonce, kind);
+      },
       invoke: async (request, journal) => {
         if (++pass === 2) await held; // the resumed pass hangs until released
         return executePass(gate, request, { journal, config: {} });
       },
     });
     const { run } = await manager.start({ input: {}, trigger: { kind: "api" } });
-    const outcome = manager.decideByButton(approvals[0]!.buttons!.nonce, "approve", { by });
+    const outcome = manager.decideByButton(approvals[0]!.buttons!.nonce, "approve", { by, kind });
     expect(outcome).toMatchObject({ status: "decided" });
     await new Promise((r) => setTimeout(r, 10));
     expect(pass).toBe(2);
@@ -246,7 +319,10 @@ describe("decideByButton", () => {
       approvalUrl: "https://example.test/approve",
       consoleLogs: false,
       buttonRoute: "local",
-      notifyApproval: async (r) => void approvals.push(r),
+      notifyApproval: async (r) => {
+        approvals.push(r);
+        if (r.buttons) manager.bindButtonKind(r.buttons.nonce, kind);
+      },
       scheduleWake: () => {},
       invoke: async (request, journal) => {
         // This pass reads the steps, then stalls: it still sees the approval waiting.
@@ -260,7 +336,7 @@ describe("decideByButton", () => {
     const inFlight = manager.resume(run.runId);
     await new Promise((r) => setTimeout(r, 5));
     hold = false;
-    expect(manager.decideByButton(approvals[0]!.buttons!.nonce, "approve", { by })).toMatchObject({ status: "decided" });
+    expect(manager.decideByButton(approvals[0]!.buttons!.nonce, "approve", { by, kind })).toMatchObject({ status: "decided" });
     release();
     await inFlight;
     await new Promise((r) => setTimeout(r, 10));
@@ -284,7 +360,10 @@ describe("a click while a pass is in flight", () => {
       consoleLogs: false,
       now,
       buttonRoute: "local",
-      notifyApproval: async (r) => void approvals.push(r),
+      notifyApproval: async (r) => {
+        approvals.push(r);
+        if (r.buttons) manager.bindButtonKind(r.buttons.nonce, kind);
+      },
       scheduleWake: (w) => void wakes.push(w),
       invoke: async (request, journal) => {
         if (lost) await new Promise(() => {}); // the isolate went away before the queued pass ran
@@ -298,7 +377,7 @@ describe("a click while a pass is in flight", () => {
     const inFlight = manager.resume(run.runId);
     await new Promise((r) => setTimeout(r, 5));
     hold = false;
-    expect(manager.decideByButton(approvals[0]!.buttons!.nonce, "approve", { by: "telegram:1" })).toMatchObject({ status: "decided" });
+    expect(manager.decideByButton(approvals[0]!.buttons!.nonce, "approve", { by: "telegram:1", kind })).toMatchObject({ status: "decided" });
     lost = true;
     release();
     await inFlight;
@@ -342,7 +421,7 @@ describe("agent-visible output", () => {
     expect(visible).not.toContain(nonce);
     expect(visible).toContain("[nonce]");
     expect(visible).not.toMatch(/token=/);
-    h.manager.decideByButton(nonce, "approve", { by: "telegram:1 (A)" });
+    h.manager.decideByButton(nonce, "approve", { by: "telegram:1 (A)", kind });
     await h.advance(0);
     const after = JSON.stringify([h.manager.getRun(run.runId), h.manager.getSteps(run.runId), h.manager.getLogs(run.runId)]);
     expect(after).not.toContain(nonce);
@@ -456,10 +535,30 @@ describe("the _actuate_approval_buttons table", () => {
     expect(h.approvals[0]!.buttons).toBeDefined();
   });
 
+  it("gains the kind column on a database that has the table without it, whose nonces then decide nothing", async () => {
+    const db = new DatabaseSync(":memory:");
+    const old = harness(gate, { db });
+    const { run } = await old.start();
+    const nonce = old.approvals[0]!.buttons!.nonce;
+    // As a database made before kinds were recorded has the table.
+    db.exec(`DROP TABLE _actuate_approval_buttons`);
+    db.exec(`CREATE TABLE _actuate_approval_buttons (nonce TEXT PRIMARY KEY, run_id TEXT NOT NULL, step TEXT NOT NULL,
+      expires_at INTEGER NOT NULL, used_at INTEGER, used_by TEXT, decision TEXT) WITHOUT ROWID`);
+    db.prepare(`INSERT INTO _actuate_approval_buttons (nonce, run_id, step, expires_at) VALUES (?, ?, 'ok', ?)`).run(nonce, run.runId, T0 + 3_600_000);
+
+    const h = harness(gate, { db });
+    harness(gate, { db }); // opening it again changes nothing
+    const columns = (db.prepare(`SELECT name FROM pragma_table_info('_actuate_approval_buttons')`).all() as Array<{ name: string }>).map((c) => c.name);
+    expect(columns).toEqual(["nonce", "run_id", "step", "expires_at", "used_at", "used_by", "decision", "kind"]);
+    expect(h.manager.decideByButton(nonce, "approve", { by: "telegram:1", kind })).toEqual({ status: "unknown" });
+    await h.start();
+    expect(h.manager.decideByButton(h.approvals[0]!.buttons!.nonce, "approve", { by: "telegram:1", kind })).toMatchObject({ status: "decided" });
+  });
+
   it("is pruned with its runs, and of expired rows", async () => {
     const h = harness();
     const a = await h.start();
-    h.manager.decideByButton(h.approvals[0]!.buttons!.nonce, "approve", { by: "telegram:1" });
+    h.manager.decideByButton(h.approvals[0]!.buttons!.nonce, "approve", { by: "telegram:1", kind });
     await h.advance(0);
     expect(h.manager.getRun(a.run.runId)!.status).toBe("COMPLETED");
     await h.start(); // still waiting, expires at T0 + 1 hour

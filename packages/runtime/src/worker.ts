@@ -13,7 +13,7 @@ import {
   type ProviderReply,
   type Providers,
 } from "@actuate/sdk";
-import { LOCAL_BUTTON_ROUTE, chatApproverLabel } from "./buttons.js";
+import { LOCAL_BUTTON_ROUTE, buttonKindOfChannel, chatApproverLabel, clickOutcome } from "./buttons.js";
 import { RunManager, type ApprovalRequest, type RunManagerOptions, type RunStatus } from "./manager.js";
 import { executePass } from "./pass.js";
 import { createHttpProvider } from "./providers.js";
@@ -314,7 +314,9 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
       const text = `${message}\n\n${links}`;
       const messaging = this.getProviders().messaging;
       if (req.notify && messaging) {
-        await messaging.send(req.notify, text, { subject, approval: approvalPrompt(req, actuator.name), ...(req.channel ? { channel: req.channel } : {}) });
+        const receipt = await messaging.send(req.notify, text, { subject, approval: approvalPrompt(req, actuator.name), ...(req.channel ? { channel: req.channel } : {}) });
+        // Only the provider that delivered the buttons may decide with them (see decideByButton).
+        if (req.buttons && typeof receipt?.channel === "string") this.manager.bindButtonKind(req.buttons.nonce, buttonKindOfChannel(receipt.channel));
       }
       else console.log(`\n🔐  [approval requested] ${text}\n`);
     }
@@ -546,7 +548,8 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
     /**
      * A button click or a reply the provider needs, or null for the ordinary webhook path. A click's route must be
      * "local", its clicker on the provider's approver list; then decideByButton decides without waiting for the
-     * run, the provider builds the reply, and its follow-up (an edit through the API) runs after the response.
+     * run (only with a nonce this provider delivered: notifyApproval binds it after the send), the provider builds
+     * the reply, and its follow-up (an edit through the API) runs after the response.
      */
     private async interaction(kind: string, interactions: ProviderInteractions, request: Request): Promise<Response | null> {
       const parsed = await interactions.parse(request);
@@ -556,7 +559,7 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
       let outcome: ClickOutcome;
       if (click.route !== LOCAL_BUTTON_ROUTE) outcome = { status: "foreign" };
       else if (!interactions.isApprover(click.actor)) outcome = { status: "not-approver" };
-      else outcome = this.manager.decideByButton(click.nonce, click.action, { by: chatApproverLabel(kind, click.actor) });
+      else outcome = clickOutcome(this.manager.decideByButton(click.nonce, click.action, { by: chatApproverLabel(kind, click.actor), kind: interactions.kind }));
       // The decision is committed by now: a failure below must not answer 500 (the provider would retry the
       // click). Never log the error itself: a provider's reply or follow-up may hold a response_url or a token.
       const errorName = (err: unknown) => (err instanceof Error ? err.name : typeof err);

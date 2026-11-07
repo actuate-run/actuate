@@ -44,9 +44,9 @@ const start = async (input: Record<string, string>) =>
   (await (await mf.dispatchFetch(`${local}/run`, { method: "POST", body: JSON.stringify(input) })).json()) as any;
 const getRun = async (runId: string) => (await (await mf.dispatchFetch(`${local}/runs/${runId}`)).json()) as any;
 
-async function click(callback: string, from: { id: string; name?: string }, opts: { sign?: string } = {}) {
+async function click(callback: string, from: { id: string; name?: string }, opts: { sign?: string; via?: string } = {}) {
   const body = JSON.stringify({ callback, from, message: { id: "m1", text: sent.at(-1)!.text } });
-  const res = await mf.dispatchFetch(hook, {
+  const res = await mf.dispatchFetch(opts.via ?? hook, {
     method: "POST",
     headers: { "content-type": "application/json", "x-fake-signature": opts.sign ?? (await hmacSha256Hex(SECRET, body)) },
     body,
@@ -85,6 +85,10 @@ it("resumes the run on a signed approver click, and refuses the rest", async () 
   expect((await click(approve!.replace(":local:", ":act_0123456789abcdef:"), { id: "42" })).body).toEqual({ text: "This button belongs to another actuator." });
   // An unknown nonce.
   expect((await click(`ap1:local:${"A".repeat(16)}:a`, { id: "42" })).body).toEqual({ text: "This request has expired or was already decided." });
+  // The same button replayed through another provider (no approver list there): decides nothing.
+  expect((await click(approve!, { id: "999", name: "Mallory" }, { via: `${local}/providers/otherchat/webhook` })).body).toEqual({
+    text: "This request has expired or was already decided.",
+  });
   expect((await getRun(run.runId)).status).toBe("WAITING");
 
   // The approver: decided at once (the reply doesn't wait for the run), then the alarm resumes it.

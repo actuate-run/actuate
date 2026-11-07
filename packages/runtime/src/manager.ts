@@ -1,5 +1,5 @@
 import { NOTIFY_OWNER, type DbStatement, type Json, type NotifyOwnerResult, type Row, type SqlValue, type Trigger, type WaitForApprovalOptions } from "@actuate/sdk";
-import { isButtonNonce, isButtonRoute, newButtonNonce, type ButtonDecision } from "./buttons.js";
+import { isButtonKind, isButtonNonce, isButtonRoute, newButtonNonce, type ButtonDecision } from "./buttons.js";
 import {
   fromJson,
   toJson,
@@ -72,7 +72,8 @@ export interface ApprovalRequest {
   /**
    * Approvals with a `notify` other than "owner", when the manager has a `buttonRoute`: the button nonce, for
    * `MessagingSendOptions.approval.buttons`. Only the messaging send may carry it: never log it or show it to the
-   * actuator, a run token or a receipt.
+   * actuator, a run token or a receipt. Once the send succeeds, call `bindButtonKind(nonce, kind)` with the
+   * provider that sent it: until then no click decides with the nonce.
    */
   buttons?: { route: string; nonce: string };
 }
@@ -179,10 +180,22 @@ export class RunManager {
   constructor(private readonly options: RunManagerOptions) {
     this.sql = options.sql;
     this.now = options.now ?? Date.now;
-    if (typeof options.buttonRoute === "string" && !isButtonRoute(options.buttonRoute)) {
+    this.setButtonRoute(options.buttonRoute);
+    applySchema(this.sql);
+  }
+
+  /**
+   * Set or change `buttonRoute` after construction (say, once the host knows the actuator's ID), validated the
+   * same way: a string must be 1-24 characters of `[A-Za-z0-9_-]` (otherwise this throws and nothing changes);
+   * a getter's answer is checked per approval, and an invalid one means no buttons; undefined turns buttons off.
+   * Set it this way rather than by changing `options.buttonRoute`.
+   */
+  setButtonRoute(route: string | (() => string | undefined) | undefined): void {
+    if (typeof route === "string" && !isButtonRoute(route)) {
       throw new Error("RunManager buttonRoute must be 1-24 characters of A-Z, a-z, 0-9, _ and -");
     }
-    applySchema(this.sql);
+    if (route !== undefined && typeof route !== "string" && typeof route !== "function") throw new Error("RunManager buttonRoute must be a string or a function");
+    this.options.buttonRoute = route;
   }
 
   // ---------------------------------------------------------------- runs
@@ -414,8 +427,26 @@ export class RunManager {
   }
 
   /**
+   * Record which messaging provider delivered an approval's buttons: call it once the notifier's send succeeded,
+   * with the provider's kind (`buttonKindOfChannel(receipt.channel)`). Only a click through that provider can
+   * decide with the nonce; a nonce never bound (the send failed) decides nothing. True when it was bound now;
+   * false for a nonce that is unknown, already bound or used, or a malformed kind.
+   */
+  bindButtonKind(nonce: string, kind: string): boolean {
+    if (!isButtonNonce(nonce) || !isButtonKind(kind)) return false;
+    const bound = this.sql.exec(
+      `UPDATE _actuate_approval_buttons SET kind = ? WHERE nonce = ? AND kind IS NULL AND used_at IS NULL RETURNING nonce`,
+      [kind, nonce],
+    );
+    return bound.length > 0;
+  }
+
+  /**
    * Apply a verified Approve or Reject button click. The caller has already checked the provider's signature,
-   * the button's route and the approver list; `actor.by` is the verified label (`chatApproverLabel`).
+   * the button's route and the approver list; `actor.by` is the verified label (`chatApproverLabel`) and
+   * `actor.kind` the kind of the provider that verified the click. A nonce bound to another provider, or never
+   * bound (`bindButtonKind`), is "unknown": a nonce sent through a channel with a strict approver list can't be
+   * replayed through one with a looser list.
    *
    * Synchronous, and never waits for the run: it checks the nonce, its expiry and that the step still waits,
    * marks the nonce used and completes the wait (`{ approved, at, by, via: "chat" }`) in one transaction, then
@@ -426,28 +457,33 @@ export class RunManager {
    * by a link, the dashboard or the API gets "already" with that decision; "expired" once the request expired or
    * timed out; "unknown" for any other nonce, and once the run is no longer waiting (cancelled).
    */
-  decideByButton(nonce: string, action: "approve" | "reject", actor: { by: string }): ButtonDecision {
-    if (!isButtonNonce(nonce) || (action !== "approve" && action !== "reject")) return { status: "unknown" };
+  decideByButton(nonce: string, action: "approve" | "reject", actor: { by: string; kind: string }): ButtonDecision {
+    if (!isButtonNonce(nonce) || (action !== "approve" && action !== "reject") || !isButtonKind(actor?.kind)) return { status: "unknown" };
     const now = this.now();
     const by = whoFields({ by: actor?.by, via: "chat" }).by ?? "chat:unknown";
     let resume: string | null = null;
     // No await in here: on a Durable Object nothing else runs in between, and the transaction makes the
     // check-and-mark atomic for other drivers too.
     const outcome = this.sql.transaction((): ButtonDecision => {
-      const row = this.sql.exec(`SELECT run_id, step, expires_at, used_at, used_by, decision FROM _actuate_approval_buttons WHERE nonce = ?`, [nonce])[0];
-      if (!row) return { status: "unknown" };
+      const row = this.sql.exec(`SELECT run_id, step, expires_at, kind, used_at, used_by, decision FROM _actuate_approval_buttons WHERE nonce = ?`, [
+        nonce,
+      ])[0];
+      // Before anything else, so a click through another provider learns nothing, not even "already".
+      if (!row || row.kind !== actor.kind) return { status: "unknown" };
+      const runId = String(row.run_id);
+      const step = String(row.step);
       if (row.used_at !== null && row.used_at !== undefined) {
         return {
           status: "already",
           decision: row.decision === "rejected" ? "rejected" : "approved",
           by: String(row.used_by ?? "someone"),
           at: new Date(Number(row.used_at)).toISOString(),
+          runId,
+          step,
         };
       }
-      const runId = String(row.run_id);
-      const step = String(row.step);
       const stepRow = this.sql.exec(`SELECT status, output_json FROM _actuate_steps WHERE run_id = ? AND step_name = ?`, [runId, step])[0];
-      if (stepRow?.status === "COMPLETED") return decidedElsewhere((stepRow.output_json as string | null) ?? null);
+      if (stepRow?.status === "COMPLETED") return decidedElsewhere((stepRow.output_json as string | null) ?? null, runId, step);
       const run = this.sql.exec(`SELECT status FROM _actuate_runs WHERE run_id = ?`, [runId])[0];
       if (stepRow?.status !== "WAITING_APPROVAL" || (run?.status !== "WAITING" && run?.status !== "RUNNING")) return { status: "unknown" };
       if (now >= Number(row.expires_at)) return { status: "expired" };
@@ -461,7 +497,7 @@ export class RunManager {
       this.completeWait(runId, step, { approved: action === "approve", at, by, via: "chat" });
       this.sql.exec(`UPDATE _actuate_runs SET wake_at = ?, updated_at = ? WHERE run_id = ? AND status = 'WAITING'`, [now, now, runId]);
       resume = runId;
-      return { status: "decided", decision, by, at };
+      return { status: "decided", decision, by, at, runId, step };
     });
     if (resume) this.resumeSoon(resume, now);
     return outcome;
@@ -1008,7 +1044,7 @@ function withoutLinks(text: string, request: ApprovalRequest): string {
 }
 
 /** A waiting step's result as the click on its button sees it: decided before (with that decision), timed out, or neither. */
-function decidedElsewhere(outputJson: string | null): ButtonDecision {
+function decidedElsewhere(outputJson: string | null, runId: string, step: string): ButtonDecision {
   const result = fromJson<{ approved?: unknown; at?: unknown; by?: unknown; via?: unknown } | null>(outputJson);
   if (result === null) return { status: "expired" }; // timed out
   if (!result || typeof result !== "object" || typeof result.approved !== "boolean") return { status: "unknown" };
@@ -1018,6 +1054,8 @@ function decidedElsewhere(outputJson: string | null): ButtonDecision {
     decision: result.approved ? "approved" : "rejected",
     by: typeof result.by === "string" && result.by ? result.by : `someone via ${via}`,
     at: typeof result.at === "string" ? result.at : "",
+    runId,
+    step,
   };
 }
 
