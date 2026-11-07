@@ -100,6 +100,18 @@ export const SCHEMA = [
     lines_json TEXT NOT NULL,
     PRIMARY KEY (run_id, pass)
   ) WITHOUT ROWID`,
+  // One row per approval request that got Approve and Reject buttons (added in 0.5.0): the random nonce the
+  // buttons carry, and once a click decides, who and what. Never shown to the actuator or a run token.
+  `CREATE TABLE IF NOT EXISTS _actuate_approval_buttons (
+    nonce      TEXT PRIMARY KEY,
+    run_id     TEXT NOT NULL,
+    step       TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at    INTEGER,
+    used_by    TEXT,
+    decision   TEXT                    -- approved | rejected, once used
+  ) WITHOUT ROWID`,
+  `CREATE INDEX IF NOT EXISTS _actuate_approval_buttons_run ON _actuate_approval_buttons (run_id)`,
 ];
 
 export function applySchema(sql: SqlDriver): void {

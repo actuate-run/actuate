@@ -4,6 +4,7 @@ export { executePass, StepFailedError, DEFAULT_APPROVAL_TIMEOUT, type PassDepend
 export * from "./providers.js";
 export * from "./sql.js";
 export * from "./tokens.js";
+export * from "./buttons.js";
 export * from "./node-sqlite.js";
 export { collectSecrets, redactSecrets, secretFields, secretPaths, omitSecrets, mergeSecrets, SECRET_PLACEHOLDER, MIN_SECRET_LENGTH } from "./secrets.js";
 export { approvalPage, toCsv, type LinkInfo } from "./http-util.js";

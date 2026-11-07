@@ -1,4 +1,5 @@
 import type { DbStatement, Json, NotifyOwnerResult, Row, SqlValue, Trigger, WaitForApprovalOptions } from "@actuate/sdk";
+import { isButtonNonce, isButtonRoute, newButtonNonce, type ButtonDecision } from "./buttons.js";
 import {
   fromJson,
   toJson,
@@ -10,7 +11,7 @@ import {
   type SerializedError,
   type StepRow,
 } from "./journal.js";
-import { approvalEventKey } from "./pass.js";
+import { approvalEventKey, notifyTarget } from "./pass.js";
 import { INPUT_KEY_COMPLETED_TTL_MS } from "./run-key.js";
 import { redactSecrets } from "./secrets.js";
 import { applySchema, type SqlDriver } from "./sql.js";
@@ -57,12 +58,23 @@ export interface ApprovalRequest {
   kind: "approval" | "input";
   /** The approval message, or the question for input. */
   message?: string;
-  /** The step's `notify`: a messaging recipient, or `"owner"` for the actuator's owner (see `WaitForApprovalOptions.notify`). */
+  /**
+   * The step's `notify` recipient: a messaging recipient, or `"owner"` for the actuator's owner (see
+   * `WaitForApprovalOptions.notify`). For `notify: { to, channel }` this is `to`, and `channel` is set.
+   */
   notify?: string;
+  /** The messaging channel `notify: { to, channel }` named: pass it to `messaging.send` as `options.channel`. Never set with "owner". */
+  channel?: string;
   approveUrl?: string;
   rejectUrl?: string;
   answerUrl?: string;
   expiresAt: number;
+  /**
+   * Approvals with `notify`, when the manager has a `buttonRoute`: the button nonce, for
+   * `MessagingSendOptions.approval.buttons`. Only the messaging send may carry it: never log it or show it to the
+   * actuator, a run token or a receipt.
+   */
+  buttons?: { route: string; nonce: string };
 }
 
 /** Executes one pass of a run. In-process for the single-tenant runtime; an RPC into a child isolate on the platform. */
@@ -81,6 +93,12 @@ export interface RunManagerOptions {
    * the reason is logged on the run as a warning, and the step waits all the same. Never put the links in `reason`.
    */
   notifyApproval?: (request: ApprovalRequest) => Promise<void | NotifyOwnerResult>;
+  /**
+   * The route Approve and Reject buttons carry, so a click finds this actuator: `"local"` self-hosted
+   * (`LOCAL_BUTTON_ROUTE`), the actuator ID on the hosted platform. 1-24 characters of `[A-Za-z0-9_-]`. Unset: no
+   * button nonces are made, and approval notifications carry only links.
+   */
+  buttonRoute?: string;
   /** Called whenever the earliest wake time changes, so the host can set its alarm. */
   scheduleWake?: (wakeAt: number | null) => void | Promise<void>;
   now?: () => number;
@@ -119,7 +137,7 @@ export interface RunManagerOptions {
 /** Who made a human decision, and through what. */
 export interface Who {
   by?: string;
-  via: "link" | "dashboard" | "api";
+  via: "link" | "dashboard" | "api" | "chat";
 }
 
 function whoFields(who: Who): { by?: string; via: Who["via"] } {
@@ -158,6 +176,9 @@ export class RunManager {
   constructor(private readonly options: RunManagerOptions) {
     this.sql = options.sql;
     this.now = options.now ?? Date.now;
+    if (options.buttonRoute !== undefined && !isButtonRoute(options.buttonRoute)) {
+      throw new Error("RunManager buttonRoute must be 1-24 characters of A-Z, a-z, 0-9, _ and -");
+    }
     applySchema(this.sql);
   }
 
@@ -386,6 +407,75 @@ export class RunManager {
     return { ok: true, runId, step, approved };
   }
 
+  /**
+   * Apply a verified Approve or Reject button click. The caller has already checked the provider's signature,
+   * the button's route and the approver list; `actor.by` is the verified label (`chatApproverLabel`).
+   *
+   * Synchronous, and never waits for the run: it checks the nonce, its expiry and that the step still waits,
+   * marks the nonce used and completes the wait (`{ approved, at, by, via: "chat" }`) in one transaction, then
+   * sets the run due now and calls `scheduleWake`, so the next pass runs from the alarm (without `scheduleWake`,
+   * the pass is started and not awaited). A provider's 3-second reply deadline is never spent on a pass.
+   *
+   * A second click, or one racing the first, gets "already" with the first decision; a click on a step decided
+   * by a link, the dashboard or the API gets "already" with that decision; "expired" once the request expired or
+   * timed out; "unknown" for any other nonce, and once the run is no longer waiting (cancelled).
+   */
+  decideByButton(nonce: string, action: "approve" | "reject", actor: { by: string }): ButtonDecision {
+    if (!isButtonNonce(nonce) || (action !== "approve" && action !== "reject")) return { status: "unknown" };
+    const now = this.now();
+    const by = whoFields({ by: actor?.by, via: "chat" }).by ?? "chat:unknown";
+    let resume: string | null = null;
+    // No await in here: on a Durable Object nothing else runs in between, and the transaction makes the
+    // check-and-mark atomic for other drivers too.
+    const outcome = this.sql.transaction((): ButtonDecision => {
+      const row = this.sql.exec(`SELECT run_id, step, expires_at, used_at, used_by, decision FROM _actuate_approval_buttons WHERE nonce = ?`, [nonce])[0];
+      if (!row) return { status: "unknown" };
+      if (row.used_at !== null && row.used_at !== undefined) {
+        return {
+          status: "already",
+          decision: row.decision === "rejected" ? "rejected" : "approved",
+          by: String(row.used_by ?? "someone"),
+          at: new Date(Number(row.used_at)).toISOString(),
+        };
+      }
+      const runId = String(row.run_id);
+      const step = String(row.step);
+      const stepRow = this.sql.exec(`SELECT status, output_json FROM _actuate_steps WHERE run_id = ? AND step_name = ?`, [runId, step])[0];
+      if (stepRow?.status === "COMPLETED") return decidedElsewhere((stepRow.output_json as string | null) ?? null);
+      const run = this.sql.exec(`SELECT status FROM _actuate_runs WHERE run_id = ?`, [runId])[0];
+      if (stepRow?.status !== "WAITING_APPROVAL" || (run?.status !== "WAITING" && run?.status !== "RUNNING")) return { status: "unknown" };
+      if (now >= Number(row.expires_at)) return { status: "expired" };
+      const decision = action === "approve" ? "approved" : "rejected";
+      const marked = this.sql.exec(
+        `UPDATE _actuate_approval_buttons SET used_at = ?, used_by = ?, decision = ? WHERE nonce = ? AND used_at IS NULL RETURNING nonce`,
+        [now, by, decision, nonce],
+      );
+      if (marked.length === 0) return { status: "unknown" };
+      const at = new Date(now).toISOString();
+      this.completeWait(runId, step, { approved: action === "approve", at, by, via: "chat" });
+      this.sql.exec(`UPDATE _actuate_runs SET wake_at = ?, updated_at = ? WHERE run_id = ? AND status = 'WAITING'`, [now, now, runId]);
+      resume = runId;
+      return { status: "decided", decision, by, at };
+    });
+    if (resume) this.resumeSoon(resume, now);
+    return outcome;
+  }
+
+  /** Have the run's next pass start soon, without waiting for it: from the alarm, or (no alarm) in the background. */
+  private resumeSoon(runId: string, now: number): void {
+    const schedule = this.options.scheduleWake;
+    // A pass already in flight read the step before it was decided, and settles without its wake time: queue another.
+    if (!schedule || this.locks.has(runId)) void this.execute(runId);
+    if (!schedule) return;
+    const failed = (err: unknown) => console.error(`[actuate] could not schedule run ${runId} after a button decision`, err);
+    try {
+      const pending = schedule(Math.min(now, this.nextWakeAt() ?? now));
+      if (pending && typeof (pending as Promise<void>).then === "function") (pending as Promise<void>).catch(failed);
+    } catch (err) {
+      failed(err);
+    }
+  }
+
   /** Answer a step waiting in waitForInput. */
   async answerDirect(
     runId: string,
@@ -447,6 +537,8 @@ export class RunManager {
    * User tables are never touched. Returns how many runs were removed.
    */
   pruneRuns(before: number, limit = 500): number {
+    // Button nonces past their expiry decide nothing any more, whatever their run's state.
+    this.sql.exec(`DELETE FROM _actuate_approval_buttons WHERE expires_at < ?`, [Math.min(before, this.now())]);
     const ids = this.sql
       .exec(`SELECT run_id FROM _actuate_runs WHERE status IN ('COMPLETED','FAILED','CANCELLED') AND updated_at < ? LIMIT ?`, [before, limit])
       .map((r) => String(r.run_id));
@@ -455,6 +547,7 @@ export class RunManager {
       for (const id of ids) {
         this.sql.exec(`DELETE FROM _actuate_steps WHERE run_id = ?`, [id]);
         this.sql.exec(`DELETE FROM _actuate_logs WHERE run_id = ?`, [id]);
+        this.sql.exec(`DELETE FROM _actuate_approval_buttons WHERE run_id = ?`, [id]);
         this.sql.exec(`DELETE FROM _actuate_runs WHERE run_id = ?`, [id]);
       }
     });
@@ -652,6 +745,9 @@ export class RunManager {
   ): Promise<void> {
     const kind = opts.kind ?? "approval";
     const links = await this.signedLinks(runId, step, opts.expiresAt, kind);
+    // The pass checks `notify` too; this is the host's own check, since on the platform the pass is the tenant's code.
+    const target = notifyTarget(opts.notify);
+    const notify = "error" in target ? {} : target;
     const request: ApprovalRequest = {
       runId,
       step,
@@ -660,13 +756,27 @@ export class RunManager {
       expiresAt: opts.expiresAt,
       // The approver may not be the owner: they see the message, not the secrets in it.
       ...(opts.message ? { message: this.redact(opts.message) } : {}),
-      ...(opts.notify ? { notify: opts.notify } : {}),
+      ...(notify.to ? { notify: notify.to } : {}),
+      ...(notify.channel ? { channel: notify.channel } : {}),
     };
+    // Approve and Reject buttons, for a request that goes out: a random single-use nonce, kept here and handed to
+    // the notifier only. Questions (kind "input") get no nonce: their button is the answer link.
+    if (kind === "approval" && request.notify && this.options.buttonRoute) {
+      const nonce = newButtonNonce();
+      const added = this.sql.exec(
+        `INSERT INTO _actuate_approval_buttons (nonce, run_id, step, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT (nonce) DO NOTHING RETURNING nonce`,
+        [nonce, runId, step, opts.expiresAt],
+      );
+      if (added.length) request.buttons = { route: this.options.buttonRoute, nonce };
+    }
     // Never log the links: run logs are readable by anything holding a run token (e.g. the agent being gated).
     await this.writeLog(runId, "info", kind === "input" ? `Input requested for "${step}"` : `Approval requested for "${step}"`, {
       step,
       expiresAt: opts.expiresAt,
     });
+    if ("error" in target) {
+      await this.writeLog(runId, "warn", `${kind === "input" ? "Input link" : "Approval links"} for "${step}" not sent: ${target.error}`, { step });
+    }
     try {
       const result = await this.options.notifyApproval?.(request);
       if (result && result.sent === false) {
@@ -871,6 +981,7 @@ function toRunRecord(row: Row): RunRecord {
  */
 function withoutLinks(text: string, request: ApprovalRequest): string {
   let out = String(text);
+  if (request.buttons) out = out.split(request.buttons.nonce).join("[nonce]");
   for (const url of [request.approveUrl, request.rejectUrl, request.answerUrl]) {
     if (!url) continue;
     out = out.split(url).join("[link]");
@@ -880,6 +991,20 @@ function withoutLinks(text: string, request: ApprovalRequest): string {
   return out.replace(/[^\s"'<>()]*[?&]token=[^\s"'<>()&]*/gi, "[link]");
 }
 
+/** A waiting step's result as the click on its button sees it: decided before (with that decision), timed out, or neither. */
+function decidedElsewhere(outputJson: string | null): ButtonDecision {
+  const result = fromJson<{ approved?: unknown; at?: unknown; by?: unknown; via?: unknown } | null>(outputJson);
+  if (result === null) return { status: "expired" }; // timed out
+  if (!result || typeof result !== "object" || typeof result.approved !== "boolean") return { status: "unknown" };
+  const via = typeof result.via === "string" ? result.via : "link";
+  return {
+    status: "already",
+    decision: result.approved ? "approved" : "rejected",
+    by: typeof result.by === "string" && result.by ? result.by : `someone via ${via}`,
+    at: typeof result.at === "string" ? result.at : "",
+  };
+}
+
 /** Time-sortable, URL-safe run ID: `run_` + 12 hex chars of ms timestamp + 16 random hex chars. */
 export function newRunId(now = Date.now()): string {
   const rand = new Uint8Array(8);
@@ -887,4 +1012,4 @@ export function newRunId(now = Date.now()): string {
   return `run_${now.toString(16).padStart(12, "0")}${[...rand].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
-export { approvalEventKey };
+export { approvalEventKey, notifyTarget };

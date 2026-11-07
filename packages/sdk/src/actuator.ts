@@ -110,6 +110,12 @@ export interface WaitForEventOptions {
  */
 export const NOTIFY_OWNER = "owner";
 
+/**
+ * Who a `waitForApproval` or `waitForInput` notifies: a messaging recipient, `"owner"` (reserved, see
+ * {@link NOTIFY_OWNER}), or a recipient on a named messaging channel.
+ */
+export type Notify = string | { to: string; channel?: string };
+
 export interface WaitForInputOptions {
   /** The question shown on the form. */
   prompt: string;
@@ -122,8 +128,13 @@ export interface WaitForInputOptions {
    * another agent); self-hosted, the `notifyOwner` notifier given to `createRuntime`, else the worker's console;
    * under `actuate dev`, the terminal. When it can't go out (a daily cap reached), the step still waits, the
    * request is in the approval queue, and the run's log gets a warning.
+   *
+   * `{ to, channel }` picks the messaging channel that sends it when several are configured ("telegram",
+   * "slack", "discord", ...; see `MessagingSendOptions.channel`), e.g. `{ to: "C0123", channel: "slack" }`.
+   * Without `channel`, the default (first) channel sends. A channel that isn't configured is logged on the run
+   * as a delivery error, and the step still waits. `"owner"` can't be given as `to`: use the string `"owner"`.
    */
-  notify?: string;
+  notify?: Notify;
   /** Pre-filled text, e.g. a draft to edit. */
   initial?: string;
   /** Longest answer accepted, characters. Default 4,000. */
@@ -154,8 +165,16 @@ export interface WaitForApprovalOptions {
    * another agent); self-hosted, the `notifyOwner` notifier given to `createRuntime`, else the worker's console;
    * under `actuate dev`, the terminal. When they can't go out (a daily cap reached), the step still waits, the
    * approval is in the approval queue, and the run's log gets a warning.
+   *
+   * `{ to, channel }` picks the messaging channel that sends it when several are configured ("telegram",
+   * "slack", "discord", ...; see `MessagingSendOptions.channel`), e.g. `{ to: "C0123", channel: "slack" }`.
+   * Without `channel`, the default (first) channel sends. A channel that isn't configured is logged on the run
+   * as a delivery error, and the step still waits. `"owner"` can't be given as `to`: use the string `"owner"`.
+   *
+   * Telegram, Slack and Discord can show Approve and Reject buttons on the message when their credentials allow
+   * it; the links stay in the text too. A button decision comes back with `via: "chat"` and a verified `by`.
    */
-  notify?: string;
+  notify?: Notify;
   /** Give up after this long and resolve to `null`. Default "7 days". */
   timeout?: Duration;
 }
