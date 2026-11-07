@@ -17,7 +17,11 @@ export interface MessagingSendOptions {
    * Default "text".
    */
   format?: "text" | "html";
-  /** Which configured channel sends, when several are: "telegram", "whatsapp", "slack", "discord", "custom-webhook" or "email". Default: the first configured. */
+  /**
+   * Which configured channel sends, when several are: "telegram", "whatsapp", "slack", "discord", "custom-webhook" or
+   * "email". Default: the first configured. A channel that isn't configured is refused with an error, even when
+   * only one channel is.
+   */
   channel?: string;
   /** Email subject, when the channel is email. A custom webhook sends it too (`subject`, `{{subject}}`, or a Title header). */
   subject?: string;

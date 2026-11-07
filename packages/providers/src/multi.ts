@@ -6,13 +6,13 @@ export function channelName(kind: string): string {
 }
 
 /**
- * One `ctx.messaging` over several configured providers. `send(..., { channel })` picks one by
+ * One `ctx.messaging` over the configured providers. `send(..., { channel })` picks one by
  * channel name ("telegram", "whatsapp", "slack", "discord", "custom-webhook", "email") or kind ("resend"); without
- * `channel`, the first (the default) sends.
+ * `channel`, the first (the default) sends. A channel that isn't configured is refused, even when only one
+ * provider is: a recipient meant for one channel is never sent through another.
  */
 export function combineMessaging(entries: Array<{ kind: string; provider: MessagingProvider }>): MessagingProvider {
   if (entries.length === 0) throw new Error("combineMessaging needs at least one provider");
-  if (entries.length === 1) return entries[0]!.provider;
   return {
     send(to: string, text: string, options?: MessagingSendOptions) {
       const wanted = options?.channel?.trim().toLowerCase();

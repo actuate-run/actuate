@@ -111,8 +111,9 @@ export async function parseProviderWebhookFromEnv(
 }
 
 /**
- * A provider's button-click handling bound to its credentials, or null when the provider takes no clicks
- * (no `parseInteraction` or `respondInteraction`). A provider without `isApprover` lets everyone decide.
+ * A provider's button-click handling bound to its credentials, or null when the provider takes no clicks: it
+ * needs `parseInteraction`, `isApprover` and `respondInteraction` all three, so a provider never fails open by
+ * leaving out the approver check (its own `isApprover` says true when no list is configured).
  */
 export function providerInteractions<C>(
   definition: ProviderDefinition<C, ProviderCapability>,
@@ -120,13 +121,13 @@ export function providerInteractions<C>(
   fetchImpl: typeof fetch = fetch,
 ): ProviderInteractions | null {
   const { parseInteraction, respondInteraction, isApprover } = definition;
-  if (!parseInteraction || !respondInteraction) return null;
+  if (!parseInteraction || !respondInteraction || !isApprover) return null;
   // Called unbound: workerd's fetch throws "Illegal invocation" when called as a method of another object.
   const ctx = { fetch: ((input, init) => fetchImpl(input, init)) as typeof fetch };
   return {
     kind: definition.kind,
     parse: (request) => parseInteraction.call(definition, request, credentials, ctx),
-    isApprover: (actor) => (isApprover ? isApprover.call(definition, actor, credentials) : true),
+    isApprover: (actor) => isApprover.call(definition, actor, credentials),
     respond: (click, outcome) => respondInteraction.call(definition, click, outcome, credentials, ctx),
   };
 }

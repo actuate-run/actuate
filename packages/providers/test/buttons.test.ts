@@ -166,7 +166,9 @@ describe("providerInteractions", () => {
     expect(bound.isApprover({ id: "me" })).toBe(true);
     expect(bound.isApprover({ id: "you" })).toBe(false);
     expect(bound.respond({} as never, { status: "foreign" }).reply).toEqual({ status: 200, body: "foreign" });
-    expect(providerInteractions({ ...def, isApprover: undefined }, {})!.isApprover({ id: "you" })).toBe(true);
+    // All three or none: leaving out the approver check never fails open.
+    expect(providerInteractions({ ...def, isApprover: undefined }, {})).toBeNull();
+    expect(providerInteractions({ ...def, respondInteraction: undefined }, {})).toBeNull();
     expect(providerInteractions({ ...def, parseInteraction: undefined }, {})).toBeNull();
   });
 });

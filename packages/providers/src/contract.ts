@@ -65,7 +65,9 @@ export interface ProviderDefinition<C = unknown, K extends ProviderCapability = 
   handshake?(request: Request, credentials: C): string | null;
 
   // ---------------------------------------------------------------- interactive approval buttons
-  // Optional, all four together for a chat provider that takes button clicks. Rendering is send()'s job: when
+  // Optional. A chat provider that takes button clicks implements parseInteraction, isApprover and
+  // respondInteraction all three (without any one of them, `providerInteractions` treats it as taking no clicks);
+  // routeHint too, for the hosted platform's interactions URL. Rendering is send()'s job: when
   // `options.approval.buttons` is set and the credentials allow interactive buttons, put
   // `encodeButtonPayload({ ...options.approval.buttons, action })` on an Approve and a Reject button; otherwise
   // (no buttons, or credentials that can't receive clicks) render link buttons to `approveUrl` / `rejectUrl`
