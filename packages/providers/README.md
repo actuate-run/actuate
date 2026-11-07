@@ -110,6 +110,34 @@ The secret token is 1-256 characters of `A-Z a-z 0-9 _ -`. Every update must car
 
 The click is answered in the webhook response (`{"method":"answerCallbackQuery","callback_query_id":…,"text":…}`, so no API call is made). A deciding click then edits the message through `editMessageText`: the link lines are removed, "Approved by Wei Tan at 14:02 UTC" is added, the buttons are removed and the text is plain. Other outcomes answer only the clicker. `TELEGRAM_APPROVERS` (optional) takes numeric user IDs (`42 43`), not chat IDs or @usernames. The clicker is recorded as `telegram:<user id> (<first last name or @username>)`; the name is whatever the user set.
 
+### Slack
+
+Approvals and questions go out as Block Kit: a section with the message (links included), then an actions block. `text` stays the same, links and all, as the notification fallback. This works with the incoming webhook URL or the bot token.
+
+- **With `signingSecret`** (`SLACK_SIGNING_SECRET`): interactive **Approve** (primary) and **Reject** (danger) buttons, with action IDs `actuate_approve` and `actuate_reject` and the button payload in `value`.
+- **Without it**, or with no button nonce: url buttons that open the confirm pages.
+- **Questions** (`waitForInput`) get an **Answer** url button.
+- **Limits:** a url longer than Slack's 3000 characters gets no button, and a message longer than 3000 characters is split over several sections.
+
+Setup, in a Slack app used only by Actuate (an app has one Request URL):
+
+1. Under **Basic Information**, copy the **Signing Secret** into `signingSecret`.
+2. Under **Interactivity & Shortcuts**, turn interactivity on. Set the Request URL to the interactions URL (self-hosted: `https://<your actuator>/providers/slack/webhook`).
+3. Optionally, set `approvers` (`SLACK_APPROVERS`): member IDs (`U…` or `W…`, from profile, ⋯, **Copy member ID**), separated by spaces or commas. Without it, anyone in the channel can click.
+
+A click is checked before anything is decided:
+
+- `parseInteraction` verifies `X-Slack-Signature`: the `v0=` HMAC-SHA256 of `v0:<X-Slack-Request-Timestamp>:<raw body>`, compared in constant time. A timestamp more than 5 minutes off fails, and a failed check is a 401. The body is read from `request.clone()`.
+- A `block_actions` payload carrying one of our button values becomes a click, from `user.id` with the name from `user.name` or `user.username`, so `by` reads `slack:U01ABC (alice)`.
+- Any other `block_actions`, such as a url-button click, gets Slack's required ack. Anything else is null.
+
+The reply to every click is an empty 200, sent within Slack's 3 seconds. After it, a follow-up posts to the click's `response_url` (only `hooks.slack.com` or `hooks.slack-gov.com`):
+
+- **A decision** replaces the message (`replace_original: true`) with the text minus its link lines, plus "Approved by alice at 14:02 UTC". The buttons are removed.
+- **Anything else** is an ephemeral note only the clicker sees (`response_type: "ephemeral"`, `replace_original: false`), such as "Already approved by alice".
+
+Nothing logs or returns the `response_url`.
+
 ### Discord
 
 | Variable | |
