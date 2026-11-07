@@ -2,12 +2,14 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebhookVerificationError } from "../src/contract.js";
 import {
+  clickOutcomeText,
   combineMessaging,
   configuredFromEnv,
   customWebhook,
   envVarsFor,
   parseProviderWebhookFromEnv,
   ProviderApiError,
+  providerInteractionsFromEnv,
   providersFromEnv,
   signStandardWebhook,
   telegram,
@@ -130,6 +132,7 @@ describe("custom-webhook credentials", () => {
       ["format", false, true],
       ["template", false, true],
       ["approvalTemplate", false, true],
+      ["approvers", false, true],
     ]);
     const field = (key: string) => customWebhook.credentialFields.find((f) => f.key === key)!;
     expect(field("secret").generate).toBe("whsec");
@@ -589,6 +592,207 @@ describe("custom-webhook replies", () => {
   });
 });
 
+describe("custom-webhook decisions", () => {
+  const NONCE = "AbCdEfGhIjKl-_09";
+  const APPROVE = `ap1:local:${NONCE}:a`;
+  const REJECT = `ap1:local:${NONCE}:r`;
+  const approval = {
+    kind: "approval" as const,
+    actuator: "refund_order",
+    step: "manager-ok",
+    message: "Refund RM 20?",
+    approveUrl: "https://bot.example.org/approve?token=aaa",
+    rejectUrl: "https://bot.example.org/approve?token=rrr",
+    expiresAt: Date.UTC(2026, 10, 13, 12),
+    buttons: { route: "local", nonce: NONCE },
+  };
+  const text = "Refund RM 20?\n\nApprove: https://bot.example.org/approve?token=aaa\nReject: https://bot.example.org/approve?token=rrr";
+  const creds = parse({ secret: SECRET });
+  const post = (body: unknown, headers: Record<string, string> = {}, url = REPLY_URL) =>
+    new Request(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: typeof body === "string" ? body : JSON.stringify(body) });
+  const bearer = { authorization: `Bearer ${SECRET}` };
+  const decide = (body: unknown, headers: Record<string, string> = bearer, c = creds) => customWebhook.parseInteraction!(post(body, headers), c);
+
+  it("puts approval.decide in the standard body only for an approval with buttons and a signing secret", async () => {
+    const { call } = await sendOnce({ secret: SECRET }, "me", text, { approval });
+    const body = JSON.parse(call.body);
+    expect(body.approval).toEqual({
+      kind: "approval",
+      actuator: "refund_order",
+      step: "manager-ok",
+      message: "Refund RM 20?",
+      approveUrl: approval.approveUrl,
+      rejectUrl: approval.rejectUrl,
+      expiresAt: "2026-11-13T12:00:00.000Z",
+      decide: { approve: APPROVE, reject: REJECT, url: REPLY_URL },
+    });
+    expect(body.text).toBe(text);
+    // The nonce itself never travels bare.
+    expect(body.approval).not.toHaveProperty("buttons");
+    // No secret: nowhere to post a decision, so no decide.
+    expect(JSON.parse((await sendOnce({}, "me", text, { approval })).call.body).approval).not.toHaveProperty("decide");
+    // No buttons (no nonce made): no decide.
+    const { buttons: _, ...plain } = approval;
+    expect(JSON.parse((await sendOnce({ secret: SECRET }, "me", text, { approval: plain })).call.body).approval).not.toHaveProperty("decide");
+    // No reply URL from the host: no decide either.
+    const { fetch, calls } = mockFetch(json({}));
+    await customWebhook.create(parse({ secret: SECRET }), { ...context(fetch), webhookUrl: "" }).send("me", text, { approval });
+    expect(JSON.parse(calls[0]!.body).approval).not.toHaveProperty("decide");
+    // Questions never get one.
+    const input = { kind: "input" as const, actuator: "a", step: "why", answerUrl: "https://bot.example.org/approve?token=q", expiresAt: 0, buttons: approval.buttons };
+    expect(JSON.parse((await sendOnce({ secret: SECRET }, "me", "Why?", { approval: input as never })).call.body).approval).not.toHaveProperty("decide");
+    // A malformed nonce: no decide, the send still goes out with its links.
+    const bad = { ...approval, buttons: { route: "local", nonce: "short" } };
+    expect(JSON.parse((await sendOnce({ secret: SECRET }, "me", text, { approval: bad })).call.body).approval).not.toHaveProperty("decide");
+  });
+
+  it("fills {{approvePayload}} and {{rejectPayload}}, JSON-escaped, empty otherwise", async () => {
+    const template = '{"t":"{{text}}","a":"{{approvePayload}}","r":"{{ rejectPayload }}","u":"{{replyUrl}}"}';
+    expect(JSON.parse((await sendOnce({ template, secret: SECRET }, "me", text, { approval })).call.body)).toEqual({ t: text, a: APPROVE, r: REJECT, u: REPLY_URL });
+    expect(JSON.parse((await sendOnce({ template }, "me", text, { approval })).call.body)).toEqual({ t: text, a: "", r: "", u: "" });
+    expect(JSON.parse((await sendOnce({ template, secret: SECRET }, "me", "hi")).call.body)).toEqual({ t: "hi", a: "", r: "", u: REPLY_URL });
+    const approvalTemplate = '{"yes":"{{approveUrl}}","decideYes":"{{approvePayload}}","decideNo":"{{rejectPayload}}"}';
+    expect(JSON.parse((await sendOnce({ approvalTemplate, secret: SECRET }, "me", text, { approval })).call.body)).toEqual({
+      yes: approval.approveUrl,
+      decideYes: APPROVE,
+      decideNo: REJECT,
+    });
+  });
+
+  it("validates the new placeholders like the others", () => {
+    expect(() => parse({ format: "template", template: '{"a":"{{approvePayload}}","r":"{{rejectPayload}}"}' })).not.toThrow();
+    expect(problem({ url: URL_, format: "template", template: '{"a":{{approvePayload}}}' })).toMatch(/each placeholder inside a JSON string/);
+    expect(problem({ url: URL_, format: "template", template: '{"a":"{{approvepayload}}"}' })).toMatch(/unknown placeholder \{\{approvepayload\}\}.*\{\{approvePayload\}\}, \{\{rejectPayload\}\}/);
+    // The payloads are not links: an approval template still needs the links (or the text that holds them).
+    expect(problem({ url: URL_, approvalTemplate: '{"a":"{{approvePayload}}","r":"{{rejectPayload}}"}' })).toMatch(/approvalTemplate must use \{\{approveUrl\}\}/);
+  });
+
+  it("parses approvers: free-form IDs separated by spaces or commas", () => {
+    expect(parse({ approvers: " alice, U123  bob@example.com " })).toMatchObject({ approvers: "alice, U123  bob@example.com" });
+    expect(parse({ approvers: "  " }).approvers).toBeUndefined();
+    expect(problem({ url: URL_, approvers: `ok ${"x".repeat(129)}` })).toMatch(/^Invalid Custom webhook credentials: approvers: approvers must be the IDs your receiver sends as by\.id/);
+    const c = parse({ secret: SECRET, approvers: "alice,bob" });
+    expect(customWebhook.isApprover!({ id: "alice" }, c)).toBe(true);
+    expect(customWebhook.isApprover!({ id: "mallory", name: "alice" }, c)).toBe(false);
+    expect(customWebhook.isApprover!({ id: "anyone" }, creds)).toBe(true);
+  });
+
+  it("turns a decision into a click, with the actor the receiver asserts", async () => {
+    expect(await decide({ decision: APPROVE, by: { id: " alice ", name: " Alice Tan " } })).toEqual({
+      click: { route: "local", nonce: NONCE, action: "approve", actor: { id: "alice", name: "Alice Tan" }, context: {} },
+    });
+    expect(await decide({ decision: REJECT, by: { id: 60123456789 } })).toEqual({
+      click: { route: "local", nonce: NONCE, action: "reject", actor: { id: "60123456789" }, context: {} },
+    });
+    expect(await decide({ decision: APPROVE, by: { id: "x".repeat(128), name: "n".repeat(128) } })).toMatchObject({ click: { actor: { id: "x".repeat(128) } } });
+    expect(await decide({ decision: APPROVE, by: { id: "a", name: "" } })).toMatchObject({ click: { actor: { id: "a" } } });
+  });
+
+  it("leaves the request readable for parseWebhook", async () => {
+    const request = post({ from: "me", text: "yes" }, bearer);
+    expect(await customWebhook.parseInteraction!(request, creds)).toBeNull();
+    expect(await customWebhook.parseWebhook!(request, creds)).toMatchObject({ event: "message.custom-webhook.me" });
+  });
+
+  it.each([
+    ["no by", { decision: APPROVE }],
+    ["by as a string", { decision: APPROVE, by: "alice" }],
+    ["by as an array", { decision: APPROVE, by: ["alice"] }],
+    ["no id", { decision: APPROVE, by: { name: "Alice" } }],
+    ["an empty id", { decision: APPROVE, by: { id: "   " } }],
+    ["an id too long", { decision: APPROVE, by: { id: "x".repeat(129) } }],
+    ["an id with a space", { decision: APPROVE, by: { id: "al ice" } }],
+    ["an id with a comma", { decision: APPROVE, by: { id: "al,ice" } }],
+    ["an object id", { decision: APPROVE, by: { id: { x: 1 } } }],
+    ["a name too long", { decision: APPROVE, by: { id: "a", name: "n".repeat(129) } }],
+    ["a name that isn't a string", { decision: APPROVE, by: { id: "a", name: 7 } }],
+  ])("answers 400 for %s", async (_, body) => {
+    const out = await decide(body);
+    expect(out).toEqual({ reply: { status: 400, contentType: "application/json", body: expect.any(String) } });
+    const reply = JSON.parse((out as { reply: { body: string } }).reply.body);
+    expect(reply).toEqual({ status: "invalid", message: expect.stringMatching(/^by must be an object with an id/) });
+  });
+
+  it("answers 400 for a decision that isn't one of the payloads", async () => {
+    for (const decision of ["approve", `${APPROVE} `, APPROVE.toUpperCase(), 1, null, { a: 1 }]) {
+      const out = (await decide({ decision, by: { id: "a" } })) as { reply: { status: number; body: string } };
+      expect(out.reply.status).toBe(400);
+      expect(JSON.parse(out.reply.body)).toEqual({ status: "invalid", message: expect.stringMatching(/^decision must be approval\.decide\.approve/) });
+    }
+  });
+
+  it("authenticates exactly like replies", async () => {
+    const body = JSON.stringify({ decision: APPROVE, by: { id: "alice" } });
+    // Bearer, any case.
+    expect(await decide(body, { authorization: `bearer  ${SECRET}` })).toHaveProperty("click");
+    // A Standard Webhooks signature.
+    const at = Math.floor(Date.now() / 1000);
+    const signature = await signStandardWebhook(SECRET, "msg_d", at, body);
+    expect(await decide(body, { "webhook-id": "msg_d", "webhook-timestamp": String(at), "webhook-signature": signature })).toHaveProperty("click");
+    const refused = async (request: Request, message: RegExp) => {
+      const err = await failure(customWebhook.parseInteraction!(request, creds));
+      expect(err).toBeInstanceOf(WebhookVerificationError);
+      expect(err.message).toMatch(message);
+      expect(err.message).not.toContain(SECRET);
+    };
+    await refused(post(body), /not authorized/);
+    await refused(post(body, { authorization: "Bearer wrong" }), /not authorized/);
+    await refused(post(body, { "webhook-id": "msg_d", "webhook-timestamp": String(at), "webhook-signature": "v1,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }), /signature check failed/);
+    await refused(post(body, { "webhook-id": "msg_d", "webhook-timestamp": String(at - 301), "webhook-signature": await signStandardWebhook(SECRET, "msg_d", at - 301, body) }), /more than 5 minutes/);
+    // Never ?secret=, even the right one.
+    await refused(post(body, {}, `${REPLY_URL}?secret=${encodeURIComponent(SECRET)}`), /not authorized/);
+    // Bad auth is refused even for a body that isn't a decision.
+    await refused(post({ from: "me" }, { authorization: "Bearer wrong" }), /not authorized/);
+  });
+
+  it("is off without a signing secret, and ignores bodies that aren't decisions", async () => {
+    expect(await decide({ decision: APPROVE, by: { id: "a" } }, bearer, parse({}))).toBeNull();
+    for (const body of [{ from: "me", text: "yes" }, "not json", "[1]", "null", "{}"]) expect(await decide(body)).toBeNull();
+    expect(await customWebhook.parseInteraction!(new Request(REPLY_URL, { headers: bearer }), creds)).toBeNull();
+  });
+
+  it("reads the route from the decision, unverified", () => {
+    expect(customWebhook.routeHint!(JSON.stringify({ decision: "ap1:act_0123456789abcdef:" + NONCE + ":r" }), "application/json")).toBe("act_0123456789abcdef");
+    expect(customWebhook.routeHint!(JSON.stringify({ decision: APPROVE, by: { id: "a" } }), null)).toBe("local");
+    for (const body of ["", "nope", "[]", "null", JSON.stringify({ from: "me" }), JSON.stringify({ decision: "x" })]) expect(customWebhook.routeHint!(body, "application/json")).toBeNull();
+  });
+
+  it("answers each outcome with JSON for the receiver's UI, without links or the payload", () => {
+    const click = { route: "local", nonce: NONCE, action: "approve" as const, actor: { id: "alice" }, context: {} };
+    const at = "2026-11-07T14:02:09.000Z";
+    const outcomes = [
+      [{ status: "decided", decision: "approved", by: "custom-webhook:alice (Alice)", at }, "Approved by Alice at 14:02 UTC"],
+      [{ status: "decided", decision: "rejected", by: "custom-webhook:alice", at }, "Rejected by custom-webhook:alice at 14:02 UTC"],
+      [{ status: "already", decision: "approved", by: "custom-webhook:bob (Bob)", at }, "Already approved by Bob"],
+      [{ status: "expired" }, "This request has expired or was already decided."],
+      [{ status: "unknown" }, "This request has expired or was already decided."],
+      [{ status: "not-approver" }, "You're not on the approver list for this."],
+      [{ status: "foreign" }, "This button belongs to another actuator."],
+    ] as const;
+    for (const [outcome, message] of outcomes) {
+      const out = customWebhook.respondInteraction!(click, outcome, creds, { fetch: globalThis.fetch });
+      expect(out).not.toHaveProperty("after");
+      expect(out.reply).toMatchObject({ status: 200, contentType: "application/json" });
+      const body = JSON.parse(out.reply.body);
+      expect(body.message).toBe(message);
+      expect(body.message).toBe(clickOutcomeText(outcome));
+      if ("decision" in outcome) expect(body).toEqual({ status: outcome.status, decision: outcome.decision, by: outcome.by, at, message });
+      else expect(body).toEqual({ status: outcome.status, message });
+      expect(out.reply.body).not.toContain(NONCE);
+      expect(out.reply.body).not.toMatch(/https?:/);
+    }
+  });
+
+  it("is bound from environment variables like the other chat providers", async () => {
+    const env = { ACTUATE_MESSAGING: "custom-webhook", CUSTOM_WEBHOOK_URL: URL_, CUSTOM_WEBHOOK_SECRET: SECRET, CUSTOM_WEBHOOK_APPROVERS: "alice" };
+    const interactions = providerInteractionsFromEnv(env, "custom-webhook")!;
+    expect(interactions.kind).toBe("custom-webhook");
+    expect(await interactions.parse(post({ decision: APPROVE, by: { id: "alice" } }, bearer))).toHaveProperty("click");
+    expect(interactions.isApprover({ id: "alice" })).toBe(true);
+    expect(interactions.isApprover({ id: "bob" })).toBe(false);
+  });
+});
+
 describe("custom-webhook from environment variables", () => {
   const env = {
     ACTUATE_MESSAGING: "custom-webhook",
@@ -607,6 +811,7 @@ describe("custom-webhook from environment variables", () => {
       ["CUSTOM_WEBHOOK_FORMAT", true],
       ["CUSTOM_WEBHOOK_TEMPLATE", true],
       ["CUSTOM_WEBHOOK_APPROVAL_TEMPLATE", true],
+      ["CUSTOM_WEBHOOK_APPROVERS", true],
     ]);
     expect(configuredFromEnv(env)[0]).toMatchObject({ capability: "messaging", credentials: { url: URL_, secret: SECRET, format: "template" } });
     const { fetch, calls } = mockFetch(json({}));

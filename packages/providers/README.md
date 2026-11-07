@@ -35,7 +35,8 @@ const reply = await ctx.step.waitForEvent("reply", { event: "message.custom-webh
 | `CUSTOM_WEBHOOK_HEADERS` | Optional extra headers, one `Name: value` per line (at most 20), e.g. `Authorization: Bearer ...`, `X-Gotify-Key: ...`. `Host`, `Content-Length`, `Transfer-Encoding`, `Connection` and `webhook-*` are refused. |
 | `CUSTOM_WEBHOOK_FORMAT` | `standard`, `text` or `template`. Leave empty for automatic: `template` when a JSON template is set, otherwise `standard`. |
 | `CUSTOM_WEBHOOK_TEMPLATE` | JSON for the `template` format, with `{{text}}`, `{{html}}`, `{{subject}}`, `{{to}}`, `{{id}}`, `{{replyUrl}}` inside JSON strings (and the approval placeholders below, empty on ordinary messages). |
-| `CUSTOM_WEBHOOK_APPROVAL_TEMPLATE` | Optional JSON used instead, whatever the format, for approval requests only (`waitForApproval` with `notify`): the same placeholders plus `{{approveUrl}}`, `{{rejectUrl}}` and `{{expiresAt}}` (ISO 8601). It must use at least one of `{{approveUrl}}`, `{{rejectUrl}}` or `{{text}}` (the text holds the links), so the links always reach the receiver. Questions (`waitForInput`) use the body format, where `{{answerUrl}}` and the standard body's `approval.answerUrl` carry the answer link. Without it, approvals use the body format too. |
+| `CUSTOM_WEBHOOK_APPROVAL_TEMPLATE` | Optional JSON used instead, whatever the format, for approval requests only (`waitForApproval` with `notify`): the same placeholders plus `{{approveUrl}}`, `{{rejectUrl}}` and `{{expiresAt}}` (ISO 8601). It must use at least one of `{{approveUrl}}`, `{{rejectUrl}}` or `{{text}}` (the text holds the links), so the links always reach the receiver. Questions (`waitForInput`) use the body format, where `{{answerUrl}}` and the standard body's `approval.answerUrl` carry the answer link. Without it, approvals use the body format too. Approval templates and JSON templates also take `{{approvePayload}}` and `{{rejectPayload}}` (see "Deciding from the receiver"; empty without a signing secret). |
+| `CUSTOM_WEBHOOK_APPROVERS` | Optional. The `by.id` values allowed to decide from the receiver (see below), separated by spaces or commas; up to 128 characters each, no spaces or commas. Empty: any `by.id` your receiver sends. Restricts decisions posted to the Reply URL only: the signed links still work for whoever holds them. |
 
 Body formats:
 
@@ -43,7 +44,7 @@ Body formats:
 - `text`: the plain text as `text/plain`, with the subject as a `Title` header (ntfy).
 - `template`: your JSON with the placeholders filled in, JSON-escaped. Google Chat, Mattermost and Rocket.Chat take `{"text":"{{text}}"}`; Gotify `{"title":"{{subject}}","message":"{{text}}"}`; Apprise `{"title":"{{subject}}","body":"{{text}}"}`.
 
-Approval and input requests carry an `approval` object in the `standard` body: `{ "kind": "approval" | "input", "actuator", "step", "message"?, "approveUrl", "rejectUrl" }` (or `"answerUrl"` for input), and `"expiresAt"` in ISO 8601. `text` still holds the message and the links. Only Actuate's approval notifications set it: the runtime drops `approval` from sends made by actuator code. The links open Actuate's confirm page, where the decision is made (opening a link decides nothing, so link previews are harmless). Send approvals only to a receiver that shows them to a person: a link is all it takes to decide.
+Approval and input requests carry an `approval` object in the `standard` body: `{ "kind": "approval" | "input", "actuator", "step", "message"?, "approveUrl", "rejectUrl" }` (or `"answerUrl"` for input), `"expiresAt"` in ISO 8601, and with a signing secret, on approvals, `"decide": { "approve", "reject", "url" }` (below). `text` still holds the message and the links. Only Actuate's approval notifications set it: the runtime drops `approval` from sends made by actuator code. The links open Actuate's confirm page, where the decision is made (opening a link decides nothing, so link previews are harmless). Send approvals only to a receiver that shows them to a person: a link is all it takes to decide.
 
 Approval templates for chat apps whose incoming webhooks show cards with link buttons:
 
@@ -70,6 +71,29 @@ Replies are a POST to the reply URL (`/providers/custom-webhook/webhook`) with J
 ```sh
 curl -X POST "$REPLY_URL" -H "Authorization: Bearer $CUSTOM_WEBHOOK_SECRET" -H "content-type: application/json" -d '{"from":"me","text":"yes"}'
 ```
+
+### Deciding from the receiver
+
+With a signing secret, your receiver can decide an approval itself, say from Approve and Reject buttons in its own UI, without opening a link. The approval's `approval.decide` holds two opaque values, `approve` and `reject` (`ap1:...`, at most 47 characters; also `{{approvePayload}}` and `{{rejectPayload}}` in templates), and `url`, the Reply URL. To decide, POST one of them back to the Reply URL with the same auth as a reply (`Authorization: Bearer <secret>` or a Standard Webhooks signature, never `?secret=`), naming the person who decided:
+
+```sh
+curl -X POST "$REPLY_URL" -H "Authorization: Bearer $CUSTOM_WEBHOOK_SECRET" -H "content-type: application/json" \
+  -d '{"decision":"ap1:local:...:a","by":{"id":"alice","name":"Alice Tan"}}'
+```
+
+`by.id` is required (1 to 128 characters, no spaces or commas), `by.name` optional (at most 128). The answer is always JSON:
+
+| Status | Body |
+| --- | --- |
+| 200 | `{ "status": "decided", "decision": "approved" \| "rejected", "by": "custom-webhook:alice (Alice Tan)", "at": "<ISO 8601>", "message": "Approved by Alice Tan at 14:02 UTC" }` |
+| 200 | `{ "status": "already", "decision", "by", "at", "message": "Already approved by Alice Tan" }`: decided before (by another decision, a link or the dashboard) |
+| 200 | `{ "status": "expired" \| "unknown", "message": "This request has expired or was already decided." }` |
+| 200 | `{ "status": "not-approver", "message": "You're not on the approver list for this." }` (`by.id` isn't in `CUSTOM_WEBHOOK_APPROVERS`) |
+| 200 | `{ "status": "foreign", "message": "This button belongs to another actuator." }` |
+| 400 | `{ "status": "invalid", "message" }`: a `decision` that isn't one of the two values, or a missing or malformed `by` |
+| 401 | Bad or missing auth |
+
+Show `message` to the person, or use `status` and `decision` to update your own UI; the reply never holds a link or the payload. The run resumes with `{ approved, at, by: "custom-webhook:<id> (<name>)", via: "chat" }`. **`by` is what your receiver asserts:** Actuate checks the secret, so it knows the request came from your receiver, but it can't check who the person was. Only let your receiver decide for people it has authenticated itself, and keep the secret on your server. A body without `decision` is an ordinary reply. `notify: "owner"` never goes to a custom webhook, so the owner's approvals can't be decided this way.
 
 `signStandardWebhook` and `verifyStandardWebhook` are exported for receivers written in TypeScript (WebCrypto only, so they run in Workers).
 

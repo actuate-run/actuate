@@ -1,6 +1,19 @@
 // Signing follows Standard Webhooks: https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md
 import { z } from "zod";
-import { WebhookVerificationError, timingSafeEqual, type ProviderDefinition } from "./contract.js";
+import {
+  WebhookVerificationError,
+  approversCredentialField,
+  clickOutcomeText,
+  encodeButtonPayload,
+  isListedApprover,
+  jsonReply,
+  parseApprovers,
+  parseButtonPayload,
+  timingSafeEqual,
+  type ButtonActor,
+  type ProviderDefinition,
+  type ProviderReply,
+} from "./contract.js";
 import type { ApprovalPrompt, InboundMessage, MessagingProvider } from "@actuate/sdk";
 import { signStandardWebhook, standardWebhookKey, verifyStandardWebhook } from "./standard-webhooks.js";
 import { describeErrorBody, htmlToText, idempotencyNonce, messageEvent, optionalString, parseWith, ProviderApiError } from "./util.js";
@@ -13,11 +26,18 @@ const MAX_HEADER_LINES = 20;
 const MAX_TEMPLATE_LENGTH = 16 * 1024;
 const MAX_ERROR_DETAIL = 500;
 const MAX_TITLE_LENGTH = 1024;
+/** Longest `by.id` and `by.name` in a decision. */
+const MAX_ACTOR_LENGTH = 128;
+// An approver ID is whatever the receiver sends as `by.id`: no whitespace, commas (the list's separators) or control characters.
+// eslint-disable-next-line no-control-regex
+const ACTOR_ID = /^[^\s,\u0000-\u001f\u007f]{1,128}$/;
+const APPROVER_RULES = { provider: PROVIDER, user: ACTOR_ID, userHint: "the IDs your receiver sends as by.id (up to 128 characters, no spaces or commas)" };
 
 export const CUSTOM_WEBHOOK_FORMATS = ["standard", "text", "template"] as const;
 export type CustomWebhookFormat = (typeof CUSTOM_WEBHOOK_FORMATS)[number];
-// The approval ones are filled on approval and input notifications (MessagingSendOptions.approval) and empty otherwise.
-const PLACEHOLDERS = ["text", "html", "subject", "to", "id", "replyUrl", "approveUrl", "rejectUrl", "answerUrl", "expiresAt"] as const;
+// The approval ones are filled on approval and input notifications (MessagingSendOptions.approval) and empty otherwise;
+// approvePayload and rejectPayload only on approvals that can be decided by POSTing to the reply URL (see decideOf).
+const PLACEHOLDERS = ["text", "html", "subject", "to", "id", "replyUrl", "approveUrl", "rejectUrl", "answerUrl", "expiresAt", "approvePayload", "rejectPayload"] as const;
 type Placeholder = (typeof PLACEHOLDERS)[number];
 const PLACEHOLDER = /\{\{([^{}]*)\}\}/g;
 
@@ -118,6 +138,7 @@ const schema = z
       .transform((v) => v as CustomWebhookFormat | undefined),
     template: optionalString(),
     approvalTemplate: optionalString(),
+    approvers: optionalString(),
   })
   .superRefine((c, ctx) => {
     const url = urlProblem(c.url);
@@ -129,6 +150,13 @@ const schema = z
     if (formatOf(c) === "template") {
       const problem = c.template ? templateProblem(c.template) : "template is required when format is template";
       if (problem) ctx.addIssue({ code: "custom", path: ["template"], message: problem });
+    }
+    if (c.approvers) {
+      try {
+        parseApprovers(c.approvers, APPROVER_RULES);
+      } catch (err) {
+        ctx.addIssue({ code: "custom", path: ["approvers"], message: (err as Error).message.replace(/^Invalid .*? credentials: /, "") });
+      }
     }
     if (c.approvalTemplate) {
       const used = new Set([...c.approvalTemplate.matchAll(PLACEHOLDER)].map(([, raw]) => raw!.trim()));
@@ -243,7 +271,7 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
       secret: false,
       optional: true,
       multiline: true,
-      help: 'For the template format. Placeholders go inside JSON strings: {"text":"{{text}}"}. Also {{subject}}, {{html}}, {{to}}, {{id}}, {{replyUrl}}, and on approval and input requests {{approveUrl}}, {{rejectUrl}}, {{answerUrl}}, {{expiresAt}} (empty otherwise).',
+      help: 'For the template format. Placeholders go inside JSON strings: {"text":"{{text}}"}. Also {{subject}}, {{html}}, {{to}}, {{id}}, {{replyUrl}}, and on approval and input requests {{approveUrl}}, {{rejectUrl}}, {{answerUrl}}, {{expiresAt}}, plus {{approvePayload}} and {{rejectPayload}} on approvals when a signing secret is set (empty otherwise).',
     },
     {
       key: "approvalTemplate",
@@ -251,8 +279,11 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
       secret: false,
       optional: true,
       multiline: true,
-      help: 'Used for approval requests only; questions use the body format. E.g. a card with Approve and Reject buttons: {{approveUrl}}, {{rejectUrl}}, {{expiresAt}}, plus the JSON template\'s placeholders. Empty: approvals use the body format above.',
+      help: 'Used for approval requests only; questions use the body format. E.g. a card with Approve and Reject buttons: {{approveUrl}}, {{rejectUrl}}, {{expiresAt}}, {{approvePayload}}, {{rejectPayload}}, plus the JSON template\'s placeholders. Empty: approvals use the body format above.',
     },
+    approversCredentialField(
+      "Who may decide by POSTing a decision to the Reply URL: the by.id values your receiver sends, separated by spaces or commas. Empty: anyone your receiver lets decide. Your receiver vouches for by; the approval links still work for whoever holds them.",
+    ),
   ],
   parseCredentials: (input) => parseWith(PROVIDER, schema, input),
   create(credentials, ctx): MessagingProvider {
@@ -275,7 +306,8 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
         const html = options?.format === "html" ? text : undefined;
         const plain = html !== undefined ? htmlToText(text) : text;
         const subject = options?.subject;
-        const approval = approvalOf(options?.approval);
+        const decide = decideOf(options?.approval, replyUrl);
+        const approval = approvalOf(options?.approval, decide);
         const values = (): Record<Placeholder, string> => ({
           text: plain,
           html: html ?? "",
@@ -287,6 +319,8 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
           rejectUrl: approval?.rejectUrl ?? "",
           answerUrl: approval?.answerUrl ?? "",
           expiresAt: approval?.expiresAt ?? "",
+          approvePayload: decide?.approve ?? "",
+          rejectPayload: decide?.reject ?? "",
         });
         const headers = new Headers();
         let body: string;
@@ -359,17 +393,7 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
     // Without a secret anyone who learns the reply URL could post fake replies, so inbound needs one.
     if (!credentials.secret || request.method !== "POST") return null;
     const raw = await request.text();
-    // Either a bearer token (simplest, for curl) or a Standard Webhooks signature (for senders that sign).
-    // Never ?secret=: a secret in the URL ends up in proxy, sender and request logs.
-    const auth = /^Bearer\s+(.+)$/i.exec(request.headers.get("authorization") ?? "")?.[1]?.trim();
-    const bearerOk = auth !== undefined && timingSafeEqual(auth, credentials.secret);
-    if (!bearerOk) {
-      if (!request.headers.has("webhook-signature")) {
-        throw new WebhookVerificationError("Custom webhook reply not authorized: send Authorization: Bearer <signing secret> or a Standard Webhooks signature");
-      }
-      const check = await verifyStandardWebhook(credentials.secret, request.headers, raw);
-      if (!check.ok) throw new WebhookVerificationError(`Custom webhook signature check failed: ${check.reason}`);
-    }
+    await authenticate(request.headers, raw, credentials.secret);
     let body: CustomWebhookReply;
     try {
       body = JSON.parse(raw) as CustomWebhookReply;
@@ -393,10 +417,82 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
     };
     return { event: messageEvent("custom-webhook", from), payload: { ...message } };
   },
+  // A decision is a POST to the same Reply URL, with the same auth as a reply, whose JSON has a `decision`.
+  // The body is read from a clone, so a request without `decision` reaches parseWebhook untouched.
+  routeHint(body) {
+    const parsed = parseMaybeJson(body);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parseButtonPayload((parsed as { decision?: unknown }).decision)?.route ?? null;
+  },
+  async parseInteraction(request, credentials) {
+    if (!credentials.secret || request.method !== "POST") return null;
+    const raw = await request.clone().text();
+    await authenticate(request.headers, raw, credentials.secret);
+    const body = parseMaybeJson(raw);
+    if (!body || typeof body !== "object" || Array.isArray(body) || !("decision" in body)) return null;
+    const { decision, by } = body as { decision?: unknown; by?: unknown };
+    const payload = parseButtonPayload(decision);
+    if (!payload) return { reply: invalid("decision must be approval.decide.approve or approval.decide.reject from the message, unchanged") };
+    const actor = actorOf(by);
+    if (typeof actor === "string") return { reply: invalid(actor) };
+    return { click: { ...payload, actor, context: {} } };
+  },
+  isApprover: (actor, credentials) => isListedApprover(parseApprovers(credentials.approvers, APPROVER_RULES), actor),
+  respondInteraction(_click, outcome) {
+    // For the receiver to update its own UI: what happened and who decided, never a link or the payload.
+    const decided = outcome.status === "decided" || outcome.status === "already" ? { decision: outcome.decision, by: outcome.by, at: outcome.at } : {};
+    return { reply: jsonReply({ status: outcome.status, ...decided, message: clickOutcomeText(outcome) }) };
+  },
 };
 
+/**
+ * Check a reply's or decision's auth: a bearer token (simplest, for curl) or a Standard Webhooks signature (for
+ * senders that sign). Never ?secret=: a secret in the URL ends up in proxy, sender and request logs.
+ */
+async function authenticate(headers: Headers, raw: string, secret: string): Promise<void> {
+  const auth = /^Bearer\s+(.+)$/i.exec(headers.get("authorization") ?? "")?.[1]?.trim();
+  if (auth !== undefined && timingSafeEqual(auth, secret)) return;
+  if (!headers.has("webhook-signature")) {
+    throw new WebhookVerificationError("Custom webhook reply not authorized: send Authorization: Bearer <signing secret> or a Standard Webhooks signature");
+  }
+  const check = await verifyStandardWebhook(secret, headers, raw);
+  if (!check.ok) throw new WebhookVerificationError(`Custom webhook signature check failed: ${check.reason}`);
+}
+
+const invalid = (message: string): ProviderReply => jsonReply({ status: "invalid", message }, 400);
+
+/** The person a decision names, as the receiver asserts it, or what is wrong with `by`. */
+function actorOf(by: unknown): ButtonActor | string {
+  const problem = `by must be an object with an id (1-${MAX_ACTOR_LENGTH} characters, no spaces or commas) and optionally a name (at most ${MAX_ACTOR_LENGTH} characters): the person who decided`;
+  if (!by || typeof by !== "object" || Array.isArray(by)) return problem;
+  const { id: rawId, name: rawName } = by as { id?: unknown; name?: unknown };
+  const id = typeof rawId === "string" ? rawId.trim() : typeof rawId === "number" && Number.isFinite(rawId) ? String(rawId) : "";
+  if (!ACTOR_ID.test(id)) return problem;
+  if (rawName !== undefined && rawName !== null && typeof rawName !== "string") return problem;
+  const name = typeof rawName === "string" ? rawName.trim() : "";
+  if (name.length > MAX_ACTOR_LENGTH) return problem;
+  return { id, ...(name ? { name } : {}) };
+}
+
+/**
+ * The payloads a receiver POSTs back to decide an approval, or undefined: only for an approval with a button nonce,
+ * and only with a reply URL (which needs the signing secret, the only way to authorize the decision).
+ */
+function decideOf(prompt: ApprovalPrompt | undefined, replyUrl: string): { approve: string; reject: string; url: string } | undefined {
+  const buttons = prompt?.kind === "approval" ? prompt.buttons : undefined;
+  if (!buttons || !replyUrl) return undefined;
+  try {
+    return { approve: encodeButtonPayload({ ...buttons, action: "approve" }), reject: encodeButtonPayload({ ...buttons, action: "reject" }), url: replyUrl };
+  } catch {
+    return undefined; // a malformed nonce: the links still work
+  }
+}
+
 /** The approval as the standard body carries it (`expiresAt` as ISO 8601), or undefined for an ordinary send. */
-function approvalOf(prompt: ApprovalPrompt | undefined): (Omit<ApprovalPrompt, "expiresAt"> & { expiresAt: string }) | undefined {
+function approvalOf(
+  prompt: ApprovalPrompt | undefined,
+  decide?: { approve: string; reject: string; url: string },
+): (Omit<ApprovalPrompt, "expiresAt" | "buttons"> & { expiresAt: string; decide?: { approve: string; reject: string; url: string } }) | undefined {
   if (!prompt || typeof prompt !== "object" || (prompt.kind !== "approval" && prompt.kind !== "input")) return undefined;
   const str = (v: unknown) => (typeof v === "string" ? v : undefined);
   const at = typeof prompt.expiresAt === "number" && Number.isFinite(prompt.expiresAt) ? new Date(prompt.expiresAt).toISOString() : "";
@@ -411,6 +507,7 @@ function approvalOf(prompt: ApprovalPrompt | undefined): (Omit<ApprovalPrompt, "
     ...(str(prompt.message) !== undefined ? { message: str(prompt.message)! } : {}),
     ...links,
     expiresAt: at,
+    ...(decide ? { decide } : {}),
   };
 }
 
