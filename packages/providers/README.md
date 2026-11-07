@@ -18,6 +18,8 @@ import { parseProviderWebhookFromEnv, providersFromEnv } from "@actuate/provider
 const providers = providersFromEnv(env, "https://bot.example.com");
 ```
 
+`npx actuate providers` lists every provider and its variables. Adding one? Implement the contract in [`src/contract.ts`](https://github.com/actuate-run/actuate/blob/main/packages/providers/src/contract.ts) and see [CONTRIBUTING.md](https://github.com/actuate-run/actuate/blob/main/CONTRIBUTING.md). Guide: [Capabilities and providers](https://actuate.run/docs/concepts/capabilities/).
+
 ## Custom webhook
 
 Send messages to any URL: your own server, Zapier, n8n, ntfy, Google Chat… Actuate POSTs each message to your URL; to reply, POST to the reply URL it gave you.
@@ -36,7 +38,7 @@ const reply = await ctx.step.waitForEvent("reply", { event: "message.custom-webh
 | `CUSTOM_WEBHOOK_FORMAT` | `standard`, `text` or `template`. Leave empty for automatic: `template` when a JSON template is set, otherwise `standard`. |
 | `CUSTOM_WEBHOOK_TEMPLATE` | JSON for the `template` format, with `{{text}}`, `{{html}}`, `{{subject}}`, `{{to}}`, `{{id}}`, `{{replyUrl}}` inside JSON strings (and the approval placeholders below, empty on ordinary messages). |
 | `CUSTOM_WEBHOOK_APPROVAL_TEMPLATE` | Optional JSON used instead, whatever the format, for approval requests only (`waitForApproval` with `notify`): the same placeholders plus `{{approveUrl}}`, `{{rejectUrl}}` and `{{expiresAt}}` (ISO 8601). It must use at least one of `{{approveUrl}}`, `{{rejectUrl}}` or `{{text}}` (the text holds the links), so the links always reach the receiver. Questions (`waitForInput`) use the body format, where `{{answerUrl}}` and the standard body's `approval.answerUrl` carry the answer link. Without it, approvals use the body format too. Approval templates and JSON templates also take `{{approvePayload}}` and `{{rejectPayload}}` (see "Deciding from the receiver"; empty without a signing secret). |
-| `CUSTOM_WEBHOOK_APPROVERS` | Optional. The `by.id` values allowed to decide from the receiver (see below), separated by spaces or commas; up to 128 characters each, no spaces or commas. Empty: any `by.id` your receiver sends. Restricts decisions posted to the Reply URL only: the signed links still work for whoever holds them. |
+| `CUSTOM_WEBHOOK_APPROVERS` | Optional. The `by.id` values allowed to decide from the receiver (see below), separated by spaces or commas; up to 64 characters each, no spaces or commas. Empty: any `by.id` your receiver sends. Restricts decisions posted to the Reply URL only: the signed links still work for whoever holds them. |
 
 Body formats:
 
@@ -81,7 +83,7 @@ curl -X POST "$REPLY_URL" -H "Authorization: Bearer $CUSTOM_WEBHOOK_SECRET" -H "
   -d '{"decision":"ap1:local:...:a","by":{"id":"alice","name":"Alice Tan"}}'
 ```
 
-`by.id` is required (1 to 128 characters, no spaces or commas), `by.name` optional (at most 128). The answer is always JSON:
+`by.id` is required (1 to 64 characters, no spaces or commas), `by.name` optional (at most 60). The answer is always JSON:
 
 | Status | Body |
 | --- | --- |
@@ -139,9 +141,9 @@ The click is answered in the webhook response (`{"method":"answerCallbackQuery",
 Approvals and questions go out as Block Kit: a section with the message (links included), then an actions block. `text` stays the same, links and all, as the notification fallback. This works with the incoming webhook URL or the bot token.
 
 - **With `signingSecret`** (`SLACK_SIGNING_SECRET`): interactive **Approve** (primary) and **Reject** (danger) buttons, with action IDs `actuate_approve` and `actuate_reject` and the button payload in `value`.
-- **Without it**, or with no button nonce: url buttons that open the confirm pages.
-- **Questions** (`waitForInput`) get an **Answer** url button.
-- **Limits:** a url longer than Slack's 3000 characters gets no button, and a message longer than 3000 characters is split over several sections.
+- **Without it**, or with no button nonce: URL buttons that open the confirm pages.
+- **Questions** (`waitForInput`) get an **Answer** URL button.
+- **Limits:** a URL longer than Slack's 3000 characters gets no button, and a message longer than 3000 characters is split over several sections.
 
 Setup, in a Slack app used only by Actuate (an app has one Request URL):
 
@@ -153,7 +155,7 @@ A click is checked before anything is decided:
 
 - `parseInteraction` verifies `X-Slack-Signature`: the `v0=` HMAC-SHA256 of `v0:<X-Slack-Request-Timestamp>:<raw body>`, compared in constant time. A timestamp more than 5 minutes off fails, and a failed check is a 401. The body is read from `request.clone()`.
 - A `block_actions` payload carrying one of our button values becomes a click, from `user.id` with the name from `user.name` or `user.username`, so `by` reads `slack:U01ABC (alice)`.
-- Any other `block_actions`, such as a url-button click, gets Slack's required ack. Anything else is null.
+- Any other `block_actions`, such as a URL-button click, gets Slack's required ack. Anything else is null.
 
 The reply to every click is an empty 200, sent within Slack's 3 seconds. After it, a follow-up posts to the click's `response_url` (only `hooks.slack.com` or `hooks.slack-gov.com`):
 
@@ -175,8 +177,6 @@ What an approval message gets (the text always keeps the links):
 - **Bot token without a public key, or a channel webhook**: link buttons to the confirm pages (sent with `?with_components=true` through a webhook, which can't send interactive buttons), when every link is at most 512 characters; otherwise text only. A question (`waitForInput`) gets an **Answer** link button under the same rule. If Discord refuses the buttons, the text is sent alone.
 
 Every interaction must carry a valid `X-Signature-Ed25519` over `X-Signature-Timestamp` + body (verified with WebCrypto), with a timestamp within 5 minutes; otherwise 401. A decided click updates the message in the interaction response (links and buttons removed, "Approved by Alice at 14:02 UTC"); everything else answers only the clicker, ephemerally. Other interactions of the same application (slash commands, other buttons) get a polite ephemeral "This app only handles Actuate approval buttons." The clicker is `discord:<user ID> (<display name>)` in `ApprovalResult.by`. If the reply misses Discord's 3-second deadline, the user sees "This interaction failed" but the decision stands.
-
-`npx actuate providers` lists every provider and its variables. Adding one? Implement the contract in [`src/contract.ts`](src/contract.ts) and see [CONTRIBUTING.md](../../CONTRIBUTING.md). Guide: [Capabilities and providers](https://actuate.run/docs/concepts/capabilities/).
 
 ---
 
