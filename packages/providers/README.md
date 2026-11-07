@@ -88,6 +88,20 @@ Helpers in the contract, so every provider words and validates things the same w
 
 An `approvers` list restricts buttons, not links: the signed links in the message still work for whoever holds them.
 
+### Discord
+
+| Variable | |
+| --- | --- |
+| `DISCORD_PUBLIC_KEY` | Optional. Your application's Public Key (General Information), 64 hex characters; not a secret. With `DISCORD_BOT_TOKEN`, approvals get interactive Approve and Reject buttons. |
+| `DISCORD_APPROVERS` | Optional. Who may decide with a button: Discord user IDs and `role:<role ID>` entries, separated by spaces or commas (turn on Developer Mode, then right-click a user or role → Copy ID). Empty: anyone who can see the message. |
+
+What an approval message gets (the text always keeps the links):
+
+- **Bot token and public key**: Approve (green) and Reject (red) buttons. Set the application's **Interactions Endpoint URL** (General Information) to the actuator's `/providers/discord/webhook` (the tenant's Interactions URL on the hosted platform); Discord checks it with a signed PING. The application then receives interactions over HTTP only, not over the Gateway.
+- **Bot token without a public key, or a channel webhook**: link buttons to the confirm pages (sent with `?with_components=true` through a webhook, which can't send interactive buttons), when every link is at most 512 characters; otherwise text only. A question (`waitForInput`) gets an **Answer** link button under the same rule. If Discord refuses the buttons, the text is sent alone.
+
+Every interaction must carry a valid `X-Signature-Ed25519` over `X-Signature-Timestamp` + body (verified with WebCrypto), with a timestamp within 5 minutes; otherwise 401. A decided click updates the message in the interaction response (links and buttons removed, "Approved by Alice at 14:02 UTC"); everything else answers only the clicker, ephemerally. Other interactions of the same application (slash commands, other buttons) get a polite ephemeral "This app only handles Actuate approval buttons." The clicker is `discord:<user ID> (<display name>)` in `ApprovalResult.by`. If the reply misses Discord's 3-second deadline, the user sees "This interaction failed" but the decision stands.
+
 `npx actuate providers` lists every provider and its variables. Adding one? Implement the contract in [`src/contract.ts`](src/contract.ts) and see [CONTRIBUTING.md](../../CONTRIBUTING.md). Guide: [Capabilities and providers](https://actuate.run/docs/concepts/capabilities/).
 
 ---
