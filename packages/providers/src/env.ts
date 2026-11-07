@@ -93,7 +93,10 @@ export function providersFromEnv(env: Record<string, unknown>, baseUrl: string, 
 /**
  * Verify an inbound provider webhook (e.g. POST /providers/billplz/webhook) and
  * translate it into an actuator event. Returns null for valid but irrelevant
- * webhooks; throws WebhookVerificationError for bad signatures.
+ * webhooks, and for a configured provider that takes no webhooks of its own
+ * (Slack, Discord: their requests are button clicks, which `parseInteraction`
+ * verified and answered before this); throws WebhookVerificationError for bad
+ * signatures and for a provider that isn't configured.
  */
 export async function parseProviderWebhookFromEnv(
   env: Record<string, unknown>,
@@ -102,9 +105,10 @@ export async function parseProviderWebhookFromEnv(
   fetchImpl: typeof fetch = fetch,
 ): Promise<ProviderWebhookResult | { reply: string }> {
   const configured = configuredFromEnv(env).find((p) => p.definition.kind === kind);
-  if (!configured?.definition.parseWebhook) throw new WebhookVerificationError(`No ${kind} provider is configured.`);
+  if (!configured) throw new WebhookVerificationError(`No ${kind} provider is configured.`);
   const reply = configured.definition.handshake?.(request, configured.credentials);
   if (reply != null) return { reply };
+  if (!configured.definition.parseWebhook) return null;
   return configured.definition.parseWebhook(request, configured.credentials, {
     fetch: fetchImpl,
   });

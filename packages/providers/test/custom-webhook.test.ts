@@ -670,7 +670,7 @@ describe("custom-webhook decisions", () => {
   it("parses approvers: free-form IDs separated by spaces or commas", () => {
     expect(parse({ approvers: " alice, U123  bob@example.com " })).toMatchObject({ approvers: "alice, U123  bob@example.com" });
     expect(parse({ approvers: "  " }).approvers).toBeUndefined();
-    expect(problem({ url: URL_, approvers: `ok ${"x".repeat(129)}` })).toMatch(/^Invalid Custom webhook credentials: approvers: approvers must be the IDs your receiver sends as by\.id/);
+    expect(problem({ url: URL_, approvers: `ok ${"x".repeat(65)}` })).toMatch(/^Invalid Custom webhook credentials: approvers: approvers must be the IDs your receiver sends as by\.id \(up to 64 characters/);
     const c = parse({ secret: SECRET, approvers: "alice,bob" });
     expect(customWebhook.isApprover!({ id: "alice" }, c)).toBe(true);
     expect(customWebhook.isApprover!({ id: "mallory", name: "alice" }, c)).toBe(false);
@@ -684,7 +684,9 @@ describe("custom-webhook decisions", () => {
     expect(await decide({ decision: REJECT, by: { id: 60123456789 } })).toEqual({
       click: { route: "local", nonce: NONCE, action: "reject", actor: { id: "60123456789" }, context: {} },
     });
-    expect(await decide({ decision: APPROVE, by: { id: "x".repeat(128), name: "n".repeat(128) } })).toMatchObject({ click: { actor: { id: "x".repeat(128) } } });
+    expect(await decide({ decision: APPROVE, by: { id: "x".repeat(64), name: "n".repeat(60) } })).toMatchObject({
+      click: { actor: { id: "x".repeat(64), name: "n".repeat(60) } },
+    });
     expect(await decide({ decision: APPROVE, by: { id: "a", name: "" } })).toMatchObject({ click: { actor: { id: "a" } } });
   });
 
@@ -700,11 +702,11 @@ describe("custom-webhook decisions", () => {
     ["by as an array", { decision: APPROVE, by: ["alice"] }],
     ["no id", { decision: APPROVE, by: { name: "Alice" } }],
     ["an empty id", { decision: APPROVE, by: { id: "   " } }],
-    ["an id too long", { decision: APPROVE, by: { id: "x".repeat(129) } }],
+    ["an id too long", { decision: APPROVE, by: { id: "x".repeat(65) } }],
     ["an id with a space", { decision: APPROVE, by: { id: "al ice" } }],
     ["an id with a comma", { decision: APPROVE, by: { id: "al,ice" } }],
     ["an object id", { decision: APPROVE, by: { id: { x: 1 } } }],
-    ["a name too long", { decision: APPROVE, by: { id: "a", name: "n".repeat(129) } }],
+    ["a name too long", { decision: APPROVE, by: { id: "a", name: "n".repeat(61) } }],
     ["a name that isn't a string", { decision: APPROVE, by: { id: "a", name: 7 } }],
   ])("answers 400 for %s", async (_, body) => {
     const out = await decide(body);

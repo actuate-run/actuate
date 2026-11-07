@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { configuredFromEnv, envName, envVarsFor, providersFromEnv } from "../src/index.js";
+import { configuredFromEnv, envName, envVarsFor, parseProviderWebhookFromEnv, providersFromEnv } from "../src/index.js";
 
 describe("providers from environment variables", () => {
   it("derives variable names from credential fields", () => {
@@ -27,6 +27,27 @@ describe("providers from environment variables", () => {
   it("explains wrong kinds and missing credentials", () => {
     expect(() => configuredFromEnv({ ACTUATE_MESSAGING: "stripe" })).toThrow(/not a messaging provider.*telegram/);
     expect(() => configuredFromEnv({ ACTUATE_PAYMENT: "billplz" })).toThrow(/apiKey/);
+  });
+});
+
+describe("parseProviderWebhookFromEnv", () => {
+  const env = {
+    ACTUATE_MESSAGING: "slack,discord",
+    SLACK_WEBHOOK_URL: "https://hooks.slack.com/services/T000/B000/XXXX",
+    SLACK_SIGNING_SECRET: "8f742231b10e8888abcd99yyyzzz85a5",
+    DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/123/abc-DEF",
+  };
+  const post = () => new Request("https://bot.example.com/hook", { method: "POST", body: "payload=%7B%7D" });
+
+  it("ignores requests for a configured provider that takes no webhooks of its own (button clicks are handled before)", async () => {
+    expect(await parseProviderWebhookFromEnv(env, "slack", post())).toBeNull();
+    expect(await parseProviderWebhookFromEnv(env, "discord", post())).toBeNull();
+  });
+
+  it("refuses a provider that isn't configured, or isn't one", async () => {
+    await expect(parseProviderWebhookFromEnv(env, "telegram", post())).rejects.toMatchObject({ name: "WebhookVerificationError", message: "No telegram provider is configured." });
+    await expect(parseProviderWebhookFromEnv(env, "nope", post())).rejects.toMatchObject({ name: "WebhookVerificationError", message: "No nope provider is configured." });
+    await expect(parseProviderWebhookFromEnv({}, "slack", post())).rejects.toMatchObject({ name: "WebhookVerificationError" });
   });
 });
 

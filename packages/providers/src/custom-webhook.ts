@@ -26,12 +26,18 @@ const MAX_HEADER_LINES = 20;
 const MAX_TEMPLATE_LENGTH = 16 * 1024;
 const MAX_ERROR_DETAIL = 500;
 const MAX_TITLE_LENGTH = 1024;
-/** Longest `by.id` and `by.name` in a decision. */
-const MAX_ACTOR_LENGTH = 128;
-// An approver ID is whatever the receiver sends as `by.id`: no whitespace, commas (the list's separators) or control characters.
+/** Longest `by.id` and `by.name` in a decision: what the runtime's `chatApproverLabel` keeps, so neither is cut. */
+const MAX_ACTOR_ID_LENGTH = 64;
+const MAX_ACTOR_NAME_LENGTH = 60;
+// An approver ID is whatever the receiver sends as `by.id`: 1 to MAX_ACTOR_ID_LENGTH characters, no whitespace, commas (the list's
+// separators) or control characters.
 // eslint-disable-next-line no-control-regex
-const ACTOR_ID = /^[^\s,\u0000-\u001f\u007f]{1,128}$/;
-const APPROVER_RULES = { provider: PROVIDER, user: ACTOR_ID, userHint: "the IDs your receiver sends as by.id (up to 128 characters, no spaces or commas)" };
+const ACTOR_ID = /^[^\s,\u0000-\u001f\u007f]{1,64}$/;
+const APPROVER_RULES = {
+  provider: PROVIDER,
+  user: ACTOR_ID,
+  userHint: `the IDs your receiver sends as by.id (up to ${MAX_ACTOR_ID_LENGTH} characters, no spaces or commas)`,
+};
 
 export const CUSTOM_WEBHOOK_FORMATS = ["standard", "text", "template"] as const;
 export type CustomWebhookFormat = (typeof CUSTOM_WEBHOOK_FORMATS)[number];
@@ -282,7 +288,7 @@ export const customWebhook: ProviderDefinition<CustomWebhookCredentials, "messag
       help: 'Used for approval requests only; questions use the body format. E.g. a card with Approve and Reject buttons: {{approveUrl}}, {{rejectUrl}}, {{expiresAt}}, {{approvePayload}}, {{rejectPayload}}, plus the JSON template\'s placeholders. Empty: approvals use the body format above.',
     },
     approversCredentialField(
-      "Who may decide by POSTing a decision to the Reply URL: the by.id values your receiver sends, separated by spaces or commas. Empty: anyone your receiver lets decide. Your receiver vouches for by; the approval links still work for whoever holds them.",
+      "Who may decide by POSTing a decision to the Reply URL: the by.id values your receiver sends (up to 64 characters each), separated by spaces or commas. Empty: anyone your receiver lets decide. Your receiver vouches for by; the approval links still work for whoever holds them.",
     ),
   ],
   parseCredentials: (input) => parseWith(PROVIDER, schema, input),
@@ -463,14 +469,14 @@ const invalid = (message: string): ProviderReply => jsonReply({ status: "invalid
 
 /** The person a decision names, as the receiver asserts it, or what is wrong with `by`. */
 function actorOf(by: unknown): ButtonActor | string {
-  const problem = `by must be an object with an id (1-${MAX_ACTOR_LENGTH} characters, no spaces or commas) and optionally a name (at most ${MAX_ACTOR_LENGTH} characters): the person who decided`;
+  const problem = `by must be an object with an id (1-${MAX_ACTOR_ID_LENGTH} characters, no spaces or commas) and optionally a name (at most ${MAX_ACTOR_NAME_LENGTH} characters): the person who decided`;
   if (!by || typeof by !== "object" || Array.isArray(by)) return problem;
   const { id: rawId, name: rawName } = by as { id?: unknown; name?: unknown };
   const id = typeof rawId === "string" ? rawId.trim() : typeof rawId === "number" && Number.isFinite(rawId) ? String(rawId) : "";
   if (!ACTOR_ID.test(id)) return problem;
   if (rawName !== undefined && rawName !== null && typeof rawName !== "string") return problem;
   const name = typeof rawName === "string" ? rawName.trim() : "";
-  if (name.length > MAX_ACTOR_LENGTH) return problem;
+  if (name.length > MAX_ACTOR_NAME_LENGTH) return problem;
   return { id, ...(name ? { name } : {}) };
 }
 
