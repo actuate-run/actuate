@@ -635,8 +635,9 @@ export class RunManager {
 
   /**
    * Schedule the next wake-up from what the database says is waiting. For a host to call once when it opens the
-   * database and finds no alarm set: an alarm that came due while the object could not open (a runtime too old
-   * for its database was deployed, say) may have been given up on, and nothing else would set it again.
+   * database and finds no alarm set, or one already past: an alarm that kept failing while the object could not
+   * open (a runtime too old for its database was deployed, say) is given up on after its retries, and nothing
+   * else would set it again.
    */
   ensureWake(): Promise<void> {
     return this.reschedule();
