@@ -47,7 +47,7 @@ Stable does not mean frozen. These are additions, not breaking changes, and can 
 
 **Errors.** Throwing `ToolError(code, message, { retryable, details })` fails the run, and the run's error carries `code`, `retryable` and `details` wherever it is read. Codes are yours: upper-case letters, digits and underscores. The platform's own codes (`INVALID_ARGUMENTS`, `RATE_LIMITED`, `BUDGET_EXHAUSTED`, `ACTUATOR_PAUSED`, `ACCOUNT_SUSPENDED`, `STORAGE_FULL`, `NOT_FOUND`, `PAYLOAD_TOO_LARGE`, `RUN_FAILED`, `RUN_CANCELLED`, `NOT_CANCELLABLE`, `INTERNAL`) are a separate list that only grows; your code travels beside the platform's, and never replaces it.
 
-**Provider methods.** Every method on `ctx.messaging`, `ctx.payment` and `ctx.http` is always callable. One the configured provider's API does not offer (`ctx.payment.refund` on Billplz or ToyyibPay) throws `NotSupportedError`.
+**Provider methods.** Every method on `ctx.messaging`, `ctx.payment` and `ctx.http` is always callable. One the configured provider's API does not offer (`ctx.payment.refund` on Billplz or ToyyibPay) throws `NotSupportedError`. Don't test whether a method exists (`if (ctx.payment.refund)`, `refund?.()`): it always does. Catch the error.
 
 **Idempotency keys.** A key the caller sends (`Idempotency-Key`, MCP `_meta`) matches a run in any state. A key derived from the actuator's `idempotencyKey` fields matches a run that is running or waiting, or that completed in the last 24 hours; a failed or cancelled run never blocks a new one. The 24 hours is a default: it will not get shorter, and may become configurable.
 
