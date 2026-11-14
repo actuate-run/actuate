@@ -36,6 +36,7 @@ Tests run locally and need no Cloudflare account: unit tests use `node:sqlite`, 
 - **Tests with every change.** Engine changes need a test in `packages/runtime/test`; behaviour visible from HTTP needs one in `e2e/`.
 - **Replay safety.** Anything that touches the outside world runs inside `ctx.step.do`. If you add a new kind of side effect, teach `actuate check` about it.
 - **Providers** take the user's own credentials and never log them. Verify every inbound webhook (signature, secret token or a re-query of the provider's API) before turning it into an event, and add tests with recorded responses in `packages/providers/test`.
+- **Compatibility.** [COMPATIBILITY.md](COMPATIBILITY.md) lists what users can rely on. A change to the names `@actuate/sdk` exports fails `packages/sdk/test/api-surface.test.ts`: update the list on purpose, and say so in the changeset. A change to the runtime's tables (`SCHEMA` in `packages/runtime/src/sql.ts`) needs `JOURNAL_SCHEMA_VERSION` raised and an upgrade step in `upgradeSchema`, with a test that a database from the previous version still opens and its waiting runs finish.
 - **Changesets.** User-visible changes to a published package need a changeset: run `pnpm changeset` and describe the change for the changelog.
 - **Docs** live in [actuate-run/docs](https://github.com/actuate-run/docs). If your change alters behaviour described there, open a PR there too.
 
