@@ -1,10 +1,10 @@
-import { defineActuator, secret, z } from "@actuate/sdk";
+import { ToolError, defineActuator, secret, z } from "@actuate/sdk";
 
 export default defineActuator({
   name: "e2e_booking",
   description: "End-to-end fixture: saves a booking, waits for payment or an approval, sleeps briefly.",
   config: z.object({ greeting: z.string().default("Hi"), apiKey: secret(z.string()).optional() }),
-  input: z.object({ name: z.string(), mode: z.enum(["payment", "approval", "sleep", "ask", "leak", "notify"]) }),
+  input: z.object({ name: z.string(), mode: z.enum(["payment", "approval", "sleep", "ask", "leak", "notify", "refuse"]) }),
   capabilities: ["messaging"],
   async run(ctx, input, config) {
     await ctx.db.migrate(["CREATE TABLE bookings (id TEXT PRIMARY KEY, name TEXT, status TEXT)"]);
@@ -16,6 +16,12 @@ export default defineActuator({
       const key = await ctx.step.do("read-key", () => config.apiKey ?? null);
       if (input.name === "fail") throw new Error(`refused ${key}`);
       return { key, same: key === config.apiKey };
+    }
+    if (input.mode === "refuse") {
+      // An error the caller can act on: a code, whether calling again may help, and details (secrets redacted).
+      await ctx.step.do("check", { retries: 3 }, () => {
+        throw new ToolError("FULLY_BOOKED", `No slot left for ${input.name}.`, { retryable: input.name === "later", details: { next: "2026-12-01", key: config.apiKey ?? null } });
+      });
     }
     if (input.mode === "notify") {
       return ctx.step.do("tell", () => ctx.notifyOwner(`${input.name} used ${config.apiKey}`, { subject: "Heads up" }));

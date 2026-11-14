@@ -235,6 +235,12 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
             else await state.storage.setAlarm(Math.max(at, Date.now()));
           },
         });
+        // An alarm that failed through its retries (six, over about two minutes: this object could not open, see
+        // RunManager.ensureWake) is not run again until setAlarm is called. Whether getAlarm then still reports it
+        // is not documented, so an alarm that is missing or already past is set again from the database. At worst
+        // that fires one alarm that finds nothing due.
+        const alarm = await state.storage.getAlarm();
+        if (alarm === null || alarm <= Date.now()) await this.manager.ensureWake();
       });
     }
 

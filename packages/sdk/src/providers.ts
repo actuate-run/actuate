@@ -139,7 +139,10 @@ export interface PaymentProvider {
   createBill(request: CreateBillRequest): Promise<Bill>;
   /** Look up a bill's current status. */
   getBill(id: string): Promise<Bill>;
-  /** Refund a paid bill, in full or in part. Not every provider supports this. */
+  /**
+   * Refund a paid bill, in full or in part. An adapter for an API without refunds may leave it out or throw
+   * `NotSupportedError`. Either way `ctx.payment.refund` is always callable (see {@link PaymentClient}).
+   */
   refund?(request: RefundRequest): Promise<{ id: string; status: "pending" | "succeeded" | "failed" }>;
 }
 
@@ -221,6 +224,12 @@ export interface RefundRequest {
   idempotencyKey?: string;
 }
 
+/**
+ * One text completion, with the account's own model key.
+ *
+ * @experimental The `llm` capability is deliberately small (no tool calls, structured output or streaming)
+ * and is not covered by the compatibility policy yet: it may change in a minor release. See COMPATIBILITY.md.
+ */
 export interface LlmProvider {
   complete(request: LlmRequest): Promise<LlmResponse>;
 }
@@ -248,6 +257,20 @@ export interface HttpProvider {
 export interface Providers {
   messaging: MessagingProvider;
   payment: PaymentProvider;
+  llm: LlmProvider;
+  http: HttpProvider;
+}
+
+/**
+ * `ctx.payment`: a payment provider with every method present. `refund` on a provider whose API has no refunds
+ * (Billplz, ToyyibPay) throws `NotSupportedError`, which fails the step without retrying.
+ */
+export type PaymentClient = Required<PaymentProvider>;
+
+/** What `ctx` holds for each capability. The same as {@link Providers}, with the methods an adapter may leave out always there. */
+export interface Clients {
+  messaging: MessagingProvider;
+  payment: PaymentClient;
   llm: LlmProvider;
   http: HttpProvider;
 }

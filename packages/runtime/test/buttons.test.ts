@@ -545,6 +545,7 @@ describe("the _actuate_approval_buttons table", () => {
     const old = harness(gate, { db, buttonRoute: undefined });
     const { run } = await old.start();
     db.exec(`DROP TABLE _actuate_approval_buttons`); // as a 0.4.x database has it
+    db.exec(`DROP TABLE _actuate_meta`); // and with no schema version: stamps came with 0.6
     expect(db.prepare(`SELECT name FROM sqlite_master WHERE name = '_actuate_approval_buttons'`).all()).toEqual([]);
 
     const h = harness(gate, { db });
@@ -565,7 +566,8 @@ describe("the _actuate_approval_buttons table", () => {
     const old = harness(gate, { db });
     const { run } = await old.start();
     const nonce = old.approvals[0]!.buttons!.nonce;
-    // As a database made before kinds were recorded has the table.
+    // As a database made before kinds were recorded has the table (and no schema version: stamps came with 0.6).
+    db.exec(`DROP TABLE _actuate_meta`);
     db.exec(`DROP TABLE _actuate_approval_buttons`);
     db.exec(`CREATE TABLE _actuate_approval_buttons (nonce TEXT PRIMARY KEY, run_id TEXT NOT NULL, step TEXT NOT NULL,
       expires_at INTEGER NOT NULL, used_at INTEGER, used_by TEXT, decision TEXT) WITHOUT ROWID`);

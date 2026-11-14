@@ -38,6 +38,15 @@ Config fields marked with `secret()` (JSON Schema `"writeOnly": true`) never sho
 
 For tests and Node hosts, `nodeSqlite` runs the engine on `node:sqlite`, and `meteredNodeSqlite` adds an estimate of the rows read and written that Durable Objects would bill. `checkActuatorSql` refuses the SQL the hosted platform refuses (recursive queries, PRAGMA, ATTACH, generator functions). To test an actuator, use `@actuate/cli/testing`, which builds on them.
 
+
+## Stability
+
+Two parts of this package are covered by the [compatibility policy](https://github.com/actuate-run/actuate/blob/main/COMPATIBILITY.md): `createRuntime` from `@actuate/runtime/worker` with the HTTP API it serves, and the journal (the `_actuate_*` tables). Everything else the root entry exports (`RunManager`, `executePass`, `Journal`, the SQL and secrets helpers) is the host API: what `actuate dev`, the test harness and the hosted platform are built on. It is documented and you may build on it, but it can change in a minor release, with a changelog entry; pin an exact version if you do.
+
+The journal carries a version (`JOURNAL_SCHEMA_VERSION`, stored in `_actuate_meta`). Opening a database upgrades it in place, sleeping and waiting runs included, and a database written by a newer runtime is refused with `JournalVersionError` before anything is changed, so a rolled-back deploy cannot corrupt it.
+
+A run that throws `ToolError` is stored with `error.code`, `error.retryable` and `error.details` (`SerializedError`), and every run read returns them.
+
 ---
 
 [Docs](https://actuate.run/docs) · [Source](https://github.com/actuate-run/actuate) · [Templates](https://github.com/actuate-run/templates) · Apache-2.0

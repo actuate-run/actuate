@@ -195,6 +195,23 @@ describe("self-hosted runtime on workerd", () => {
     expect((await call(`/runs/${started.body.runId}`, { headers: auth })).body.output).toEqual({ status: "Because" });
   });
 
+  it("fails a run that throws ToolError with its code, retryable flag and details, without retrying the step", async () => {
+    const failed = await call("/run", { headers: agentAuth, json: { name: "Mei", mode: "refuse" } });
+    expect(failed.status).toBe(201);
+    expect(failed.body).toMatchObject({
+      status: "FAILED",
+      error: { name: "ToolError", code: "FULLY_BOOKED", retryable: false, message: "No slot left for Mei.", details: { next: "2026-12-01", key: "[secret]" } },
+    });
+    // The agent's token reads the same error later; the owner sees the step failed on its first attempt.
+    expect((await call(`/runs/${failed.body.runId}`, { headers: agentAuth })).body.error).toMatchObject({ code: "FULLY_BOOKED", retryable: false });
+    const read = await call(`/runs/${failed.body.runId}`, { headers: auth });
+    expect(read.body.steps.find((s: { name: string }) => s.name === "check")).toMatchObject({ status: "FAILED", attempts: 1 });
+    expect(JSON.stringify(read.body)).not.toContain("sk_e2e_secret_value");
+
+    const later = await call("/run", { headers: agentAuth, json: { name: "later", mode: "refuse" } });
+    expect(later.body.error).toMatchObject({ code: "FULLY_BOOKED", retryable: true });
+  });
+
   it("keeps secret config values out of every run read, while the run itself sees the real value", async () => {
     const secret = "sk_e2e_secret_value";
     const done = await call("/run", { headers: auth, json: { name: "Sam", mode: "leak" } });

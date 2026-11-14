@@ -5,7 +5,7 @@ export interface RunJson {
   status: string;
   trigger?: { kind?: string; cron?: string };
   output?: unknown;
-  error?: { name?: string; message?: string } | null;
+  error?: { name?: string; message?: string; code?: string; retryable?: boolean; details?: unknown } | null;
   passes?: number;
   wakeAt?: number | null;
   createdAt?: number;
@@ -81,7 +81,12 @@ export function formatRun(run: RunJson, flags = ""): string {
     if (l.data !== null && l.data !== undefined) lines.push(`        ${JSON.stringify(l.data)}`);
   }
   if (run.status === "COMPLETED") lines.push(`  output ${JSON.stringify(run.output ?? null)}`);
-  if (run.error) lines.push(`  error  ${run.error.name && run.error.name !== "Error" ? `${run.error.name}: ` : ""}${run.error.message ?? JSON.stringify(run.error)}`);
+  if (run.error) {
+    // A ToolError leads with its code (what the caller branches on) and says whether calling again may help.
+    const label = run.error.code ? `${run.error.code}${run.error.retryable ? " (retryable)" : ""}: ` : run.error.name && run.error.name !== "Error" ? `${run.error.name}: ` : "";
+    lines.push(`  error  ${label}${run.error.message ?? JSON.stringify(run.error)}`);
+    if (run.error.code && run.error.details !== undefined && run.error.details !== null) lines.push(`         ${JSON.stringify(run.error.details)}`);
+  }
   const next = nextSteps(run, flags);
   if (next.length) lines.push("", "Next", ...next.map((n) => `  ${n}`));
   return lines.join("\n");

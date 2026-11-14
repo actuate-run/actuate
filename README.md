@@ -52,7 +52,7 @@ export default defineActuator({
     }
     // A step runs once. If the agent retries, it gets this result back, not a second refund.
     const refund = await ctx.step.do("refund", ({ idempotencyKey }) =>
-      ctx.payment.refund!({ billId: input.billId, amount: input.amount, idempotencyKey }),
+      ctx.payment.refund({ billId: input.billId, amount: input.amount, idempotencyKey }),
     );
     return { status: "REFUNDED", refundId: refund.id };
   },
@@ -119,6 +119,10 @@ Each actuator is a Durable Object with its own SQLite database. Steps are journa
 
 - **Hosted, at [actuate.run](https://actuate.run):** `npx actuate deploy`, a dashboard with runs, approvals and tables, MCP for your agents, and plans with hard monthly limits (no surprise bills). Free Sandbox plan.
 - **Self-hosted:** the open-source runtime runs an actuator as a Worker plus a SQLite-backed Durable Object, on Cloudflare or plain `workerd`, with no Actuate account. It serves the runtime HTTP API; MCP and OpenAPI come with the hosted platform. See [Self-hosting](https://actuate.run/docs/guides/self-hosting/).
+
+## Stability
+
+[COMPATIBILITY.md](COMPATIBILITY.md) says what stays the same between versions: the actuator contract, what steps and waits do, the journal that sleeping runs live in, the runtime HTTP API and the CLI. Before 1.0 a minor release may still break something, and the changelog says so when it does.
 
 ## Contributing
 

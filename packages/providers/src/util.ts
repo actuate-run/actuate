@@ -15,13 +15,8 @@ export class ProviderApiError extends Error {
   }
 }
 
-/** Thrown for operations a provider's API does not offer. */
-export class NotSupportedError extends Error {
-  constructor(provider: string, operation: string) {
-    super(`${operation} is not supported by ${provider}`);
-    this.name = "NotSupportedError";
-  }
-}
+// Lives in the SDK, so actuator code can catch it and the runtime knows not to retry it.
+export { NotSupportedError } from "@actuate/sdk";
 
 /** Validate credentials with zod and throw one readable message listing every problem (values are never echoed). */
 export function parseWith<S extends z.ZodType>(provider: string, schema: S, input: unknown): z.output<S> {
