@@ -4,7 +4,9 @@ import {
   NOTIFY_OWNER_MAX_SUBJECT,
   NOTIFY_OWNER_MAX_TEXT,
   NonRetryableError,
+  NotSupportedError,
   SuspendSignal,
+  isNonRetryable,
   isSuspendSignal,
   parseDuration,
   type Actuator,
@@ -51,6 +53,14 @@ const MAX_IDEMPOTENCY_KEY = 255;
 const KEYED_METHODS: Partial<Record<Capability, Record<string, number>>> = {
   messaging: { send: 2 },
   payment: { createBill: 0, refund: 0 },
+};
+
+/**
+ * Methods `ctx.<capability>` always has, though an adapter written against an earlier contract (where they
+ * were optional) may not define them. Calling one then throws `NotSupportedError`.
+ */
+const OPTIONAL_METHODS: Partial<Record<Capability, readonly string[]>> = {
+  payment: ["refund"],
 };
 
 /** Thrown on replay when a step that failed permanently is reached again. */
@@ -220,7 +230,7 @@ class Pass {
         if (isSuspendSignal(err)) throw err;
         const retries = Math.min(options.retries ?? 0, this.request.limits?.maxRetries ?? 10);
         const message = err instanceof Error ? err.message : String(err);
-        if (err instanceof NonRetryableError || attempt > retries) {
+        if (isNonRetryable(err) || attempt > retries) {
           await this.write(this.row(name, { status: "FAILED", error: message, attempts: attempt }));
           throw err;
         }
@@ -547,7 +557,13 @@ class Pass {
               `ctx.${cap} is declared but no ${cap} provider is configured for actuator "${this.actuator.name}".`,
             );
           }
-          const value = (provider as Record<string, unknown>)[prop];
+          let value = (provider as Record<string, unknown>)[prop];
+          // A method the contract lets an adapter leave out is still callable: it says the provider can't do that.
+          if (value === undefined && OPTIONAL_METHODS[cap]?.includes(prop)) {
+            value = () => {
+              throw new NotSupportedError(`this ${cap} provider`, prop);
+            };
+          }
           if (typeof value !== "function") return value;
           return (...args: unknown[]) => {
             if (this.inStep === null) {

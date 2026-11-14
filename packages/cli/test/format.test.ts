@@ -38,6 +38,11 @@ describe("formatting runs", () => {
   it("shows the output or the error of a settled run, and no next steps", () => {
     expect(formatRun({ runId: "r", status: "COMPLETED", passes: 2, output: { ok: true } })).toBe("r  COMPLETED\n  2 passes\n  output {\"ok\":true}");
     expect(formatRun({ runId: "r", status: "FAILED", passes: 1, error: { name: "ActuatorError", message: "boom" } })).toContain("  error  ActuatorError: boom");
+    // A ToolError leads with its code, and shows its details on the next line.
+    const refused = formatRun({ runId: "r", status: "FAILED", passes: 1, error: { name: "ToolError", code: "CARD_DECLINED", retryable: false, message: "declined" } });
+    expect(refused).toContain("  error  CARD_DECLINED: declined");
+    const busy = formatRun({ runId: "r", status: "FAILED", passes: 1, error: { name: "ToolError", code: "BUSY", retryable: true, message: "try later", details: { after: 60 } } });
+    expect(busy).toContain(`  error  BUSY (retryable): try later\n         {"after":60}`);
     expect(nextSteps({ runId: "r", status: "COMPLETED", steps: [{ name: "x", status: "WAITING_INPUT" }] }, "")).toEqual([]);
     expect(costLine({ runId: "r", status: "WAITING" })).toBe("0 passes");
   });

@@ -1,4 +1,4 @@
-import type { DbStatement, Json, Row, SqlValue, Trigger, WaitForApprovalOptions } from "@actuate/sdk";
+import { TOOL_ERROR_MAX_DETAILS, toolErrorInfo, type DbStatement, type Json, type Row, type SqlValue, type Trigger, type WaitForApprovalOptions } from "@actuate/sdk";
 
 export type StepStatus =
   | "RUNNING"
@@ -76,13 +76,36 @@ export interface SerializedError {
   name: string;
   message: string;
   stack?: string;
+  /** Set when the actuator threw a `ToolError`: the code it chose. */
+  code?: string;
+  /** With `code`: whether the caller may make the same call again later. */
+  retryable?: boolean;
+  /** With `code`: the error's details, when it had any that fit (see `TOOL_ERROR_MAX_DETAILS`). */
+  details?: Json;
 }
 
 export function serializeError(err: unknown): SerializedError {
   if (err instanceof Error) {
-    return { name: err.name, message: err.message, ...(err.stack ? { stack: err.stack } : {}) };
+    return { name: err.name, message: err.message, ...(err.stack ? { stack: err.stack } : {}), ...toolErrorFields(err) };
   }
   return { name: "Error", message: String(err) };
+}
+
+/** A `ToolError`'s code, retryable flag and details, as they are stored with the run. */
+function toolErrorFields(err: unknown): Pick<SerializedError, "code" | "retryable" | "details"> {
+  const info = toolErrorInfo(err);
+  if (!info) return {};
+  const fields: Pick<SerializedError, "code" | "retryable" | "details"> = { code: info.code, retryable: info.retryable };
+  if (info.details !== undefined) {
+    // Details that can't be stored (a cycle, a BigInt) or are too large are left out; the code and message stand.
+    try {
+      const encoded = JSON.stringify(info.details);
+      if (encoded !== undefined && encoded.length <= TOOL_ERROR_MAX_DETAILS) fields.details = JSON.parse(encoded) as Json;
+    } catch {
+      // not serialisable
+    }
+  }
+  return fields;
 }
 
 export function toJson(value: unknown): string {

@@ -31,9 +31,11 @@ export default defineActuator({
 | `ctx.messaging`, `ctx.payment`, `ctx.llm`, `ctx.http` | Declared capabilities, backed by your own accounts |
 | `ctx.notifyOwner(text, { subject })` | Message the actuator's owner (email on the platform, the terminal under `actuate dev`), inside a step |
 | `idempotencyKey: ["orderId"]` | One run per order: a repeated MCP or run API call with the same field values returns the first run (while it runs or waits, or for 24 hours after it completes) |
+| `throw new ToolError("CARD_DECLINED", message, { retryable, details })` | Fail the run with an error the caller can act on: the code, whether calling again may help, and details travel with the run's error. In a step it fails the step at once, without retries |
+| `NonRetryableError`, `NotSupportedError` | Stop a step's retries. `ctx.payment.refund` throws `NotSupportedError` on a provider without refunds |
 | `secret(schema)` | Mark a config field as secret (`apiKey: secret(z.string())`): its value is redacted from logs, errors and run records, and the platform never shows it again |
 
-Reference: [SDK API](https://actuate.run/docs/reference/sdk/).
+Reference: [SDK API](https://actuate.run/docs/reference/sdk/). What stays stable between versions: [COMPATIBILITY.md](https://github.com/actuate-run/actuate/blob/main/COMPATIBILITY.md). The `llm` capability is experimental.
 
 ---
 

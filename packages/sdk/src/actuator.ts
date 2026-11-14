@@ -1,7 +1,7 @@
 import type { z } from "zod";
 import type { Duration } from "./duration.js";
 import { ActuatorError } from "./errors.js";
-import { CAPABILITIES, type Capability, type Providers } from "./providers.js";
+import { CAPABILITIES, type Capability, type Clients } from "./providers.js";
 
 /** Any JSON value. Step outputs, event payloads and run results must be serialisable to this. */
 export type Json = string | number | boolean | null | Json[] | { [key: string]: Json | undefined };
@@ -320,8 +320,8 @@ export interface BaseContext {
 
 /** The context passed to `run`: base context, a client per declared capability, and optional ones that may be absent. */
 export type Context<K extends Capability = never, P extends Capability = never> = BaseContext &
-  Pick<Providers, K> &
-  Partial<Pick<Providers, P>>;
+  Pick<Clients, K> &
+  Partial<Pick<Clients, P>>;
 
 export type AnySchema = z.ZodType;
 
