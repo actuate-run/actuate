@@ -1,6 +1,6 @@
 import { NOTIFY_OWNER, type DbStatement, type Json, type NotifyOwnerResult, type Row, type SqlValue, type Trigger, type WaitForApprovalOptions } from "@actuate/sdk";
 import { isButtonKind, isButtonNonce, isButtonRoute, newButtonNonce, type ButtonDecision } from "./buttons.js";
-import {
+import { keepCodeWellFormed, parseStepErrorInfo,
   fromJson,
   toJson,
   type Journal,
@@ -331,7 +331,7 @@ export class RunManager {
     } else if (outcome.status === "failed") {
       this.sql.exec(
         `UPDATE _actuate_runs SET status = 'FAILED', error_json = ?, wake_at = NULL, passes = ?, updated_at = ? WHERE run_id = ?`,
-        [toJson(this.redact(outcome.error)), passes, now, runId],
+        [toJson(keepCodeWellFormed(this.redact(outcome.error))), passes, now, runId],
       );
       this.bufferLog(runId, "error", outcome.error.message);
     } else {
@@ -633,6 +633,15 @@ export class RunManager {
     return (row?.wake_at as number | null) ?? null;
   }
 
+  /**
+   * Schedule the next wake-up from what the database says is waiting. For a host to call once when it opens the
+   * database and finds no alarm set: an alarm that came due while the object could not open (a runtime too old
+   * for its database was deployed, say) may have been given up on, and nothing else would set it again.
+   */
+  ensureWake(): Promise<void> {
+    return this.reschedule();
+  }
+
   private async reschedule(): Promise<void> {
     await this.options.scheduleWake?.(this.nextWakeAt());
   }
@@ -698,13 +707,17 @@ export class RunManager {
   private writeStep(runId: string, row: StepRow): void {
     // The error is shown as written (and thrown again on replay); the output stays raw for replay.
     const error = row.error === null ? null : this.redact(row.error);
+    // Kept only with a failure (a retried step that then completes loses it), and redacted like the message: a
+    // ToolError's details can quote a secret.
+    const info = row.status === "FAILED" ? parseStepErrorInfo(row.error_json) : null;
+    const errorJson = info ? toJson(keepCodeWellFormed(this.redact(info))) : null;
     this.sql.exec(
-      `INSERT INTO _actuate_steps (run_id, step_name, status, output_json, wake_at, event, attempts, error, seq, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO _actuate_steps (run_id, step_name, status, output_json, wake_at, event, attempts, error, error_json, seq, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (run_id, step_name) DO UPDATE SET status = excluded.status, output_json = excluded.output_json,
          wake_at = excluded.wake_at, event = excluded.event, attempts = excluded.attempts, error = excluded.error,
-         updated_at = excluded.updated_at`,
-      [runId, row.step_name, row.status, row.output_json, row.wake_at, row.event, row.attempts, error, ++this.seq + this.now() * 1000, this.now()],
+         error_json = excluded.error_json, updated_at = excluded.updated_at`,
+      [runId, row.step_name, row.status, row.output_json, row.wake_at, row.event, row.attempts, error, errorJson, ++this.seq + this.now() * 1000, this.now()],
     );
   }
 

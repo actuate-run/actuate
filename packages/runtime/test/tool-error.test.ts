@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
-import { NotSupportedError, ToolError, defineActuator, z, type Actuator, type Providers } from "@actuate/sdk";
+import { NotSupportedError, ToolError, defineActuator, toolErrorInfo, z, type Actuator, type Providers } from "@actuate/sdk";
 import { RunManager, executePass, nodeSqlite, serializeError } from "../src/index.js";
 
 function harness(actuator: Actuator, opts: { providers?: Partial<Providers>; secrets?: string[] } = {}) {
@@ -106,6 +106,96 @@ describe("ToolError", () => {
     expect(run).toMatchObject({ status: "COMPLETED", output: { status: "DECLINED", code: "CARD_DECLINED" } });
   });
 
+  it("is met again on replay with the same name, code and details, so a catch takes the same branch on every pass", async () => {
+    const seen: unknown[] = [];
+    const h = harness(
+      define(async (ctx) => {
+        try {
+          await ctx.step.do("charge", () => {
+            throw new ToolError("CARD_DECLINED", "The card was declined.", { retryable: true, details: { last4: "4242" } });
+          });
+        } catch (err) {
+          seen.push({ name: (err as Error).name, message: (err as Error).message, info: toolErrorInfo(err) });
+          if (toolErrorInfo(err)?.code !== "CARD_DECLINED") throw err;
+          await ctx.step.sleep("cool-off", "1 minute"); // the run suspends: the catch runs again on the next pass
+          return { status: "DECLINED" };
+        }
+      }),
+    );
+    const { run } = await h.start();
+    expect(run.status).toBe("WAITING");
+    await h.advance(60_000);
+    expect(h.manager.getRun(run.runId)).toMatchObject({ status: "COMPLETED", output: { status: "DECLINED" } });
+    const first = { name: "ToolError", message: "The card was declined.", info: { code: "CARD_DECLINED", retryable: true, details: { last4: "4242" } } };
+    expect(seen).toEqual([first, first]);
+  });
+
+  it("keeps its code when the actuator cleans up after it across a suspension and throws it again", async () => {
+    let releases = 0;
+    const h = harness(
+      define(async (ctx) => {
+        try {
+          await ctx.step.do("charge", () => {
+            throw new ToolError("CARD_DECLINED", "The card was declined.", { details: { last4: "4242" } });
+          });
+        } catch (err) {
+          await ctx.step.do("release-hold", { retries: 2, backoff: "1 second" }, () => {
+            if (++releases === 1) throw new Error("busy");
+          });
+          throw err;
+        }
+      }),
+    );
+    const { run } = await h.start();
+    expect(run.status).toBe("WAITING");
+    await h.advance(1_000);
+    const failed = h.manager.getRun(run.runId)!;
+    expect(failed.status).toBe("FAILED");
+    expect(failed.error).toMatchObject({ name: "ToolError", message: "The card was declined.", code: "CARD_DECLINED", retryable: false, details: { last4: "4242" } });
+  });
+
+  it("replays any step failure under the name it was thrown with", async () => {
+    const names: string[] = [];
+    const h = harness(
+      define(
+        async (ctx) => {
+          try {
+            await ctx.step.do("refund", () => (ctx as unknown as { payment: Required<Providers["payment"]> }).payment.refund({ billId: "b1" }));
+          } catch (err) {
+            names.push((err as Error).name);
+            if ((err as Error).name !== "NotSupportedError") throw err;
+            const ok = await ctx.step.waitForApproval("manual-refund", { message: "Refund by hand?" });
+            return { status: ok?.approved ? "MANUAL" : "DECLINED" };
+          }
+        },
+        { capabilities: ["payment"] } as never,
+      ),
+      { providers: { payment: { createBill: async () => never(), getBill: async () => never() } } },
+    );
+    const { run } = await h.start();
+    expect(run.status).toBe("WAITING");
+    await h.manager.decideDirect(run.runId, "manual-refund", true);
+    await h.manager.alarm();
+    expect(h.manager.getRun(run.runId)).toMatchObject({ status: "COMPLETED", output: { status: "MANUAL" } });
+    expect(new Set(names)).toEqual(new Set(["NotSupportedError"]));
+    expect(names.length).toBeGreaterThan(1);
+  });
+
+  it("stores a code that held a secret as REDACTED, still a well-formed code", async () => {
+    const h = harness(
+      define(async (ctx) => {
+        await ctx.step.do("leak", () => {
+          throw new ToolError("SK_LIVE_ABCDEF123456", "m");
+        });
+      }),
+      { secrets: ["SK_LIVE_ABCDEF123456"] },
+    );
+    const { run } = await h.start();
+    expect(run.error).toMatchObject({ name: "ToolError", code: "REDACTED" });
+    expect(toolErrorInfo(run.error)).toMatchObject({ code: "REDACTED" });
+    expect(JSON.stringify(h.manager.getSteps(run.runId))).not.toContain("SK_LIVE_ABCDEF123456");
+  });
+
   it("redacts secret config values in the message and the details", async () => {
     const h = harness(
       define(() => {
@@ -138,12 +228,21 @@ describe("serializeError", () => {
     expect(serializeError(Object.assign(new Error("m"), { name: "ToolError", code: "A", retryable: true }))).toMatchObject({ code: "A", retryable: true });
   });
 
+  it("stores something thrown that is shaped like a ToolError as one, as the step treats it", () => {
+    expect(serializeError({ name: "ToolError", code: "FAKE", message: "m" })).toEqual({ name: "ToolError", message: "m", code: "FAKE", retryable: false });
+    expect(serializeError({ name: "ToolError", code: "FAKE" })).toMatchObject({ message: "FAKE" });
+  });
+
   it("gives other errors no code, whatever properties they carry", () => {
     const stored = serializeError(Object.assign(new Error("ENOENT: no such file"), { code: "ENOENT", retryable: true, details: { a: 1 } }));
     expect(stored).toEqual({ name: "Error", message: "ENOENT: no such file", stack: expect.any(String) });
     expect(serializeError("boom")).toEqual({ name: "Error", message: "boom" });
   });
 });
+
+const never = (): never => {
+  throw new Error("not used");
+};
 
 describe("ctx.payment.refund", () => {
   const bill = { id: "b1", url: "https://pay.test/b1", status: "pending" as const, amount: 5, currency: "MYR", referenceId: "r" };

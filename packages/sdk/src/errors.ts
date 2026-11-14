@@ -97,9 +97,11 @@ export class ToolError extends Error {
 }
 
 /**
- * The code, retryable flag and details of a `ToolError`, or null for anything else. Goes by shape, not by
- * `instanceof`: an actuator's bundle can carry its own copy of this package, and an error that crossed an RPC
- * boundary is no longer an instance of anything here. A code that is not well formed is not a tool error.
+ * The code, retryable flag and details of a `ToolError`, or null for anything else. Goes by shape (the name
+ * `ToolError` and a well-formed code), not by `instanceof`: an actuator's bundle can carry its own copy of this
+ * package, and a step's failure met again on replay is a stand-in for the original error, with its name and
+ * code. An error that crossed a Workers RPC boundary keeps its name and properties only from compatibility date
+ * 2026-04-21 (`enhanced_error_serialization`); before that it arrives as a plain `Error` and is not recognised.
  */
 export function toolErrorInfo(err: unknown): { code: string; retryable: boolean; details?: unknown } | null {
   if (typeof err !== "object" || err === null) return null;

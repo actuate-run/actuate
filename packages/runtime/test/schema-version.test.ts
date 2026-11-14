@@ -38,6 +38,31 @@ describe("journal schema version", () => {
     expect(tables(db)).toEqual(["_actuate_approval_buttons", "_actuate_events", "_actuate_logs", "_actuate_meta", "_actuate_migrations", "_actuate_runs", "_actuate_steps"]);
   });
 
+  it("reports no version for a database that has none yet, without touching it", () => {
+    const db = new DatabaseSync(":memory:");
+    expect(journalSchemaVersion(nodeSqlite(db))).toBeNull();
+    expect(tables(db)).toEqual([]);
+  });
+
+  it("sets the wake-up again from the database when a host asks (an alarm dropped while it could not open)", async () => {
+    const db = new DatabaseSync(":memory:");
+    const clock = { now: Date.parse("2026-11-14T00:00:00Z") };
+    const { run } = await manager(db, clock).start({ input: {}, trigger: { kind: "api" } });
+    const wakes: Array<number | null> = [];
+    const reopened = new RunManager({
+      sql: nodeSqlite(db),
+      approvalSecret: "s",
+      approvalUrl: "https://example.test/approve",
+      now: () => clock.now,
+      consoleLogs: false,
+      scheduleWake: (at) => void wakes.push(at),
+      invoke: (request, journal) => executePass(sleeper, request, { journal, config: {} }),
+    });
+    expect(wakes).toEqual([]);
+    await reopened.ensureWake();
+    expect(wakes).toEqual([run.wakeAt]);
+  });
+
   it("changes nothing when a stamped database is opened again", () => {
     const db = new DatabaseSync(":memory:");
     applySchema(nodeSqlite(db));
@@ -59,11 +84,14 @@ describe("journal schema version", () => {
     const clock = { now: Date.parse("2026-11-14T00:00:00Z") };
     const { run } = await manager(db, clock).start({ input: {}, trigger: { kind: "api" } });
     expect(run.status).toBe("WAITING");
-    // As 0.5.0 left it: no version table. (The columns 0.5.0 added are covered in run-key and buttons tests.)
+    // As 0.5.0 left it: no version table, and steps that don't record what kind of error failed them.
+    // (The columns 0.5.0 added are covered in run-key and buttons tests.)
     db.exec(`DROP TABLE _actuate_meta`);
+    db.exec(`ALTER TABLE _actuate_steps DROP COLUMN error_json`);
 
     const upgraded = manager(db, clock);
     expect(stamp(db)).toBe(String(JOURNAL_SCHEMA_VERSION));
+    expect((db.prepare(`SELECT name FROM pragma_table_info('_actuate_steps')`).all() as Array<{ name: string }>).map((c) => c.name)).toContain("error_json");
     clock.now += 3_600_000;
     await upgraded.alarm();
     expect(upgraded.getRun(run.runId)).toMatchObject({ status: "COMPLETED", output: { before: "kept" } });

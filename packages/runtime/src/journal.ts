@@ -1,4 +1,4 @@
-import { TOOL_ERROR_MAX_DETAILS, toolErrorInfo, type DbStatement, type Json, type Row, type SqlValue, type Trigger, type WaitForApprovalOptions } from "@actuate/sdk";
+import { TOOL_ERROR_CODE, TOOL_ERROR_MAX_DETAILS, toolErrorInfo, type DbStatement, type Json, type Row, type SqlValue, type Trigger, type WaitForApprovalOptions } from "@actuate/sdk";
 
 export type StepStatus =
   | "RUNNING"
@@ -21,6 +21,43 @@ export interface StepRow {
   event: string | null;
   attempts: number;
   error: string | null;
+  /**
+   * For a FAILED step, the JSON of a {@link StepErrorInfo}: what kind of error failed it, so that a replay which
+   * reaches the step again throws the same kind as the pass that ran it. Absent on rows written before 0.6, and
+   * dropped by a host whose runtime predates it; the replay then throws a plain `StepFailedError`, as it always did.
+   */
+  error_json?: string | null;
+}
+
+/** What is kept of the error that failed a step, besides its message (`StepRow.error`). */
+export interface StepErrorInfo {
+  name: string;
+  /** A `ToolError`'s code, retryable flag and details. */
+  code?: string;
+  retryable?: boolean;
+  details?: Json;
+}
+
+/** The {@link StepErrorInfo} of an error thrown in a step. */
+export function stepErrorInfo(err: unknown): StepErrorInfo {
+  const { name, code, retryable, details } = serializeError(err);
+  return { name, ...(code === undefined ? {} : { code, retryable: retryable === true }), ...(details === undefined ? {} : { details }) };
+}
+
+/** Read a stored {@link StepErrorInfo}; null when there is none or it is not one. */
+export function parseStepErrorInfo(text: string | null | undefined): StepErrorInfo | null {
+  if (typeof text !== "string" || !text) return null;
+  try {
+    const value = JSON.parse(text) as Partial<StepErrorInfo> | null;
+    if (!value || typeof value !== "object" || typeof value.name !== "string" || !value.name) return null;
+    return {
+      name: value.name,
+      ...(typeof value.code === "string" ? { code: value.code, retryable: value.retryable === true } : {}),
+      ...(value.details === undefined ? {} : { details: value.details }),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export type LogLevel = "info" | "warn" | "error";
@@ -88,7 +125,22 @@ export function serializeError(err: unknown): SerializedError {
   if (err instanceof Error) {
     return { name: err.name, message: err.message, ...(err.stack ? { stack: err.stack } : {}), ...toolErrorFields(err) };
   }
+  // Something thrown that is not an Error but is shaped like a ToolError: the step treats it as one
+  // (isNonRetryable goes by shape), so the stored error does too.
+  const info = toolErrorInfo(err);
+  if (info) {
+    const message = (err as { message?: unknown }).message;
+    return { name: "ToolError", message: typeof message === "string" && message ? message : info.code, ...toolErrorFields(err) };
+  }
   return { name: "Error", message: String(err) };
+}
+
+/** The code a stored error gets when redaction changed its own: the code held a secret config value. */
+export const REDACTED_TOOL_ERROR_CODE = "REDACTED";
+
+/** After redaction: a code that is no longer a well-formed code (it held a secret) becomes `REDACTED`, so it still reads as a code. */
+export function keepCodeWellFormed<T extends { code?: unknown }>(error: T): T {
+  return typeof error.code === "string" && !TOOL_ERROR_CODE.test(error.code) ? { ...error, code: REDACTED_TOOL_ERROR_CODE } : error;
 }
 
 /** A `ToolError`'s code, retryable flag and details, as they are stored with the run. */

@@ -32,7 +32,7 @@ import {
   type WaitForEventOptions,
   type WaitForInputOptions,
 } from "@actuate/sdk";
-import { fromJson, serializeError, toJson, type Journal, type PassOutcome, type PassRequest, type StepRow } from "./journal.js";
+import { fromJson, parseStepErrorInfo, serializeError, stepErrorInfo, toJson, type Journal, type PassOutcome, type PassRequest, type StepErrorInfo, type StepRow } from "./journal.js";
 
 export const DEFAULT_APPROVAL_TIMEOUT = "7 days";
 const RESERVED_TABLE = /\b_actuate_/i;
@@ -63,14 +63,32 @@ const OPTIONAL_METHODS: Partial<Record<Capability, readonly string[]>> = {
   payment: ["refund"],
 };
 
-/** Thrown on replay when a step that failed permanently is reached again. */
+/**
+ * Thrown on replay when a step that failed permanently is reached again.
+ *
+ * It stands in for the error that failed the step: it has that error's message and name, and a `ToolError`'s
+ * `code`, `retryable` and `details`. So code that catches a step's failure and looks at `err.name`, or reads
+ * `toolErrorInfo(err)`, takes the same branch on every replay as it did in the pass that ran the step. It is not
+ * an instance of the original class: check the name or the code, not `instanceof`. A step that failed under a
+ * runtime before 0.6 has only its message, and the name `StepFailedError`.
+ */
 export class StepFailedError extends Error {
+  readonly code?: string;
+  readonly retryable?: boolean;
+  readonly details?: unknown;
+
   constructor(
     readonly step: string,
     message: string,
+    original?: StepErrorInfo | null,
   ) {
     super(message);
-    this.name = "StepFailedError";
+    this.name = original?.name ?? "StepFailedError";
+    if (original?.code !== undefined) {
+      this.code = original.code;
+      this.retryable = original.retryable === true;
+      if (original.details !== undefined) this.details = original.details;
+    }
   }
 }
 
@@ -214,7 +232,7 @@ class Pass {
 
       const existing = this.rows.get(name);
       if (existing?.status === "COMPLETED") return fromJson(existing.output_json) as T;
-      if (existing?.status === "FAILED") throw new StepFailedError(name, existing.error ?? "Step failed");
+      if (existing?.status === "FAILED") throw new StepFailedError(name, existing.error ?? "Step failed", parseStepErrorInfo(existing.error_json));
       if (existing?.status === "RETRYING" && existing.wake_at !== null && existing.wake_at > this.now()) {
         this.suspend(`step "${name}" waiting to retry`);
       }
@@ -231,7 +249,7 @@ class Pass {
         const retries = Math.min(options.retries ?? 0, this.request.limits?.maxRetries ?? 10);
         const message = err instanceof Error ? err.message : String(err);
         if (isNonRetryable(err) || attempt > retries) {
-          await this.write(this.row(name, { status: "FAILED", error: message, attempts: attempt }));
+          await this.write(this.row(name, { status: "FAILED", error: message, error_json: toJson(stepErrorInfo(err)), attempts: attempt }));
           throw err;
         }
         const backoff = parseDuration(options.backoff ?? "1 second") * 2 ** (attempt - 1);

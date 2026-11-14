@@ -75,6 +75,7 @@ export const SCHEMA = [
     event       TEXT,
     attempts    INTEGER NOT NULL DEFAULT 0,
     error       TEXT,
+    error_json  TEXT,                   -- a FAILED step: the error's name, and a ToolError's code, retryable and details (0.6.0)
     seq         INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL,
     PRIMARY KEY (run_id, step_name)
@@ -127,7 +128,8 @@ export const SCHEMA = [
  * major version or the one before it, runs that were sleeping or waiting included; and it refuses, without
  * writing, a database stamped by a newer runtime than itself.
  *
- * 1: the tables as of 0.6.0. Databases from 0.1 to 0.5 carry no stamp and are upgraded to 1 when first opened.
+ * 1: the tables as of 0.6.0 (0.5's, plus `_actuate_meta` and `_actuate_steps.error_json`). Databases from 0.1 to
+ * 0.5 carry no stamp and are upgraded to 1 when first opened.
  */
 export const JOURNAL_SCHEMA_VERSION = 1;
 
@@ -151,6 +153,12 @@ export class JournalVersionError extends Error {
 
 /** The journal schema version a database is stamped with, or null for one from before stamps (0.5 and earlier) or a new one. */
 export function journalSchemaVersion(sql: SqlDriver): number | null {
+  // Asked of sqlite_master first, so this can be called on any database: one with no version table has no stamp.
+  if (!sql.exec(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_actuate_meta'`).length) return null;
+  return stampOf(sql);
+}
+
+function stampOf(sql: SqlDriver): number | null {
   const row = sql.exec(`SELECT value FROM _actuate_meta WHERE key = 'schema_version'`)[0];
   if (!row) return null;
   const version = Number(row.value);
@@ -161,7 +169,8 @@ export function journalSchemaVersion(sql: SqlDriver): number | null {
 export function applySchema(sql: SqlDriver): void {
   sql.transaction(() => {
     sql.exec(META_TABLE);
-    const found = journalSchemaVersion(sql);
+    // The table exists now, so read the stamp directly (one statement fewer than journalSchemaVersion on every open).
+    const found = stampOf(sql);
     // Checked before anything else is created or altered: a newer database is left exactly as it was.
     if (found !== null && found > JOURNAL_SCHEMA_VERSION) throw new JournalVersionError(found, JOURNAL_SCHEMA_VERSION);
     if (found === JOURNAL_SCHEMA_VERSION) return;
@@ -181,6 +190,9 @@ function upgradeSchema(sql: SqlDriver, from: number): void {
     if (!columns.has("input_key")) sql.exec(`ALTER TABLE _actuate_runs ADD COLUMN input_key TEXT`);
     // Its own index, apart from idempotency_key: a derived key is released when a new run claims it (see RunManager.start).
     sql.exec(`CREATE UNIQUE INDEX IF NOT EXISTS _actuate_runs_input ON _actuate_runs (input_key) WHERE input_key IS NOT NULL`);
+    // What kind of error failed a step, so a replay throws the same kind. Steps that failed before have none.
+    const stepColumns = new Set(sql.exec(`SELECT name FROM pragma_table_info('_actuate_steps')`).map((r) => String(r.name)));
+    if (!stepColumns.has("error_json")) sql.exec(`ALTER TABLE _actuate_steps ADD COLUMN error_json TEXT`);
     // A buttons table from before kinds were recorded: its nonces stay unbound, so no click decides with them.
     const buttonColumns = new Set(sql.exec(`SELECT name FROM pragma_table_info('_actuate_approval_buttons')`).map((r) => String(r.name)));
     if (!buttonColumns.has("kind")) sql.exec(`ALTER TABLE _actuate_approval_buttons ADD COLUMN kind TEXT`);

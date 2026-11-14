@@ -235,6 +235,9 @@ export function createRuntime<E extends RuntimeEnv = RuntimeEnv>(actuator: Actua
             else await state.storage.setAlarm(Math.max(at, Date.now()));
           },
         });
+        // No alarm, though runs may be waiting: one that came due while this object could not open (see
+        // RunManager.ensureWake) was dropped after its retries. Set it again from the database.
+        if ((await state.storage.getAlarm()) === null) await this.manager.ensureWake();
       });
     }
 
